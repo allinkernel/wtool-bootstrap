@@ -396,14 +396,16 @@ cmd_provision() {
 # --------------------------------------------------------------------------
 cmd_bootstrap() {
     _no_system=0
+    _install_only=0
     for arg in "$@"; do
         case $arg in
-            --dry-run)     WTOOL_DRY_RUN=1 ;;
-            --force)       WTOOL_FORCE=1 ;;
-            --with-system) WTOOL_WITH_SYSTEM=1 ;;
-            --no-system)   _no_system=1 ;;
-            -*)            wt_die "未知参数: $arg" ;;
-            *)             wt_die "bootstrap 不接受位置参数: $arg" ;;
+            --dry-run)      WTOOL_DRY_RUN=1 ;;
+            --force)        WTOOL_FORCE=1 ;;
+            --with-system)  WTOOL_WITH_SYSTEM=1 ;;
+            --no-system)    _no_system=1 ;;
+            --install-only) _install_only=1 ;;
+            -*)             wt_die "未知参数: $arg" ;;
+            *)              wt_die "bootstrap 不接受位置参数: $arg" ;;
         esac
     done
 
@@ -425,8 +427,12 @@ cmd_bootstrap() {
         [ "$WTOOL_DRY_RUN" = 1 ] && _common="$_common --dry-run"
         _prov="$_common"
         [ "$WTOOL_WITH_SYSTEM" = 1 ] && [ "$_no_system" = 0 ] && _prov="$_prov --with-system"
-        # shellcheck disable=SC2086
-        cmd_provision "$_path" $_prov || wt_die "provision 失败: $_pid"
+        if [ "$_install_only" = 1 ]; then
+            wt_info "(--install-only：跳过换源/装包/编译，只做软链与注入)"
+        else
+            # shellcheck disable=SC2086
+            cmd_provision "$_path" $_prov || wt_die "provision 失败: $_pid"
+        fi
         # shellcheck disable=SC2086
         cmd_install "$_path" $_common || wt_die "install 失败: $_pid"
     done < "$_list"
