@@ -5,7 +5,18 @@
 # 复制成 install.sh / uninstall.sh 即可，靠自身文件名判断子命令。
 set -eu
 
-here=$(cd -- "$(dirname -- "$0")" && pwd)
+# 解析自身真实路径。
+# ⚠️ 必须处理软链：manifest 的 linkfile 会在仓库根目录放一个指向本脚本的软链，
+#    若直接用 "$0" 的目录，"项目目录"会被误判成"仓库根目录"，于是找不到引擎。
+self=$0
+while [ -L "$self" ]; do
+    target=$(readlink -- "$self")
+    case $target in
+        /*) self=$target ;;
+        *)  self=$(dirname -- "$self")/$target ;;
+    esac
+done
+here=$(cd -- "$(dirname -- "$self")" && pwd)
 
 case $(basename -- "$0") in
     install.sh)   cmd=install ;;
@@ -17,6 +28,7 @@ esac
 # bootstrap 定位顺序：
 #   1. $WTOOL_BOOTSTRAP
 #   2. 从本项目向上 4 层找 bootstrap/ 或 wtool-bootstrap/
+#      （仓库根目录的软链入口走这条：$here 是 <root>/bootstrap，上一级是 <root>）
 #   3. ~/.wtool/bootstrap
 boot=${WTOOL_BOOTSTRAP:-}
 if [ -z "$boot" ] || [ ! -x "$boot/wtool.sh" ]; then
