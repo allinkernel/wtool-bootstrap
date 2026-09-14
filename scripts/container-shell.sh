@@ -11,6 +11,8 @@
 #                  · --install-only  只做软链与注入，不跑 apt / 编译（最快）
 #                  · --no-system     不换系统源，但仍跑 ansible 装包
 #   WTOOL_MIRROR   指定镜像源主机名，如 mirrors.aliyun.com（默认自动挑）
+#   WTOOL_HEAVY=1  额外装重型工具链（clang/llvm/gcc/gdb/emacs，1GB+，很慢）
+#                  不设就只装基础包（zsh/tmux/vim/ripgrep/构建基础），快很多
 #   WTOOL_DIR      挂载点，默认 /wtool
 #
 # 设计约束（都是踩出来的，见 harness/doc/06-排错.md）：
@@ -104,6 +106,11 @@ say "    wtool bootstrap $WTOOL_ARGS"
 say "4/4 完成，进入 zsh"
 BADGE=$(grep -c '>>> wtool:' "$HOME/.zshrc" 2>/dev/null || echo 0)
 printf '    ~/.zshrc 里 %s 个 wtool 块\n' "$BADGE"
+if [ -n "${WTOOL_HEAVY:-}" ]; then
+    printf '    重型工具链(clang/llvm/emacs): 已要求安装\n'
+else
+    printf '    重型工具链(clang/llvm/emacs): 未装（要装就加 -e WTOOL_HEAVY=1）\n'
+fi
 printf '    %s\n' "$(grep -o 'wtool:[a-z/-]*' "$HOME/.zshrc" 2>/dev/null | sort -u | tr '\n' ' ')"
 cat <<'TIP'
 

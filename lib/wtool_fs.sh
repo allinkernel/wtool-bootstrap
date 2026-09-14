@@ -428,6 +428,9 @@ wt_task_run() {
         export WTOOL_PREFIX WTOOL_OS_ID WTOOL_OS_VERSION WTOOL_OS_CODENAME WTOOL_OS_LIKE
         export WTOOL_ARCH WTOOL_JOBS
         export WTOOL_PROJECT_ID WTOOL_PROJECT_DIR WTOOL_PROJECT_ROOT
+        # 无人值守：debconf 的交互提问会把任务挂死（容器里没人回答）
+        DEBIAN_FRONTEND=noninteractive
+        export DEBIAN_FRONTEND
         export WTOOL_SOURCE_DIR="${WTOOL_SOURCE_DIR:-}"
         export WTOOL_SOURCE_REF="${WTOOL_SOURCE_REF:-}"
         cd "$_cwd" || exit 1

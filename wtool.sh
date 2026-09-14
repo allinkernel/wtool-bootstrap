@@ -318,6 +318,11 @@ wt_when_match() {
             os:*)    [ "$WTOOL_OS_ID" = "${_c#os:}" ] || return 1 ;;
             '!os:'*) [ "$WTOOL_OS_ID" != "${_c#!os:}" ] || return 1 ;;
             arch:*)  [ "$WTOOL_ARCH" = "${_c#arch:}" ] || return 1 ;;
+            env:*)
+                eval "_v=\${${_c#env:}:-}"
+                case $(printf '%s' "$_v" | tr 'A-Z' 'a-z') in
+                    ""|0|false|no) return 1 ;;
+                esac ;;
             *)       wt_warn "未知 when 条件，按不匹配处理: $_c"; return 1 ;;
         esac
     done

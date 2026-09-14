@@ -727,7 +727,11 @@ def _rcs_with_our_block(home, project_id):
 
 
 def when_matches(when, os_id, arch):
-    """逗号分隔 = AND。支持 os:ubuntu / !os:debian / arch:x86_64。"""
+    """逗号分隔 = AND。
+
+    支持：os:ubuntu / !os:debian / arch:x86_64 / env:WTOOL_HEAVY
+    env:NAME 表示"环境变量 NAME 有值且不是 0/false" —— 用来做可选的重型步骤。
+    """
     if not when:
         return True
     for cond in when.replace(",", " ").split():
@@ -739,6 +743,10 @@ def when_matches(when, os_id, arch):
                 return False
         elif cond.startswith("arch:"):
             if arch != cond[5:]:
+                return False
+        elif cond.startswith("env:"):
+            raw = os.environ.get(cond[4:], "")
+            if raw.strip().lower() in ("", "0", "false", "no"):
                 return False
         else:
             return False        # 未知条件按不匹配处理，避免误执行
@@ -832,6 +840,11 @@ def plan_provision(args, scratch):
                     abs_src = cand
             if not abs_src:
                 errors.append("provision src 找不到（项目根或 overlay/ 下都没有）: %s" % entry.src)
+                continue
+            # 计划阶段就把 when 不匹配的任务剔掉，这样 --dry-run 报的数字是准的
+            if not when_matches(entry.when, args.os_id, args.arch):
+                warnings.append("when=%s 不匹配，跳过任务 %s"
+                                % (entry.when, entry.desc or entry.src))
                 continue
             task_rows.append((entry.runner, abs_src, entry.marker,
                               entry.desc or entry.src, entry.when))
