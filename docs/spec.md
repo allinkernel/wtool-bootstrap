@@ -200,7 +200,6 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 
 | 能力 | 设计草案 | 为什么现在就要想 |
 |---|---|---|
-| **provision（安装软件/编译）** | 清单加 `<task src="provision.sh" when="os:ubuntu"/>`；**独立子命令** `wtool provision`，不进 install | install 必须保持可逆；编译/apt 不可逆，混在一起就毁掉"完全配对" |
 | **system scope（写 $HOME 之外）** | `<copy src= dest=/etc/... scope="system"/>`，必须显式 `--allow-system` + sudo，且**不记入 journal**（不可逆），只输出"如何手工撤销" | mytool 的 `os` 项目要改 `/etc/apt/sources.list` |
 | **多 shell** | `shells="zsh,bash"` 已支持；`fish`/`nu` 需要新的 rc 注入策略 | 项目里 `env` 只写 zsh 是现状，先按 zsh 落地 |
 | **`--exact`** | uninstall 时用 `head` 从 git 历史取出当时的 `wtool.xml` 推导逆操作 | 比 journal 更严，但 journal 已经够用 |
@@ -225,10 +224,11 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | 7 | 连续 3 次 install 后 uninstall | 仍完全回退（回归：曾因 journal 被清空而失败） |
 | 8 | rc 块加载 env / 仓库搬家 | env 变量被正确导出；搬仓库后 rc 块字节不变、`WTOOL_PROJECT_ROOT` 指向新位置 |
 
-共 20 条断言。跑法：
+共 27 条断言。跑法：
 
 ```sh
-./tests/pairing_test.sh      # 期望 PASS: 20  FAIL: 0
+./tests/run_all.sh           # 四组全跑：pairing 27 + provision 24 + publish 20 + table 23
+./tests/pairing_test.sh      # 只跑这一组
 ```
 
 ---
@@ -354,3 +354,121 @@ apt-get update && apt-get install -y --no-install-recommends \
 ```
 
 `wtool bootstrap` 必须在第 1 步之后才能跑；引擎检测到缺 `python3` 会直接报错。
+
+---
+
+## 13. publish 层（把项目发成 release 资产）
+
+`install` 管"这台机器上装好了没有"，`provision` 管"系统层面备齐了没有"，
+`publish` 管"这些东西怎么到另一台机器上"。
+
+### 三种行为，由项目自己的 wtool.xml 声明
+
+| 声明 | 行为 |
+|---|---|
+| 没有 `<publish>`，或 `<publish kind="source"/>` | 引擎打源码包，推到**项目自己 remote** 的 release |
+| `<publish kind="script" script="publish.sh"/>` | 引擎只给环境和产物目录，脚本产出，引擎上传 |
+| `<publish kind="none"/>` | 不发布（第三方上游仓等） |
+
+属性：`tag`（strftime 模板，默认 `snapshot-%Y-%m-%d`）、`to`（推到别的仓）、
+`asset`（资产名前缀）。子元素：
+
+| 子元素 | 用途 |
+|---|---|
+| `<sub path=".." kind=".."/>` | 替子树里**没有 wtool.xml 的项目**表态 |
+| `<target os=".." version=".."/>` | 目标系统矩阵，给 kind="script" 的脚本读 |
+
+`<sub>` 存在的理由：上游仓（`neovim/neovim`）我们既没权限推 release，也**不能往里塞
+wtool.xml**（那是别人的源码树）。所以"这个子项目不发布"这件事只能从伞项目外面声明。
+
+### 源码包的形状
+
+```
+$ tar -C "$WTOOL_ROOT" --transform='s|^|wtool/|' --exclude='.git' -cf - terminal/tmux
+wtool/terminal/tmux/bin/net.sh
+wtool/terminal/tmux/install.sh
+...
+wtool/.wtool-dist/terminal-tmux.json     ← 发布副本标记
+```
+
+三个要点：
+
+1. **第一层固定是 `wtool/`**，用 `--transform` 生成，跟本机工作区目录叫什么无关。
+   发布产物不该依赖本机目录名——哪天把 `~/self/wtool` 改个名，所有包的形状就全歪了。
+2. 解压到工作区的上一层（`tar -xf pkg -C ~/self/`），得到的路径和 `repo sync` 出来的
+   **完全一致**。所以解压完 wtool 命令和表格直接可用——wtool 引擎不需要 `.repo`，
+   那是 `repo` 工具自己要的。
+3. 带 `--exclude='.git'`：解压副本不是 git 仓库，`--exclude` 去掉 `.git` 会让
+   `install` 的前置检查拒绝。`.wtool-dist/<id>.json` 就是给这个用的标记，
+   记下 `commit`/`repo`/`packed_at`，顺带补上块头里 `head=` 的溯源信息。
+
+### 第三方仓保护
+
+推送前查 `gh repo view <repo> --json viewerPermission`。没有写权限就拒绝并说明，
+`--allow-foreign` 可以强行试。这样 `wtool publish` 不带参数扫全仓时，
+不会撞到上游仓才失败。
+
+### 命令
+
+```sh
+wtool publish                              # 发布所有声明过的项目
+wtool publish tmux                         # 支持 id 末段
+wtool publish terminal/tmux ./terminal/tmux  # 也支持完整 id 和路径
+wtool publish astronvim_v5 --tag=v1 --dry-run
+wtool publish tmux --out=/tmp/pkg          # 产物留在那里，先看看再传
+```
+
+`kind="script"` 的脚本能拿到的环境变量：`WTOOL_PUBLISH_PROJECT`、`_ROOT`、`_WS`、
+`_REPO`、`_TAG`、`_OUT`、`_DATE`、`_FORCE`。全局设置 `WTOOL_PUBLISH_PREFIX` 可以改
+`wtool/` 这个前缀名。**把要上传的文件放进 `$WTOOL_PUBLISH_OUT` 即可**，建 release 和
+上传由引擎统一做——这样 gh 的调用、tag、权限检查只有一份实现，脚本也能单独 dry-run。
+
+本地发布历史记在 `$WTOOL_STATE/<id>/publish.tsv`，离线也能在表格里看到发过没有。
+
+### 实测
+
+`tests/publish_test.sh`（20 条，全程用打桩的 `gh`，不碰网络和真 `$WTOOL_STATE`）：
+源码包第一层是 `wtool/`、不含 `.git`、带 `.wtool-dist` 标记且 commit 对得上、
+`kind="none"` 的项目不产生任何 gh 调用、脚本型项目的产出被完整上传。
+
+---
+
+## 14. 能力表格
+
+`wtool`（不带参数）和 `wtool doctor` 的末尾都会打印：
+
+```
+项目                                     prio  install  provision  publish  uninstall
+-------------------------------------------------------------------------------------
+bootstrap                                5     -        .          -        -
+os/ubuntu                                5     .        -          -        .
+editor/astronvim_v5                      70    .        .          -        .
+editor/astronvim_v5/nvim                 100   .        .          .        .
+```
+
+格子语义（三个符号，用 ASCII 是因为终端里算不准字宽的字符会让整张表错位）：
+
+| 符号 | 含义 |
+|---|---|
+| `+` | 已经做了 |
+| `-` | 能做但还没做（TODO） |
+| `.` | 这个项目没这项能力 |
+
+判定依据（只读文件，不写）：
+
+| 列 | `+` 的条件 | 数据来源 |
+|---|---|---|
+| `install` / `uninstall` | journal 里有非注释行，或 registry 里登记了它的软链 | `$WTOOL_STATE/<id>/journal.tsv`、`registry.tsv` |
+| `provision` | marker 目录非空，或写系统文件的记录存在 | `$WTOOL_STATE/<id>/provisioned/`、`system/` |
+| `publish` | 本地有发布记录 | `$WTOOL_STATE/<id>/publish.tsv` |
+
+"有没有这项能力"来自清单本身：`install` 看有没有 `<link>`/`<env>`，
+`provision` 看有没有 `<system-file>`/`<source>`/`<provision>`，`publish` 看
+`<publish kind>` 是不是 `none`。所以一个只声明了 `<publish>` 的项目，
+`install` 列是 `.` 而不是 `-`——它不是"没装"，是根本没有可装的东西。
+
+`--verbose` 加逐项目细节，`--summary` 加一行汇总。表格用的是 CJK 双宽对齐，
+`tests/table_test.sh`（23 条）会验证格子语义和列起始位置。
+
+`build` 和 `update` 目前没有独立列：构建是 `publish.sh` / `install.sh` 内部的事
+（见 `editor/astronvim_v5/`），等它们变成引擎能力再加进来。

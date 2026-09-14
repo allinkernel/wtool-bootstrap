@@ -211,3 +211,65 @@ repo 的 manifest 用 `x-*` 保留给用户。这里同样：**自定义元素�
   <provision src="wsw.sh" marker="nvim-{ref}" desc="编译安装 neovim 到 ~/.wtool/usr"/>
 </wtool>
 ```
+
+## `<publish>` —— 这个项目怎么发布
+
+不给 `<publish>` 就等于 `kind="source"`：引擎把源码打成包推到项目自己 remote 的 release。
+
+```xml
+<publish kind="script" script="publish.sh" tag="snapshot-%Y-%m-%d">
+  <target os="ubuntu" version="24.04" codename="noble"/>
+  <sub path="astronvim_v5_config" kind="source"/>
+  <sub path="nvim" kind="none"/>
+</publish>
+```
+
+| 属性 | 说明 |
+|---|---|
+| `kind` | `source`（默认）/ `script` / `none` |
+| `script` | `kind="script"` 时必填，相对项目根 |
+| `tag` | release tag，strftime 模板，默认 `snapshot-%Y-%m-%d` |
+| `to` | 推到别的仓（默认取项目 remote）。用来把产物推到伞项目自己的仓 |
+| `asset` | 资产名前缀 |
+
+| 子元素 | 说明 |
+|---|---|
+| `<sub path kind to>` | 替子树里**没有 wtool.xml 的项目**表态 |
+| `<target os version codename image>` | 目标系统矩阵 |
+
+### 什么时候需要 `<sub>`
+
+上游仓不能往里塞 `wtool.xml`（那是别人的源码树），所以"这个子项目不参与发布"
+只能从伞项目外面声明：
+
+```xml
+<project path="editor/astronvim_v5" name="allinkernel/wtool-astronvim_v5.git"/>
+<project path="editor/astronvim_v5/nvim" name="neovim/neovim.git"/>
+```
+
+`nvim` 指向上游，我们既没权限推它的 release，也不能改它，于是在伞项目的 wtool.xml 里：
+
+```xml
+<sub path="nvim" kind="none"/>
+```
+
+没被任何 `<sub>` 覆盖、自己也没有 `wtool.xml` 的项目，默认按 `source` 处理。
+
+### 校验
+
+| 规则 | 结果 |
+|---|---|
+| `kind` 不在 `source`/`script`/`none` | 拒绝 |
+| `kind="script"` 但没写 `script` | 拒绝 |
+| `script` 含 `..` | 拒绝 |
+| `<sub path>` 含 `..` | 拒绝 |
+| `<target>` 缺 `os` 或 `version` | 拒绝 |
+| `<publish>` 里出现其它子元素 | 拒绝 |
+
+发布时的运行时检查（不在 `validate` 里，因为要联网）：
+
+| 检查 | 行为 |
+|---|---|
+| 项目不是 git 仓库 | 跳过（打不出有意义的包） |
+| 工作区有未提交改动 | 拒绝，`--force` 可绕过（包里的 `dirty` 会记 true） |
+| 目标仓没有写权限 | 拒绝并说明，`--allow-foreign` 可强行试 |

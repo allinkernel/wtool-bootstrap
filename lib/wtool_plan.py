@@ -975,6 +975,175 @@ def _write_meta(scratch, mapping):
 
 
 # --------------------------------------------------------------------------
+# 表格：一行一个项目，一列一个能力
+#
+# 三个符号的约定（沿用 wtool 的一贯语义）：
+#   +  已经做了        -  能做但还没做（TODO）        .  这个项目没这项能力
+# 用 ASCII 而不是 emoji/勾号，是因为终端字宽算不准的字符会让整张表错位。
+# --------------------------------------------------------------------------
+def _width(text):
+    """显示宽度：CJK 和全角符号占 2 列，其余占 1 列。"""
+    w = 0
+    for ch in text:
+        o = ord(ch)
+        if (0x1100 <= o <= 0x115F or 0x2E80 <= o <= 0xA4CF or
+                0xAC00 <= o <= 0xD7A3 or 0xF900 <= o <= 0xFAFF or
+                0xFE30 <= o <= 0xFE6F or 0xFF00 <= o <= 0xFF60 or
+                0xFFE0 <= o <= 0xFFE6):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
+def _pad(text, width):
+    return text + " " * max(0, width - _width(text))
+
+
+def _read_tsv(path):
+    rows = []
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                rows.append(line.split("\t"))
+    except OSError:
+        pass
+    return rows
+
+
+def project_state(project_root, state_dir):
+    """从 state 目录读出这个项目"做到哪一步了"。只看文件，不写。"""
+    pid = os.path.relpath(os.path.abspath(project_root),
+                          os.environ.get("WTOOL_ROOT", project_root))
+    if pid in (".", "/"):
+        pid = os.path.basename(project_root)
+    pdir = os.path.join(state_dir, pid)
+
+    # install 过没有：journal 里有非注释行，或者 registry 里登记了它的软链
+    journal = os.path.join(pdir, "journal.tsv")
+    installed = any(True for _ in _read_tsv(journal))
+    if not installed:
+        for row in _read_tsv(os.path.join(state_dir, "registry.tsv")):
+            if len(row) >= 2 and row[1] == pid:
+                installed = True
+                break
+
+    # provision 过没有：marker 目录里有东西，或者 provision.log 里记了
+    prov_dir = os.path.join(pdir, "provisioned")
+    markers = 0
+    if os.path.isdir(prov_dir):
+        markers = len(os.listdir(prov_dir))
+    sysdir = os.path.join(pdir, "system")
+    sysfiles = len(os.listdir(sysdir)) if os.path.isdir(sysdir) else 0
+    provisioned = markers > 0 or sysfiles > 0
+
+    # 发布过没有：本地发布记录
+    published = any(True for _ in _read_tsv(os.path.join(pdir, "publish.tsv")))
+
+    return {"id": pid, "installed": installed, "provisioned": provisioned,
+            "published": published, "markers": markers, "sysfiles": sysfiles}
+
+
+def _cap(state, applicable):
+    """一个能力格子：. 没这项能力；+ 做了；- 能做没做。"""
+    if not applicable:
+        return "."
+    return "+" if state else "-"
+
+
+def render_table(root, state_dir, verbose=False):
+    """画表格。返回文本行列表。"""
+    state_dir = os.path.abspath(state_dir)
+    projects = []
+    for prio, pid, path, pub in scan_projects(root):
+        st = project_state(path, state_dir)
+        st["id"] = pid
+        st["prio"] = prio
+        st["path"] = path
+        st["pub"] = pub
+
+        # 这个项目有没有"可 provision 的东西"：看清单里有没有这几类条目
+        errors = []
+        entries = []
+        wf = os.path.join(path, "wtool.xml")
+        if os.path.isfile(wf):
+            _m, entries = parse_manifest(wf, path, errors)
+        kinds = {e.kind for e in entries}
+        has_prov = bool(kinds & {"sysfile", "source", "task"})
+        has_install = bool(kinds & {"link", "env"})
+
+        st["cap_install"] = has_install
+        st["cap_prov"] = has_prov
+        st["cap_pub"] = pub["kind"] != "none"
+        projects.append(st)
+
+    # 列宽
+    c_id = max([_width("项目")] + [_width(p["id"]) for p in projects]) if projects else 4
+    headers = ["项目", "prio", "install", "provision", "publish", "uninstall"]
+    widths = [c_id, 4, 7, 9, 7, 9]
+
+    out = []
+    head = "  ".join(_pad(h, w) for h, w in zip(headers, widths))
+    out.append(head.rstrip())
+    out.append("-" * _width(head))
+
+    for p in projects:
+        cells = [
+            _pad(p["id"], widths[0]),
+            _pad(str(p["prio"]), widths[1]),
+            _pad(_cap(p["installed"], p["cap_install"]), widths[2]),
+            _pad(_cap(p["provisioned"], p["cap_prov"]), widths[3]),
+            _pad(_cap(p["published"], p["cap_pub"]), widths[4]),
+            # 卸载：装了才谈得上卸，没装就是"还没做"
+            _pad(_cap(p["installed"], p["cap_install"]), widths[5]),
+        ]
+        out.append("  ".join(cells).rstrip())
+
+    if verbose:
+        out.append("")
+        for p in projects:
+            detail = []
+            if p["cap_install"]:
+                detail.append("装过" if p["installed"] else "没装")
+            if p["cap_prov"]:
+                d = []
+                if p["markers"]:
+                    d.append("%d 个 marker" % p["markers"])
+                if p["sysfiles"]:
+                    d.append("%d 个系统文件" % p["sysfiles"])
+                detail.append("provision: " + ("、".join(d) if d else "没跑过"))
+            if p["pub"]["kind"] == "none":
+                detail.append("不发布")
+            elif p["published"]:
+                detail.append("发布过")
+                recs = _read_tsv(os.path.join(state_dir, p["id"], "publish.tsv"))
+                if recs:
+                    detail.append("最近 %s @ %s" % (recs[-1][2] if len(recs[-1]) > 2 else "?",
+                                                   recs[-1][1] if len(recs[-1]) > 1 else "?"))
+            elif p["pub"]["kind"] == "script":
+                detail.append("发布走脚本 %s" % (p["pub"]["script"] or "?"))
+            else:
+                detail.append("没发布过")
+            out.append("  %s  %s" % (_pad(p["id"], c_id), "；".join(detail)))
+
+    return out, projects
+
+
+def table_summary(projects):
+    """一句话汇总，给 wtool doctor 用。"""
+    n = len(projects)
+    installed = sum(1 for p in projects if p["installed"])
+    pub = sum(1 for p in projects if p["published"])
+    todo_pub = sum(1 for p in projects
+                   if p["pub"]["kind"] != "none" and not p["published"])
+    return ("共 %d 个项目：已安装 %d，已发布 %d，可发布未发布 %d"
+            % (n, installed, pub, todo_pub))
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 def scan_projects(root):
@@ -1111,6 +1280,12 @@ def build_parser():
 
     pi = sub.add_parser("publish-info")
     pi.add_argument("project")
+
+    tb = sub.add_parser("table")
+    tb.add_argument("--root", required=True)
+    tb.add_argument("--state", required=True)
+    tb.add_argument("--verbose", action="store_true")
+    tb.add_argument("--summary", action="store_true")
     return p
 
 
@@ -1147,6 +1322,14 @@ def main(argv):
             publish_list(args.root)
         elif args.cmd == "publish-info":
             return publish_info(args.project)
+        elif args.cmd == "table":
+            lines, projects = render_table(args.root, args.state,
+                                           verbose=args.verbose)
+            for line in lines:
+                print(line)
+            if args.summary:
+                print()
+                print(table_summary(projects))
         elif args.cmd == "validate":
             errors, warnings = [], []
             root = os.path.abspath(args.project)

@@ -10,6 +10,8 @@
 #                      走项目内 publish.sh。不带参数则发布所有声明过的项目。
 #   wtool.sh bootstrap [--with-system|--no-system|--install-only|--dry-run|--force]
 #   wtool.sh status    [<项目目录>]
+#   wtool.sh table     [--verbose] [--summary]
+#                      一行一个项目、一列一个能力；不带参数跑 wtool 也是这个
 #   wtool.sh list
 #   wtool.sh validate  <项目目录>
 #   wtool.sh doctor
@@ -493,6 +495,30 @@ cmd_doctor() {
     _n=0
     [ -f "$WTOOL_REGISTRY" ] && _n=$(grep -c . "$WTOOL_REGISTRY" 2>/dev/null || echo 0)
     wt_info "registered  : $_n 条"
+    echo
+    cmd_table --verbose --summary
+}
+
+# --------------------------------------------------------------------------
+# wtool table —— 一行一个项目，一列一个能力
+#
+#   +  已经做了     -  能做但还没做（TODO）     .  这个项目没这项能力
+# 用 ASCII 而不是 emoji/勾号：终端里算不准的字符宽会让整张表错位。
+# --------------------------------------------------------------------------
+cmd_table() {
+    _args=""
+    for _a in "$@"; do
+        case $_a in
+            --verbose|-v) _args="$_args --verbose" ;;
+            --summary|-s) _args="$_args --summary" ;;
+            -*) wt_die "未知参数: $_a（可用 --verbose --summary）" ;;
+            *)  wt_die "table 不接受位置参数: $_a" ;;
+        esac
+    done
+    # shellcheck disable=SC2086
+    python3 "$PY" table --root "$WTOOL_ROOT" --state "$WTOOL_STATE" $_args
+    echo
+    printf '+ 已完成   - 待做(TODO)   . 无此能力\n'
 }
 
 # --------------------------------------------------------------------------
@@ -867,15 +893,20 @@ case $_cmd in
     publish)   cmd_publish "$@" ;;
     bootstrap) cmd_bootstrap "$@" ;;
     list)      cmd_list "$@" ;;
+    table)     cmd_table "$@" ;;
     status)    cmd_status "$@" ;;
     doctor)    cmd_doctor "$@" ;;
     env)       cmd_env "$@" ;;
     scaffold)  cmd_scaffold "$@" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;
-    ""|-h|--help|help)
+    -h|--help|help)
         # 打印文件头的注释块，不写死行号（否则加一行用法就错位）
         awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"
+        ;;
+    "")
+        # 不带参数 = 看板：哪些项目装过、provision 过、发布过
+        cmd_table --verbose --summary
         ;;
     *) wt_die "未知命令: $_cmd（用 --help 查看用法）" ;;
 esac
