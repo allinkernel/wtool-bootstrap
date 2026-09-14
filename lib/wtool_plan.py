@@ -33,6 +33,15 @@ ENGINE_VERSION = "1.0.0"
 SCHEMA_SUPPORTED = (1,)
 DEFAULT_PRIORITY = 100
 
+# publish 的默认行为：没有 <publish> 声明的项目按源码打包推送
+DEFAULT_PUBLISH_TAG = "snapshot-%Y-%m-%d"
+PUBLISH_KINDS = ("source", "script", "none")
+# source 包的第一层目录名固定，跟本机工作区目录叫什么无关
+PUBLISH_ARCHIVE_PREFIX = "wtool"
+# 打进源码包的排除项（tar --exclude 的 glob；实测裸 .git 能匹配任意层级）
+PUBLISH_EXCLUDES = (".git", "__pycache__", "*.pyc", "*.pyo",
+                    ".mypy_cache", ".pytest_cache", ".ruff_cache", "*.log")
+
 # 哪些 shell 有"用户级 rc 文件"可以注入
 RC_FILE_BY_SHELL = {"zsh": ".zshrc", "bash": ".bashrc"}
 RC_CAPABLE_SHELLS = tuple(RC_FILE_BY_SHELL)
@@ -129,11 +138,78 @@ def parse_manifest(path, project_root, errors):
         "priority": default_prio,
         "manifest_path": path,
         "manifest_sha": sha256_text(text),
+        # 没写 <publish> 就等于 kind="source"：打包源码推到本项目自己 origin 的 release。
+        "publish": {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
+                    "asset": "", "subs": [], "targets": []},
     }
 
     entries = []
     _parse_children(root, project_root, path, meta, entries, errors, depth=0)
     return meta, entries
+
+
+def _parse_publish(node, meta, manifest_path, errors):
+    """<publish>：项目声明自己怎么发布。
+
+    kind="source"（默认）  引擎打源码包 → 推到本项目 origin 的 release
+    kind="script"          调用项目内脚本，由脚本产出并上传
+    kind="none"            不参与发布（第三方上游仓等）
+    """
+    kind = (node.get("kind") or "source").strip()
+    if kind not in PUBLISH_KINDS:
+        errors.append("<publish kind=%r> 只能是 %s（%s）"
+                      % (kind, "/".join(PUBLISH_KINDS), manifest_path))
+        return
+    script = (node.get("script") or "").strip()
+    if kind == "script":
+        if not script:
+            errors.append("<publish kind=\"script\"> 必须写 script=xxx.sh（%s）"
+                          % manifest_path)
+            return
+        if not is_safe_rel(script):
+            errors.append("<publish script=%r> 必须是不含 .. 的相对路径" % script)
+            return
+
+    info = {
+        "kind": kind,
+        "script": script,
+        "tag": (node.get("tag") or DEFAULT_PUBLISH_TAG).strip(),
+        # 发布目标仓：默认取项目 origin；写 to= 可以推到别的仓
+        "to": (node.get("to") or "").strip(),
+        "asset": (node.get("asset") or "").strip(),
+        "subs": [],
+        "targets": [],
+    }
+
+    for child in node:
+        if child.tag == "sub":
+            # 替子树里"没有 wtool.xml 的项目"表态。
+            # 上游仓（neovim/neovim）不能往里塞 wtool.xml，只能从外面声明。
+            path = (child.get("path") or "").strip()
+            sub_kind = (child.get("kind") or "source").strip()
+            if not path or not is_safe_rel(path):
+                errors.append("<sub path=%r> 必须是相对路径" % path)
+                continue
+            if sub_kind not in PUBLISH_KINDS:
+                errors.append("<sub kind=%r> 只能是 %s" % (sub_kind,
+                                                          "/".join(PUBLISH_KINDS)))
+                continue
+            info["subs"].append({"path": path.rstrip("/"), "kind": sub_kind,
+                                 "to": (child.get("to") or "").strip()})
+        elif child.tag == "target":
+            os_id = (child.get("os") or "").strip()
+            version = (child.get("version") or "").strip()
+            if not os_id or not version:
+                errors.append("<target> 需要 os= 和 version=（%s）" % manifest_path)
+                continue
+            info["targets"].append({"os": os_id, "version": version,
+                                    "codename": (child.get("codename") or "").strip(),
+                                    "image": (child.get("image") or "").strip()})
+        else:
+            errors.append("<publish> 里不认识 <%s>，只支持 <sub>/<target>（%s）"
+                          % (child.tag, manifest_path))
+
+    meta["publish"] = info
 
 
 def _parse_children(node, project_root, manifest_path, meta, entries, errors, depth):
@@ -242,6 +318,10 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                                  when=child.get("when") or "",
                                  desc=child.get("desc") or "",
                                  manifest=manifest_path))
+
+        elif tag == "publish":
+            # 发布能力声明：不是安装动作，只记进 meta
+            _parse_publish(child, meta, manifest_path, errors)
 
         elif tag == "include":
             src = child.get("src")
@@ -897,10 +977,16 @@ def _write_meta(scratch, mapping):
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
-def list_projects(root):
-    """扫描工作区里所有 wtool.xml，按 (priority, id) 排序输出。"""
+def scan_projects(root):
+    """扫描工作区里所有项目，返回 [(priority, id, abspath, publish_info)]。
+
+    除了有 wtool.xml 的项目，还会补上被 <sub> 声明的子项目——上游仓
+    （如 neovim/neovim）不可能往里塞 wtool.xml，只能由伞项目从外面替它表态。
+    """
     root = os.path.abspath(root)
     found = []
+    declared = {}          # abspath -> publish_info（来自 <sub>）
+
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames
                        if d not in (".repo", ".git", "node_modules", "__pycache__")]
@@ -911,10 +997,75 @@ def list_projects(root):
                                         dirpath, errors)
         if meta is None:
             continue
-        found.append((meta["priority"], meta["id"] or os.path.basename(dirpath), dirpath))
+        found.append((meta["priority"], meta["id"] or os.path.basename(dirpath),
+                      dirpath, meta["publish"]))
+        # 记下伞项目替子树表的态
+        for sub in meta["publish"]["subs"]:
+            sub_abs = os.path.normpath(os.path.join(dirpath, sub["path"]))
+            declared[sub_abs] = dict(sub, _by=meta["id"] or os.path.basename(dirpath))
         dirnames[:] = []          # 项目内部不再嵌套项目
-    for prio, pid, path in sorted(found):
+
+    known = {os.path.abspath(p) for _prio, _pid, p, _pub in found}
+    for sub_abs, sub in sorted(declared.items()):
+        if os.path.abspath(sub_abs) in known:
+            continue              # 自己有 wtool.xml 的，以自己为准
+        rel = os.path.relpath(sub_abs, root)
+        found.append((DEFAULT_PRIORITY, rel, sub_abs,
+                      {"kind": sub["kind"], "script": "", "tag": DEFAULT_PUBLISH_TAG,
+                       "to": sub["to"], "asset": "", "subs": [], "targets": [],
+                       "_sub_of": sub["_by"]}))
+    return sorted(found)
+
+
+def list_projects(root):
+    """扫描工作区里所有 wtool.xml，按 (priority, id) 排序输出。
+
+    列数固定为 3（prio/id/path），调用方按列读，不要加列。
+    """
+    for prio, pid, path, _pub in scan_projects(root):
         print("%d\t%s\t%s" % (prio, pid, path))
+
+
+def publish_list(root):
+    """列出所有项目的发布方式：prio id path kind script tag to"""
+    for prio, pid, path, pub in scan_projects(root):
+        print("\t".join([str(prio), pid, path, pub["kind"],
+                         pub.get("script") or "-", pub.get("tag") or "",
+                         pub.get("to") or "-"]))
+
+
+def publish_info(project_dir):
+    """单个项目的发布信息，key<TAB>value 逐行输出，供 shell 读取。"""
+    root = os.path.abspath(project_dir)
+    errors = []
+    meta = None
+    if os.path.isfile(os.path.join(root, "wtool.xml")):
+        meta, _entries = parse_manifest(os.path.join(root, "wtool.xml"), root, errors)
+    if meta is None:
+        # 没有 wtool.xml 就是默认源码发布（这不是错误）
+        meta = {"id": None, "priority": DEFAULT_PRIORITY,
+                "publish": {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
+                            "to": "", "asset": "", "subs": [], "targets": []}}
+    pub = meta["publish"]
+    # 没有 wtool.xml 的项目用"相对工作区的路径"当 id，和 plan_install 的约定一致
+    _pid = meta["id"] or os.path.relpath(root, os.environ.get("WTOOL_ROOT", root))
+    if _pid in (".", "/"):
+        _pid = os.path.basename(root)
+    print("project_id\t%s" % _pid)
+    print("project_root\t%s" % root)
+    print("kind\t%s" % pub["kind"])
+    print("script\t%s" % (pub.get("script") or "-"))
+    print("tag\t%s" % (pub.get("tag") or DEFAULT_PUBLISH_TAG))
+    print("to\t%s" % (pub.get("to") or "-"))
+    print("asset\t%s" % (pub.get("asset") or "-"))
+    for sub in pub.get("subs", []):
+        print("sub\t%s\t%s\t%s" % (sub["path"], sub["kind"], sub["to"] or "-"))
+    for tgt in pub.get("targets", []):
+        print("target\t%s\t%s\t%s\t%s" % (tgt["os"], tgt["version"],
+                                          tgt["codename"] or "-", tgt["image"] or "-"))
+    for e in errors:
+        print("error\t%s" % e, file=sys.stderr)
+    return 1 if errors else 0
 
 
 def build_parser():
@@ -954,6 +1105,12 @@ def build_parser():
 
     lp = sub.add_parser("list-projects")
     lp.add_argument("--root", required=True)
+
+    pl = sub.add_parser("publish-list")
+    pl.add_argument("--root", required=True)
+
+    pi = sub.add_parser("publish-info")
+    pi.add_argument("project")
     return p
 
 
@@ -986,6 +1143,10 @@ def main(argv):
                   % (len(res["sysfiles"]), len(res["sources"]), len(res["tasks"])))
         elif args.cmd == "list-projects":
             list_projects(args.root)
+        elif args.cmd == "publish-list":
+            publish_list(args.root)
+        elif args.cmd == "publish-info":
+            return publish_info(args.project)
         elif args.cmd == "validate":
             errors, warnings = [], []
             root = os.path.abspath(args.project)

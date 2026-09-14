@@ -31,6 +31,9 @@ wt_run() {
 # --------------------------------------------------------------------------
 wt_journal_add() {
     wt_dry && return 0
+    # 没有项目上下文（如 publish 只借用了 wt_ensure_dir）就不记账：
+    # journal 描述的是"uninstall 该撤销什么"，publish 没有可撤销的东西。
+    [ -n "${WTOOL_JOURNAL:-}" ] || return 0
     _ja=$1; _jk=$2; _jd=$3; _jt=${4:--}; _js=${5:--}
     # 按 (action, dest) 去重：journal 描述"当前该撤销什么"，
     # 所以重复 install 只是更新记录，不会堆积重复项，也绝不会被清空。
@@ -452,4 +455,180 @@ wt_task_run() {
         printf '%s\t%s\n' "$_marker" "$(date +%Y-%m-%dT%H:%M:%S%z)" \
             >> "$WTOOL_STATE/$WTOOL_PROJECT_ID/provision.log"
     fi
+}
+
+# --------------------------------------------------------------------------
+# publish：把项目打成 release 资产
+#
+# 源码包的第一层目录名固定是 wtool/，跟本机工作区目录叫什么无关：
+#   tar -C "$WTOOL_ROOT" --transform='s|^|wtool/|' ... terminal/tmux
+#   → wtool/terminal/tmux/bin/net.sh ...
+# 解压到 ~/self/ 之后路径和 repo sync 出来的完全一样。
+# --------------------------------------------------------------------------
+
+# 项目 origin 属于哪个仓：ssh://git@github.com/o/r.git / git@github.com:o/r.git
+# / https://github.com/o/r.git 都归一到 o/r
+#
+# 注意 remote 名字：repo 客户端按 manifest 里的 remote name 命名，通常是 github
+# 而不是 origin；手工 clone 的才是 origin。两种都要认。
+wt_publish_repo_of() {
+    _wtpub_dir=$1
+    _wtpub_url=""
+    for _wtpub_r in origin github upstream; do
+        _wtpub_url=$(git -C "$_wtpub_dir" remote get-url "$_wtpub_r" 2>/dev/null || true)
+        [ -n "$_wtpub_url" ] && break
+        _wtpub_url=""
+    done
+    if [ -z "$_wtpub_url" ]; then
+        # 兜底：只有一个 remote 就用它，多个就没法猜了
+        _wtpub_remotes=$(git -C "$_wtpub_dir" remote 2>/dev/null || true)
+        _wtpub_n=$(printf '%s\n' "$_wtpub_remotes" | grep -c . || true)
+        [ "$_wtpub_n" = 1 ] && _wtpub_url=$(git -C "$_wtpub_dir" remote get-url "$_wtpub_remotes" 2>/dev/null || true)
+    fi
+    [ -n "$_wtpub_url" ] || return 1
+    _wtpub_u=${_wtpub_url%.git}
+    case "$_wtpub_u" in
+        *://*)  _wtpub_u=${_wtpub_u#*://}            # 去掉 scheme
+                _wtpub_u=${_wtpub_u#*@}              # 去掉 user@
+                _wtpub_u=${_wtpub_u#*/} ;;           # 去掉 host:port/
+        *@*:*)  _wtpub_u=${_wtpub_u#*@}              # git@github.com:o/r
+                _wtpub_u=${_wtpub_u#*:} ;;
+    esac
+    _wtpub_u=${_wtpub_u#/}
+    case "$_wtpub_u" in
+        */*/*) return 1 ;;               # 多于两段，不认识
+        */*)   printf '%s\n' "$_wtpub_u" ;;
+        *)     return 1 ;;
+    esac
+}
+
+# 本地记录的 tag 模板 → 实际 tag（strftime）
+wt_publish_tag() {
+    _wtpub_tpl=$1
+    [ -n "$_wtpub_tpl" ] || _wtpub_tpl='snapshot-%Y-%m-%d'
+    date +"$_wtpub_tpl"
+}
+
+# 有没有权限往这个仓推 release。第三方上游仓（neovim/neovim）会在这里被挡下。
+wt_publish_can_push() {
+    _wtpub_repo=$1
+    if ! command -v gh >/dev/null 2>&1; then
+        return 2                          # 没有 gh，调用方决定怎么办
+    fi
+    _wtpub_perm=$(gh repo view "$_wtpub_repo" --json viewerPermission -q .viewerPermission 2>/dev/null) || return 3
+    case "$_wtpub_perm" in
+        ADMIN|MAINTAIN|WRITE|PUSH) return 0 ;;
+        *) printf '%s\n' "$_wtpub_perm"; return 1 ;;
+    esac
+}
+
+# 打源码包：wt_pack_source <项目绝对路径> <输出文件> [额外目录 额外相对路径]
+# 给了额外参数就再往里塞一个成员（用来放 .wtool-dist/<id>.json 标记）。
+# 本机可用的打包压缩扩展名（没有 zstd 就 gz）。调用方据此决定资产名，
+# 保证"文件名里的扩展名"和"包里的实际内容"永远一致。
+wt_pack_ext() {
+    if command -v zstd >/dev/null 2>&1; then printf 'zst'
+    elif command -v gzip >/dev/null 2>&1; then printf 'gz'
+    else printf 'tar'
+    fi
+}
+
+# 打源码包：wt_pack_source <项目绝对路径> <输出文件> [额外目录 额外相对路径]
+# 给了额外参数就再往里塞一个成员（用来放 .wtool-dist/<id>.json 标记）。
+# 输出文件必须以 .tar.zst / .tar.gz / .tar 结尾，压缩器按扩展名选——
+# 绝不出现"名字叫 zst、内容其实是 gz"这种事。
+wt_pack_source() {
+    _wtpub_proj=$1; _wtpub_out=$2; _wtpub_extra_dir=${3:-}; _wtpub_extra_rel=${4:-}
+    _wtpub_prefix=${WTOOL_PUBLISH_PREFIX:-wtool}
+    _wtpub_rel=$(python3 -c 'import os,sys;print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])))' \
+               "$_wtpub_proj" "$WTOOL_ROOT") || wt_die "算不出 $_wtpub_proj 相对 $WTOOL_ROOT 的路径"
+    case "$_wtpub_rel" in
+        ..|../*|/*) wt_die "$_wtpub_proj 不在工作区 $WTOOL_ROOT 里，无法按 wtool/ 前缀打包" ;;
+    esac
+    [ -d "$WTOOL_ROOT/$_wtpub_rel" ] || wt_die "项目目录不存在: $WTOOL_ROOT/$_wtpub_rel"
+
+    # 有 .git 就用 HEAD 提交时间当 mtime，打出来的包可复现（同样的树 → 同样的字节）
+    _wtpub_mtime=""
+    if git -C "$_wtpub_proj" rev-parse --git-dir >/dev/null 2>&1; then
+        _wtpub_epoch=$(git -C "$_wtpub_proj" log -1 --format=%ct 2>/dev/null || true)
+        [ -n "$_wtpub_epoch" ] && _wtpub_mtime="--mtime=@$_wtpub_epoch"
+    fi
+
+    wt_ensure_dir "$(dirname -- "$_wtpub_out")"
+    if wt_dry; then
+        wt_step "[dry-run] 打包 $_wtpub_rel → $_wtpub_out（前缀 $_wtpub_prefix/）"
+        return 0
+    fi
+
+    _wtpub_tar="$_wtpub_out.tmp.$$.tar"
+    # shellcheck disable=SC2086
+    tar -C "$WTOOL_ROOT" \
+        --transform="s|^|$_wtpub_prefix/|" \
+        --sort=name --numeric-owner --owner=0 --group=0 $_wtpub_mtime \
+        --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
+        --exclude='.mypy_cache' --exclude='.pytest_cache' --exclude='.ruff_cache' \
+        --exclude='*.log' \
+        -cf "$_wtpub_tar" "$_wtpub_rel" || { rm -f "$_wtpub_tar"; wt_die "tar 打包失败: $_wtpub_rel"; }
+
+    if [ -n "$_wtpub_extra_dir" ] && [ -n "$_wtpub_extra_rel" ]; then
+        tar -C "$_wtpub_extra_dir" --transform="s|^|$_wtpub_prefix/|" \
+            --sort=name --numeric-owner --owner=0 --group=0 \
+            -rf "$_wtpub_tar" "$_wtpub_extra_rel" \
+            || { rm -f "$_wtpub_tar"; wt_die "追加 $_wtpub_extra_rel 失败"; }
+    fi
+
+    # 压缩器按输出扩展名选。名字和内容必须一致：用户拿到 .tar.zst 就该能
+    # tar --zstd 解开，静默退化成 gzip 会让人以为包坏了。
+    case "$_wtpub_out" in
+        *.tar.zst) command -v zstd >/dev/null 2>&1 \
+                       || wt_die "输出名是 .tar.zst 但本机没有 zstd（装 zstd，或用 wt_pack_ext 取扩展名）"
+                   zstd -q -T0 -12 -f -o "$_wtpub_out" "$_wtpub_tar" \
+                       || { rm -f "$_wtpub_tar"; wt_die "zstd 压缩失败"; } ;;
+        *.tar.gz)  gzip -9 -c "$_wtpub_tar" > "$_wtpub_out" \
+                       || { rm -f "$_wtpub_tar"; wt_die "gzip 压缩失败"; } ;;
+        *.tar)     mv -f "$_wtpub_tar" "$_wtpub_out" ;;
+        *) wt_die "输出名必须以 .tar.zst / .tar.gz / .tar 结尾，实际: $_wtpub_out" ;;
+    esac
+    rm -f "$_wtpub_tar"
+    [ -s "$_wtpub_out" ] || wt_die "打出来的包是空的: $_wtpub_out"
+    wt_step "打包 $(wc -c < "$_wtpub_out" | tr -d ' ') 字节 → $(basename -- "$_wtpub_out")"
+}
+
+# 建 release（已存在就复用）
+wt_publish_gh_release() {
+    _wtpub_repo=$1; _wtpub_tag=$2; _wtpub_title=$3; _wtpub_notes=$4
+    if wt_dry; then
+        wt_step "[dry-run] gh release create $_wtpub_tag --repo $_wtpub_repo"
+        return 0
+    fi
+    if gh release view "$_wtpub_tag" --repo "$_wtpub_repo" >/dev/null 2>&1; then
+        wt_step "release $_wtpub_tag 已存在，复用"
+    else
+        gh release create "$_wtpub_tag" --repo "$_wtpub_repo" --title "$_wtpub_title" --notes "$_wtpub_notes" \
+            || wt_die "创建 release 失败: $_wtpub_repo $_wtpub_tag"
+        wt_step "创建 release $_wtpub_tag @ $_wtpub_repo"
+    fi
+}
+
+# 上传资产（可重复执行，--clobber 覆盖同名）
+wt_publish_gh_upload() {
+    _wtpub_repo=$1; _wtpub_tag=$2; shift 2
+    [ "$#" -gt 0 ] || return 0
+    if wt_dry; then
+        wt_step "[dry-run] gh release upload $_wtpub_tag --repo $_wtpub_repo <$# 个文件>"
+        return 0
+    fi
+    gh release upload "$_wtpub_tag" --repo "$_wtpub_repo" --clobber "$@" \
+        || wt_die "上传失败: $_wtpub_repo $_wtpub_tag"
+    wt_step "上传 $# 个文件 → $_wtpub_repo $_wtpub_tag"
+}
+
+# 记录本地发布历史（表格里的 publish 列离线也看得到）
+wt_publish_record() {
+    _wtpub_id=$1; _wtpub_repo=$2; _wtpub_tag=$3; _wtpub_n=$4; _wtpub_detail=$5
+    [ -n "$_wtpub_id" ] || return 0
+    wt_dry && return 0
+    wt_ensure_dir "$WTOOL_STATE/$_wtpub_id"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+        "$_wtpub_repo" "$_wtpub_tag" "$_wtpub_n" "$_wtpub_detail" >> "$WTOOL_STATE/$_wtpub_id/publish.tsv"
 }

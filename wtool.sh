@@ -4,6 +4,11 @@
 #   wtool.sh install   <项目目录> [--dry-run] [--force]
 #   wtool.sh uninstall <项目目录> [--dry-run] [--force]
 #   wtool.sh uninstall --id <项目id> [--dry-run] [--force]
+#   wtool.sh provision <项目目录> [--dry-run] [--force] [--with-system]
+#   wtool.sh publish   [<项目>...] [--tag=TAG] [--dry-run] [--force]
+#                      源码包发布到项目自己的 release；kind="script" 的项目
+#                      走项目内 publish.sh。不带参数则发布所有声明过的项目。
+#   wtool.sh bootstrap [--with-system|--no-system|--install-only|--dry-run|--force]
 #   wtool.sh status    [<项目目录>]
 #   wtool.sh list
 #   wtool.sh validate  <项目目录>
@@ -614,6 +619,242 @@ EOF
 }
 
 # --------------------------------------------------------------------------
+# publish：把项目发布成 release 资产
+#
+# 行为由项目自己的 wtool.xml 决定：
+#   没有 <publish> / kind="source"  → 引擎打源码包（第一层固定 wtool/），
+#                                     推到项目 origin 的 release
+#   kind="script" script="x.sh"     → 调项目内脚本；脚本产出，引擎上传
+#   kind="none"                     → 不发布（第三方上游仓）
+#
+# 源码包解压后与 repo sync 出来的路径完全一致，所以解压完 wtool 就能用。
+# --------------------------------------------------------------------------
+
+# 把用户给的项目名解析成一行完整的 publish-list 记录（7 列）。
+# 支持：完整 id、"terminal/tmux"；id 末段、"tmux"；以及目录路径。
+wt_publish_resolve() {
+    _want=$1
+    _abs=""
+    case $_want in
+        /*) [ -d "$_want" ] && _abs=$(cd -- "$_want" && pwd) ;;
+        *)  [ -d "$WTOOL_ROOT/$_want" ] && _abs=$(cd -- "$WTOOL_ROOT/$_want" && pwd) ;;
+    esac
+
+    _all=$(python3 "$PY" publish-list --root "$WTOOL_ROOT")
+    _hits=""
+    # 先按路径精确匹配（用户直接给了目录）
+    if [ -n "$_abs" ]; then
+        _hits=$(printf '%s\n' "$_all" | awk -F'\t' -v p="$_abs" '$3 == p')
+    fi
+    # 再按 id / id 末段匹配。
+    # 用 substr 比尾部而不是 index——index 没找到时返回 0，若待匹配串长度
+    # 正好等于 id 长度，右边的 0 会撞上，产生假匹配。
+    if [ -z "$_hits" ]; then
+        _hits=$(printf '%s\n' "$_all" | awk -F'\t' -v w="$_want" '
+            $2 == w { print; next }
+            length(w) < length($2) && substr($2, length($2) - length(w)) == "/" w { print; next }
+        ')
+    fi
+
+    _n=$(printf '%s\n' "$_hits" | grep -c . || true)
+    case $_n in
+        0) wt_die "找不到项目: $_want（用 wtool publish 不带参数看全部）" ;;
+        1) printf '%s\n' "$_hits" ;;
+        *) wt_warn "「$_want」匹配到多个项目："
+           printf '%s\n' "$_hits" | awk -F'\t' '{print "  " $2}' >&2
+           wt_die "请写完整的项目 id" ;;
+    esac
+}
+
+cmd_publish() {
+    _want=""
+    _tag_override=""
+    _outdir=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)       WTOOL_DRY_RUN=1 ;;
+            --force)         WTOOL_FORCE=1 ;;
+            --allow-foreign) WTOOL_ALLOW_FOREIGN=1 ;;
+            --tag=*)         _tag_override=${arg#--tag=} ;;
+            --out=*)         _outdir=${arg#--out=} ;;
+            -*)              wt_die "未知参数: $arg" ;;
+            *)               _want="$_want $arg" ;;
+        esac
+    done
+
+    command -v gh >/dev/null 2>&1 || wt_die "publish 需要 gh（GitHub CLI）；装好再试"
+
+    # --out=DIR 时产物留在那里（先打出来看看再传），否则用临时目录
+    if [ -n "$_outdir" ]; then
+        mkdir -p -- "$_outdir" || wt_die "建不了目录: $_outdir"
+        _scratch=$(cd -- "$_outdir" && pwd)
+    else
+        _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-publish.XXXXXX")
+        trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    fi
+
+    # 1) 决定发布哪些项目
+    : > "$_scratch/sel.tsv"
+    if [ -n "$_want" ]; then
+        for w in $_want; do
+            wt_publish_resolve "$w" >> "$_scratch/sel.tsv" || exit $?
+        done
+        # 同一个项目写了两次就只发一次
+        _tmp="$_scratch/sel.dedup"
+        awk -F'\t' '!seen[$2]++' "$_scratch/sel.tsv" > "$_tmp" && mv -f "$_tmp" "$_scratch/sel.tsv"
+    else
+        python3 "$PY" publish-list --root "$WTOOL_ROOT" > "$_scratch/sel.tsv"
+    fi
+
+    if [ ! -s "$_scratch/sel.tsv" ]; then
+        wt_die "没有任何项目声明了 publish"
+    fi
+
+    _done=0
+    while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
+        [ -n "${_pid:-}" ] || continue
+        _date=$(date +%Y-%m-%d)
+        if [ -n "$_tag_override" ]; then _tag=$_tag_override; else _tag=$(wt_publish_tag "$_tpl"); fi
+
+        wt_info "── $_pid  [$(_publish_kind_cn "$_kind")]"
+
+        if [ "$_kind" = "none" ]; then
+            wt_info "  声明为不发布，跳过"
+            continue
+        fi
+
+        # 目标仓：<publish to="..."> 优先，否则取项目 remote
+        if [ "$_to" != "-" ] && [ -n "$_to" ]; then
+            _repo=$_to
+        else
+            _repo=$(wt_publish_repo_of "$_path") || {
+                wt_warn "$_pid 没有可用的 git remote，跳过"
+                continue
+            }
+        fi
+
+        wt_info "  目标仓 : $_repo"
+        wt_info "  tag    : $_tag"
+
+        # 权限检查：第三方上游仓（neovim/neovim）在这里被挡下
+        if [ "${WTOOL_ALLOW_FOREIGN:-0}" != 1 ]; then
+            _perm=$(wt_publish_can_push "$_repo"); _rc=$?
+            if [ "$_rc" = 1 ]; then
+                wt_warn "  没有 $_repo 的写权限（viewerPermission=$_perm）"
+                wt_warn "  这是第三方仓。要发布请在 wtool.xml 写 <publish to=\"自己的仓\"/>，"
+                wt_warn "  或者声明 kind=\"none\"。确实要试就加 --allow-foreign。"
+                continue
+            elif [ "$_rc" != 0 ]; then
+                wt_warn "  查不到 $_repo（rc=$_rc），继续尝试"
+            fi
+        fi
+
+        if [ "$_kind" = "script" ]; then
+            _script_path=$_path/$_script
+            if [ ! -f "$_script_path" ]; then
+                wt_warn "  脚本不存在: $_script_path，跳过"
+                continue
+            fi
+            _out=$_scratch/out-$_done
+            rm -rf -- "$_out"; mkdir -p -- "$_out"
+
+            wt_info "  脚本   : $_script"
+            if wt_dry; then
+                wt_step "[dry-run] 执行 $_script（产出目录 $_out）"
+                wt_step "[dry-run] 之后把 $_out 里的文件传到 $_repo $_tag"
+                _done=$((_done + 1))
+                continue
+            fi
+
+            (
+                export WTOOL_PUBLISH_PROJECT="$_pid"
+                export WTOOL_PUBLISH_ROOT="$_path"
+                export WTOOL_PUBLISH_WS="$WTOOL_ROOT"
+                export WTOOL_PUBLISH_REPO="$_repo"
+                export WTOOL_PUBLISH_TAG="$_tag"
+                export WTOOL_PUBLISH_OUT="$_out"
+                export WTOOL_PUBLISH_FORCE="${WTOOL_FORCE:-0}"
+                export WTOOL_PUBLISH_DATE="$_date"
+                cd -- "$_path" || exit 1
+                sh "$_script_path"
+            ) || { wt_warn "  $_script 失败，跳过上传"; continue; }
+
+            _files=$(find "$_out" -maxdepth 1 -type f | sort)
+            _n=$(printf '%s' "$_files" | grep -c . || true)
+            if [ "$_n" = 0 ]; then
+                wt_info "  脚本没有产出文件（可能自己上传了），到此为止"
+                continue
+            fi
+            wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
+                "由 wtool publish 生成。目标系统与内容见 dist.json。"
+            # shellcheck disable=SC2086
+            wt_publish_gh_upload "$_repo" "$_tag" $_files
+            wt_publish_record "$_pid" "$_repo" "$_tag" "$_n" "script:$_script"
+            _done=$((_done + 1))
+            continue
+        fi
+
+        # kind=source
+        if ! git -C "$_path" rev-parse --git-dir >/dev/null 2>&1; then
+            wt_warn "  $_path 不是 git 仓库，无法确定版本，跳过（用 --force 也推不出有意义的包）"
+            continue
+        fi
+        if [ "${WTOOL_FORCE:-0}" != 1 ] && [ -n "$(git -C "$_path" status --porcelain 2>/dev/null)" ]; then
+            wt_warn "  $_path 有未提交改动，拒绝发布（先提交，或加 --force）"
+            continue
+        fi
+
+        _commit=$(git -C "$_path" rev-parse HEAD 2>/dev/null || echo "")
+        _dirty=0
+        [ -n "$(git -C "$_path" status --porcelain 2>/dev/null)" ] && _dirty=1
+        _dashed=$(printf '%s' "$_pid" | tr '/' '-')
+        _asset="$_dashed-$_date.tar.$(wt_pack_ext)"
+
+        # 发布副本标记：解压后 install 不必加 --force，head 也从这里取
+        mkdir -p -- "$_scratch/dist/.wtool-dist"
+        cat > "$_scratch/dist/.wtool-dist/$_dashed.json" <<EOF
+{
+  "project": "$_pid",
+  "repo": "$_repo",
+  "commit": "$_commit",
+  "dirty": $([ "$_dirty" = 1 ] && echo true || echo false),
+  "packed_at": "$(date +%Y-%m-%dT%H:%M:%S%z)",
+  "view": "release",
+  "layout": "wtool/$_pid"
+}
+EOF
+
+        _out=$_scratch/out-$_done
+        wt_pack_source "$_path" "$_out/$_asset" "$_scratch/dist" ".wtool-dist/$_dashed.json" \
+            || exit $?
+        wt_info "  资产   : $_asset  (commit $(printf '%s' "$_commit" | cut -c1-7), dirty=$_dirty)"
+        wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
+            "由 wtool publish 生成。解压到工作区上一层即可（包内第一层是 wtool/）。"
+        wt_publish_gh_upload "$_repo" "$_tag" "$_out/$_asset"
+        wt_publish_record "$_pid" "$_repo" "$_tag" 1 "source:$_commit"
+        _done=$((_done + 1))
+    done < "$_scratch/sel.tsv"
+
+    if [ "$_done" = 0 ] && ! wt_dry; then
+        wt_warn "没有发布任何项目"
+    fi
+    if wt_dry; then
+        wt_info "publish 计划完成（$_done 个项目）"
+    else
+        wt_info "publish 完成（$_done 个项目）"
+    fi
+}
+
+_publish_kind_cn() {
+    case $1 in
+        source) printf '源码包' ;;
+        script) printf '脚本' ;;
+        none)   printf '不发布' ;;
+        *)      printf '%s' "$1" ;;
+    esac
+}
+
+# --------------------------------------------------------------------------
 # 分发
 # --------------------------------------------------------------------------
 _cmd=${1:-}
@@ -623,6 +864,7 @@ case $_cmd in
     install)   cmd_install "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     provision) cmd_provision "$@" ;;
+    publish)   cmd_publish "$@" ;;
     bootstrap) cmd_bootstrap "$@" ;;
     list)      cmd_list "$@" ;;
     status)    cmd_status "$@" ;;
@@ -632,7 +874,8 @@ case $_cmd in
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;
     ""|-h|--help|help)
-        sed -n '2,22p' "$self" | sed 's/^# \{0,1\}//'
+        # 打印文件头的注释块，不写死行号（否则加一行用法就错位）
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"
         ;;
     *) wt_die "未知命令: $_cmd（用 --help 查看用法）" ;;
 esac
