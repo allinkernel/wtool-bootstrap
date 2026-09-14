@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  wtool-bootstrap 自举为 wtool 项目。
+
+  它提供"长期存在"的环境变量（重启 shell 后依然可用）：
+    WTOOL_PREFIX      = $HOME/.wtool/usr（编译安装前缀，wsw.sh 只准往这里装）
+    WTOOL_OS_ID / WTOOL_OS_VERSION / WTOOL_OS_CODENAME / WTOOL_OS_LIKE
+    WTOOL_ARCH / WTOOL_JOBS
+  并把 $WTOOL_PREFIX/bin 与项目 bin/（wtool 命令 wrapper）加进 PATH。
+
+  priority=5：最早加载，保证后面所有项目都能用到这些变量。
+
+  注意：构建期专用变量（WTOOL_SRC_DIR / WTOOL_REF 等）**不在这里**，
+  它们由引擎在跑 wsw.sh 前临时注入，不污染交互 shell。
+-->
+<wtool schema="1" id="bootstrap" priority="5">
+
+  <env src="env.zsh"  shells="zsh"  priority="5"/>
+  <env src="env.bash" shells="bash" priority="5"/>
+
+</wtool>

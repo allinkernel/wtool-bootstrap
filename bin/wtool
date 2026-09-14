@@ -1,0 +1,3 @@
+#!/bin/sh
+# wtool 命令的 wrapper —— 由 bootstrap 项目的 env 加进 PATH，不往 ~/.local/bin 写东西。
+exec "$(cd -- "$(dirname -- "$0")/.." && pwd)/wtool.sh" "$@"

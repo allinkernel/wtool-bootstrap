@@ -213,6 +213,55 @@ fi
 rm -rf "$h"
 
 # --------------------------------------------------------------------------
+printf '\n== 场景 9：bootstrap 自举项目提供的长期变量 ==\n'
+h=$(newhome)
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
+# 引擎要求被安装的仓库是"干净的 git 仓"，所以拿一份 bootstrap 的副本测试
+bcopy="$h/bootstrap"
+mkdir -p "$bcopy"
+cp -r "$boot"/. "$bcopy/" 2>/dev/null || true
+rm -rf "$bcopy/.git" "$bcopy/lib/__pycache__"
+( cd "$bcopy" && git init -q && git add -A \
+  && git -c user.email=t@example.com -c user.name=t commit -qm init )
+
+"$bcopy/wtool.sh" install "$bcopy" > "$h/boot.log" 2>&1 || {
+    bad "install bootstrap" "$(cat "$h/boot.log")"; }
+[ -d "$h/home/.wtool/links/bootstrap" ] \
+    && ok "bootstrap 中转链接已创建" || bad "bootstrap 中转链接已创建"
+grep -q '# >>> wtool:bootstrap' "$h/home/.zshrc" \
+    && ok "bootstrap 的 rc 块已写入" || bad "bootstrap 的 rc 块已写入"
+
+if command -v zsh >/dev/null 2>&1; then
+    got=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1;
+        printf "%s|%s|%s|%s" "$WTOOL_PREFIX" "$WTOOL_OS_ID" "$WTOOL_ARCH" \
+               "$(case ":$PATH:" in *":$WTOOL_PREFIX/bin:"*) echo in-path;; *) echo missing;; esac)"')
+    check "新 shell 里能拿到 PREFIX/OS_ID/ARCH 且 PATH 已含前缀" \
+          "$h/home/.wtool/usr|ubuntu|x86_64|in-path" "$got"
+    got2=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1; command -v wtool')
+    check "wtool 命令在 PATH 上" "$h/home/.wtool/links/bootstrap/bin/wtool" "$got2"
+else
+    printf 'SKIP  zsh 不可用，跳过场景 9\n'
+fi
+
+"$bcopy/wtool.sh" uninstall "$bcopy" > /dev/null 2>&1
+rm -rf "$h"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 10：wtool env 在干净 shell 里 eval 后可用 ==\n'
+got=$(env -i HOME="$HOME" PATH=/usr/bin:/bin sh -c \
+    "eval \"\$('$boot/wtool.sh' env)\"; printf '%s|%s|%s' \
+     \"\$WTOOL_PREFIX\" \"\$WTOOL_OS_ID\" \"\$(command -v wtool)\"")
+check "eval 后 PREFIX/OS_ID/wtool 命令都可用" \
+      "$HOME/.wtool/usr|ubuntu|$boot/bin/wtool" "$got"
+got2=$(env -i HOME="$HOME" PATH=/usr/bin:/bin sh -c \
+    "eval \"\$('$boot/wtool.sh' env --quiet)\"; printf '%s' \"\$WTOOL_JOBS\"")
+[ -n "$got2" ] && ok "--quiet 只输出 export 行且 WTOOL_JOBS 非空" \
+              || bad "--quiet 只输出 export 行且 WTOOL_JOBS 非空"
+got3=$("$boot/wtool.sh" env --json | python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["WTOOL_OS_ID"])' 2>/dev/null)
+check "--json 可被程序解析" "ubuntu" "$got3"
+
+# --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 printf 'PASS: %d   FAIL: %d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

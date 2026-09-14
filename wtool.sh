@@ -8,6 +8,7 @@
 #   wtool.sh list
 #   wtool.sh validate  <项目目录>
 #   wtool.sh doctor
+#   wtool.sh env       [--quiet|--json]   输出可用的环境变量（带中文说明）
 #   wtool.sh scaffold  <目录> [--id ID]
 #   wtool.sh version
 #
@@ -31,13 +32,29 @@ if [ -z "${WTOOL_STATE:-}" ]; then
 fi
 WTOOL_ROOT=${WTOOL_ROOT:-$(dirname -- "$here")}
 WTOOL_REGISTRY="$WTOOL_STATE/registry.tsv"
+WTOOL_SRC=${WTOOL_SRC:-$WTOOL_HOME/.wtool/src}
+WTOOL_PREFIX=${WTOOL_PREFIX:-$WTOOL_HOME/.wtool/usr}
 WTOOL_FORCE=0
 WTOOL_DRY_RUN=0
+WTOOL_WITH_SYSTEM=0
 
 . "$here/lib/wtool_fs.sh"
+. "$here/lib/wtool_os.sh"
+wt_os_detect        # 引擎自己探测，不依赖交互 shell 的环境
 
 PY="$here/lib/wtool_plan.py"
 [ -f "$PY" ] || wt_die "缺少规划器: $PY"
+
+# 前置依赖硬检查：缺了就给一条能直接复制的命令
+# （最小化系统/docker 镜像里 python3 和 git 都可能没有，见 docs/spec.md §12）
+_wt_missing=""
+command -v python3 >/dev/null 2>&1 || _wt_missing="$_wt_missing python3"
+command -v git >/dev/null 2>&1 || _wt_missing="$_wt_missing git"
+if [ -n "$_wt_missing" ]; then
+    wt_die "缺少依赖:$_wt_missing
+请先执行（用系统自带源，不需要证书）：
+  sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates git python3"
+fi
 
 # --------------------------------------------------------------------------
 # 小工具
@@ -54,9 +71,21 @@ wt_git_precheck() {
     _dir=$1
     if git -C "$_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         if [ -n "$(git -C "$_dir" status --porcelain -uno 2>/dev/null)" ]; then
-            wt_die "$_dir 有未提交的已跟踪改动，请先提交后再 install"
+            if [ "${WTOOL_FORCE:-0}" = 1 ]; then
+                wt_warn "$_dir 有未提交的已跟踪改动（--force 继续），记录的版本不准确"
+            else
+                wt_die "$_dir 有未提交的已跟踪改动，请先提交后再 install（或用 --force）"
+            fi
         fi
         WTOOL_HEAD=$(git -C "$_dir" rev-parse --short=12 HEAD 2>/dev/null || echo "-")
+    elif [ -e "$_dir/.git" ]; then
+        # 有 .git 但 git 拒绝使用：最常见的是"属主不一致"（容器里以 root 访问宿主的仓库）
+        _why=$(git -C "$_dir" rev-parse --is-inside-work-tree 2>&1 | head -1)
+        wt_die "git 拒绝使用 $_dir 的仓库：
+  $_why
+如果是在容器里以 root 访问宿主目录，执行一次即可：
+  git config --global --add safe.directory '*'
+或者给 install 加 --force 跳过版本检查"
     else
         if [ "${WTOOL_FORCE:-0}" = 1 ]; then
             wt_warn "$_dir 不是 git 仓库（--force 继续），无法记录版本"
@@ -206,11 +235,58 @@ cmd_uninstall() {
                     fi
                     ;;
                 rc) : ;;   # 已由上面的 rc 回退处理
+                rccreate) : ;;   # 由第 5 步的全局收尾处理
+                sysfile)
+                    # system-file 是可逆的：从备份还原（可能需要 root）
+                    wt_sysfile_restore "$_kind" "$_dest" "$_target" "$_sha"
+                    ;;
+                srcdir)
+                    # 源码树是构建缓存：清干净就删（有未提交改动则保留）
+                    if [ -d "$_dest" ]; then
+                        if [ -n "$(git -C "$_dest" status --porcelain 2>/dev/null)" ]; then
+                            wt_warn "源码树有未提交改动，保留不删: $_dest"
+                        else
+                            wt_run rm -rf -- "$_dest"
+                        fi
+                    fi
+                    ;;
             esac
         done
     fi
 
-    # 3) 清理状态（连带清掉空掉的父目录，例如 state/terminal）
+    # 4) 清理引擎自己的空目录
+    #    多个项目共享 ~/.wtool/links 这类父目录，各自 journal 清不干净，
+    #    这里统一做一次"只删空目录"的收尾（只动 .wtool/links，不碰 .wtool/usr）。
+    if ! wt_dry; then
+        if [ -d "$WTOOL_HOME/.wtool/links" ]; then
+            find "$WTOOL_HOME/.wtool/links" -depth -type d -empty -delete 2>/dev/null || true
+        fi
+        rmdir -- "$WTOOL_HOME/.wtool" 2>/dev/null || true
+    fi
+
+    # 5) 收尾：当初由 wtool 创建的 rc 文件，如果现在已经空了就删掉
+    #    （必须放在最后：只有最后一个项目卸载完，共享的 ~/.zshrc 才会变空）
+    _created="$WTOOL_STATE/created-rc.tsv"
+    if [ -f "$_created" ] && ! wt_dry; then
+        _keep=""
+        while IFS= read -r _f; do
+            [ -n "$_f" ] || continue
+            if [ -f "$_f" ] && [ -z "$(tr -d '[:space:]' < "$_f" 2>/dev/null)" ]; then
+                rm -f -- "$_f"
+                wt_step "删除空的 rc 文件 $_f"
+            else
+                _keep="$_keep$_f
+"
+            fi
+        done < "$_created"
+        if [ -n "$_keep" ]; then
+            printf '%s' "$_keep" > "$_created"
+        else
+            rm -f -- "$_created"
+        fi
+    fi
+
+    # 6) 清理状态目录（连带清掉空掉的父目录，例如 state/terminal）
     if ! wt_dry; then
         rm -rf -- "$WTOOL_PROJECT_DIR"
         _p=$(dirname -- "$WTOOL_PROJECT_DIR")
@@ -219,8 +295,143 @@ cmd_uninstall() {
             rmdir -- "$_p" 2>/dev/null || break
             _p=$(dirname -- "$_p")
         done
+        # registry 空了就删掉；state 目录空了也删掉，做到"装完卸完不留痕"
+        if [ -f "$WTOOL_REGISTRY" ] && [ ! -s "$WTOOL_REGISTRY" ]; then
+            rm -f -- "$WTOOL_REGISTRY"
+        fi
+        if [ -d "$WTOOL_STATE" ] && [ -z "$(ls -A -- "$WTOOL_STATE" 2>/dev/null)" ]; then
+            rmdir -- "$WTOOL_STATE" 2>/dev/null || true
+        fi
     fi
     wt_info "uninstall 完成"
+}
+
+# --------------------------------------------------------------------------
+# provision：system-file → source → task
+# 与 install 完全分离：install 只做可逆的软链/rc；这里做换源、拉源码、装包、编译
+# --------------------------------------------------------------------------
+wt_when_match() {
+    _when=$1
+    [ -z "$_when" ] && return 0
+    for _c in $(printf '%s' "$_when" | tr ',' ' '); do
+        case $_c in
+            os:*)    [ "$WTOOL_OS_ID" = "${_c#os:}" ] || return 1 ;;
+            '!os:'*) [ "$WTOOL_OS_ID" != "${_c#!os:}" ] || return 1 ;;
+            arch:*)  [ "$WTOOL_ARCH" = "${_c#arch:}" ] || return 1 ;;
+            *)       wt_warn "未知 when 条件，按不匹配处理: $_c"; return 1 ;;
+        esac
+    done
+    return 0
+}
+
+cmd_provision() {
+    _project=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)     WTOOL_DRY_RUN=1 ;;
+            --force)       WTOOL_FORCE=1 ;;
+            --with-system) WTOOL_WITH_SYSTEM=1 ;;
+            -*)            wt_die "未知参数: $arg" ;;
+            *)             _project=$arg ;;
+        esac
+    done
+    [ -n "$_project" ] || wt_die "用法: wtool.sh provision <项目目录> [--dry-run] [--force] [--with-system]"
+    [ -d "$_project" ] || wt_die "项目目录不存在: $_project"
+    _project=$(cd -- "$_project" && pwd)
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+
+    python3 "$PY" plan-provision "$_project" \
+        --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
+        --os-id "$WTOOL_OS_ID" --os-version "$WTOOL_OS_VERSION" \
+        --os-codename "$WTOOL_OS_CODENAME" --arch "$WTOOL_ARCH" \
+        --jobs "$WTOOL_JOBS" --prefix "$WTOOL_PREFIX" --src-root "$WTOOL_SRC" \
+        $([ "$WTOOL_FORCE" = 1 ] && echo --force) || exit $?
+
+    wt_load_project "$_scratch"
+    wt_info "project: $WTOOL_PROJECT_ID"
+
+    # 1) system-file（需要 root；默认不动系统）
+    if [ -s "$_scratch/sysfiles.tsv" ]; then
+        while IFS='	' read -r _mode _dest _content _sha _bak _desc; do
+            [ -z "${_mode:-}" ] && continue
+            if [ "${WTOOL_WITH_SYSTEM:-0}" != 1 ]; then
+                wt_warn "跳过系统文件（需要 --with-system）: $_dest"
+                continue
+            fi
+            wt_info "系统文件[$_mode]: $_dest  ${_desc:+(${_desc})}"
+            wt_sysfile_apply "$_mode" "$_dest" "$_content" "$_sha" "$_bak" "$_desc"
+        done < "$_scratch/sysfiles.tsv"
+    fi
+
+    # 2) source：拉上游源码、固定 ref、建/重置分支、铺 overlay
+    if [ -s "$_scratch/sources.tsv" ]; then
+        while IFS='	' read -r _dir _url _ref _branch _overlay; do
+            [ -z "${_dir:-}" ] && continue
+            wt_info "source: $_url @ $_ref"
+            wt_source_sync "$_dir" "$_url" "$_ref" "$_branch" "$_overlay"
+        done < "$_scratch/sources.tsv"
+    fi
+
+    # 3) task：ansible / shell
+    if [ -s "$_scratch/tasks.tsv" ]; then
+        while IFS='	' read -r _runner _src _marker _desc _when; do
+            [ -z "${_runner:-}" ] && continue
+            if ! wt_when_match "$_when"; then
+                wt_info "when=$_when 不匹配，跳过: $_desc"
+                continue
+            fi
+            wt_info "task[$_runner]: $_desc"
+            wt_task_run "$_runner" "$_src" "$_marker" "$_desc" \
+                "${WTOOL_SOURCE_DIR:-$WTOOL_PROJECT_ROOT}"
+        done < "$_scratch/tasks.tsv"
+    fi
+
+    wt_info "provision 完成"
+}
+
+# --------------------------------------------------------------------------
+# bootstrap：把工作区里所有 wtool 项目按 priority 依次 provision + install
+# --------------------------------------------------------------------------
+cmd_bootstrap() {
+    _no_system=0
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)     WTOOL_DRY_RUN=1 ;;
+            --force)       WTOOL_FORCE=1 ;;
+            --with-system) WTOOL_WITH_SYSTEM=1 ;;
+            --no-system)   _no_system=1 ;;
+            -*)            wt_die "未知参数: $arg" ;;
+            *)             wt_die "bootstrap 不接受位置参数: $arg" ;;
+        esac
+    done
+
+    wt_info "扫描项目: $WTOOL_ROOT"
+    _list=$(mktemp "${TMPDIR:-/tmp}/wtool-list.XXXXXX")
+    python3 "$PY" list-projects --root "$WTOOL_ROOT" > "$_list" || {
+        rm -f "$_list"; wt_die "扫描项目失败"; }
+
+    if [ ! -s "$_list" ]; then
+        rm -f "$_list"
+        wt_die "在 $WTOOL_ROOT 下没找到任何 wtool.xml"
+    fi
+
+    while IFS='	' read -r _prio _pid _path; do
+        [ -z "${_pid:-}" ] && continue
+        printf '\n=== [%s] %s (%s) ===\n' "$_prio" "$_pid" "$_path"
+        _common=""
+        [ "$WTOOL_FORCE" = 1 ] && _common="$_common --force"
+        [ "$WTOOL_DRY_RUN" = 1 ] && _common="$_common --dry-run"
+        _prov="$_common"
+        [ "$WTOOL_WITH_SYSTEM" = 1 ] && [ "$_no_system" = 0 ] && _prov="$_prov --with-system"
+        # shellcheck disable=SC2086
+        cmd_provision "$_path" $_prov || wt_die "provision 失败: $_pid"
+        # shellcheck disable=SC2086
+        cmd_install "$_path" $_common || wt_die "install 失败: $_pid"
+    done < "$_list"
+    rm -f "$_list"
+    wt_info "bootstrap 完成"
 }
 
 # --------------------------------------------------------------------------
@@ -258,11 +469,100 @@ cmd_doctor() {
     wt_info "root        : $WTOOL_ROOT"
     wt_info "home        : $WTOOL_HOME"
     wt_info "state       : $WTOOL_STATE"
+    wt_info "prefix      : $WTOOL_PREFIX  (编译安装前缀)"
+    wt_info "os          : $WTOOL_OS_ID $WTOOL_OS_VERSION ($WTOOL_OS_CODENAME) like=$WTOOL_OS_LIKE"
+    wt_info "arch/jobs   : $WTOOL_ARCH / $WTOOL_JOBS"
     wt_info "python3     : $(python3 --version 2>&1 || echo '缺失')"
     wt_info "git         : $(git --version 2>&1 || echo '缺失')"
     _n=0
     [ -f "$WTOOL_REGISTRY" ] && _n=$(grep -c . "$WTOOL_REGISTRY" 2>/dev/null || echo 0)
     wt_info "registered  : $_n 条"
+}
+
+# --------------------------------------------------------------------------
+# wtool env —— 直接输出可用的环境变量（带中文说明）
+#
+#   eval "$(wtool.sh env)"      当前 shell 立即生效
+#   wtool.sh env > ~/.wtool.env 然后自己 source
+#   wtool.sh env --quiet        只要 export 行，不要注释
+#   wtool.sh env --json         给脚本/程序用
+# --------------------------------------------------------------------------
+cmd_env() {
+    _quiet=0
+    _json=0
+    for _a in "$@"; do
+        case $_a in
+            --quiet|-q) _quiet=1 ;;
+            --json)     _json=1 ;;
+            *) wt_die "未知参数: $_a" ;;
+        esac
+    done
+
+    if [ "$_json" = 1 ]; then
+        cat <<EOF
+{
+  "WTOOL_BOOTSTRAP": "$WTOOL_BOOTSTRAP",
+  "WTOOL_ROOT": "$WTOOL_ROOT",
+  "WTOOL_HOME": "$WTOOL_HOME",
+  "WTOOL_STATE": "$WTOOL_STATE",
+  "WTOOL_PREFIX": "$WTOOL_PREFIX",
+  "WTOOL_OS_ID": "$WTOOL_OS_ID",
+  "WTOOL_OS_VERSION": "$WTOOL_OS_VERSION",
+  "WTOOL_OS_CODENAME": "$WTOOL_OS_CODENAME",
+  "WTOOL_OS_LIKE": "$WTOOL_OS_LIKE",
+  "WTOOL_ARCH": "$WTOOL_ARCH",
+  "WTOOL_JOBS": "$WTOOL_JOBS"
+}
+EOF
+        return 0
+    fi
+
+    _c() { [ "$_quiet" = 1 ] && return 0; printf '%s\n' "$1"; }
+
+    _c "# wtool 环境变量 —— 由 \`wtool env\` 生成"
+    _c "# 立即生效： eval \"\$(wtool env)\""
+    _c "# 长期生效： 装 bootstrap 项目（cd bootstrap && ./install.sh），它会自动导出这些"
+    _c ""
+    _c "# ── wtool 自身的位置 ──────────────────────────────"
+    _c "# 引擎所在目录（含 wtool.sh / lib / templates）"
+    printf 'export WTOOL_BOOTSTRAP=%s\n' "$(_q "$WTOOL_BOOTSTRAP")"
+    _c "# 整个 wtool 集合的根目录（repo 工作区）"
+    printf 'export WTOOL_ROOT=%s\n' "$(_q "$WTOOL_ROOT")"
+    _c "# 被管理的家目录"
+    printf 'export WTOOL_HOME=%s\n' "$(_q "$WTOOL_HOME")"
+    _c "# 状态目录：registry.tsv / 每个项目的 journal.tsv 和 meta.tsv"
+    printf 'export WTOOL_STATE=%s\n' "$(_q "$WTOOL_STATE")"
+    _c ""
+    _c "# ── 编译安装前缀 ──────────────────────────────────"
+    _c "# wsw.sh / provision 只准往这里装；想卸载就删掉这里对应的文件"
+    printf 'export WTOOL_PREFIX=%s\n' "$(_q "$WTOOL_PREFIX")"
+    _c ""
+    _c "# ── 当前系统信息（来自 /etc/os-release 与 uname）──"
+    _c "# 发行版 ID：ubuntu / debian / rocky / centos / rhel / fedora ..."
+    printf 'export WTOOL_OS_ID=%s\n' "$(_q "$WTOOL_OS_ID")"
+    _c "# 版本号：如 24.04"
+    printf 'export WTOOL_OS_VERSION=%s\n' "$(_q "$WTOOL_OS_VERSION")"
+    _c "# 代号：如 noble（非 Debian 系可能为空）"
+    printf 'export WTOOL_OS_CODENAME=%s\n' "$(_q "$WTOOL_OS_CODENAME")"
+    _c "# 上游家族：如 debian / \"rhel centos fedora\""
+    printf 'export WTOOL_OS_LIKE=%s\n' "$(_q "$WTOOL_OS_LIKE")"
+    _c "# CPU 架构：x86_64 / aarch64 ..."
+    printf 'export WTOOL_ARCH=%s\n' "$(_q "$WTOOL_ARCH")"
+    _c "# 并行编译任务数（nproc）"
+    printf 'export WTOOL_JOBS=%s\n' "$(_q "$WTOOL_JOBS")"
+    _c ""
+    _c "# ── PATH / 动态库路径 ─────────────────────────────"
+    _c "# 让编译安装的二进制和 wtool 命令可直接调用"
+    printf 'export PATH="%s/bin:%s/bin:$PATH"\n' \
+        "$WTOOL_PREFIX" "$WTOOL_BOOTSTRAP"
+    _c "# 让编译安装的库能被找到（ldconfig 之外的兜底）"
+    printf 'export LD_LIBRARY_PATH="%s/lib:%s/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' \
+        "$WTOOL_PREFIX" "$WTOOL_PREFIX"
+}
+
+# 给 shell 值加引号（只处理常见危险字符，够用）
+_q() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 cmd_scaffold() {
@@ -311,14 +611,17 @@ _cmd=${1:-}
 case $_cmd in
     install)   cmd_install "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
+    provision) cmd_provision "$@" ;;
+    bootstrap) cmd_bootstrap "$@" ;;
     list)      cmd_list "$@" ;;
     status)    cmd_status "$@" ;;
     doctor)    cmd_doctor "$@" ;;
+    env)       cmd_env "$@" ;;
     scaffold)  cmd_scaffold "$@" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;
     ""|-h|--help|help)
-        sed -n '2,20p' "$self" | sed 's/^# \{0,1\}//'
+        sed -n '2,22p' "$self" | sed 's/^# \{0,1\}//'
         ;;
     *) wt_die "未知命令: $_cmd（用 --help 查看用法）" ;;
 esac

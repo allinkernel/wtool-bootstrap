@@ -180,6 +180,69 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                                  optional=_bool_attr(child, "optional"),
                                  manifest=manifest_path))
 
+        elif tag == "system-file":
+            # 写 $HOME 之外的系统文件（换源等）。可逆：备份→写；卸载时还原。
+            dest = child.get("dest")
+            # dest="auto" 只允许和 kind 一起用：由引擎按发行版算出目标路径
+            if dest != "auto" and (not dest or not dest.startswith("/")):
+                errors.append("<system-file> 的 dest 必须是绝对路径（或 kind 配 dest=\"auto\"）（%s）"
+                              % manifest_path)
+                continue
+            if dest == "auto" and not child.get("kind"):
+                errors.append("<system-file> dest=\"auto\" 必须和 kind 一起用")
+                continue
+            src = child.get("src")
+            kind = child.get("kind")
+            mode = (child.get("mode") or "replace").strip()
+            if mode not in ("replace", "add", "disable"):
+                errors.append("<system-file> mode 只能是 replace/add/disable，实际 %r" % mode)
+                continue
+            # disable 只是把原文件改名，不需要内容
+            if mode != "disable" and not src and not kind:
+                errors.append("<system-file> 需要 src（自己的内容）或 kind（引擎生成）")
+                continue
+            entries.append(Entry("sysfile", src or "", dest=dest, mode=mode,
+                                 sf_kind=kind, mirror=child.get("mirror") or "ustc",
+                                 backup=_bool_attr(child, "backup", default=(mode == "replace")),
+                                 when=child.get("when") or "",
+                                 desc=child.get("desc") or "",
+                                 manifest=manifest_path))
+
+        elif tag == "source":
+            # 上游源码：clone → 固定 ref → 建/重置本地分支 → 铺 overlay
+            url = child.get("url")
+            ref = child.get("ref")
+            if not url:
+                errors.append("<source> 需要 url（%s）" % manifest_path)
+                continue
+            if not ref:
+                errors.append("<source> 需要 ref（必须固定到 tag/commit，禁止浮动分支）")
+                continue
+            entries.append(Entry("source", url,
+                                 ref=ref,
+                                 dir=child.get("dir") or "",
+                                 branch=child.get("branch") or "wsw",
+                                 overlay=child.get("overlay") or "overlay",
+                                 when=child.get("when") or "",
+                                 manifest=manifest_path))
+
+        elif tag == "provision":
+            src = child.get("src")
+            if not src:
+                errors.append("<provision> 需要 src（%s）" % manifest_path)
+                continue
+            runner = child.get("runner")
+            if not runner:
+                runner = "ansible" if src.endswith((".yaml", ".yml")) else "shell"
+            if runner not in ("ansible", "shell"):
+                errors.append("<provision> runner 只能是 ansible/shell，实际 %r" % runner)
+                continue
+            entries.append(Entry("task", src, runner=runner,
+                                 marker=child.get("marker") or "",
+                                 when=child.get("when") or "",
+                                 desc=child.get("desc") or "",
+                                 manifest=manifest_path))
+
         elif tag == "include":
             src = child.get("src")
             optional = _bool_attr(child, "optional")
@@ -216,8 +279,89 @@ def _int_attr(node, name, default, errors, where):
         return default
 
 
-def _bool_attr(node, name):
-    return (node.get(name) or "").strip().lower() in ("1", "true", "yes")
+def _bool_attr(node, name, default=False):
+    raw = node.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes")
+
+
+# --------------------------------------------------------------------------
+# 镜像源生成（kind="apt-mirror" / "yum-mirror"）
+# --------------------------------------------------------------------------
+APT_MIRRORS = {
+    "ustc": "https://mirrors.ustc.edu.cn/ubuntu/",
+    "tuna": "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/",
+    "aliyun": "https://mirrors.aliyun.com/ubuntu/",
+}
+DEB_MIRRORS = {
+    "ustc": "https://mirrors.ustc.edu.cn/debian/",
+    "tuna": "https://mirrors.tuna.tsinghua.edu.cn/debian/",
+    "aliyun": "https://mirrors.aliyun.com/debian/",
+}
+YUM_MIRRORS = {
+    "ustc": "https://mirrors.ustc.edu.cn",
+    "tuna": "https://mirrors.tuna.tsinghua.edu.cn",
+    "aliyun": "https://mirrors.aliyun.com",
+}
+
+
+def render_distro_mirror(kind, os_id, codename, mirror, errors):
+    """按发行版生成镜像源文件内容。返回 (content, dest_hint)。"""
+    mirror = (mirror or "ustc").lower()
+
+    if kind in ("apt-mirror", "distro-mirror") and os_id in ("ubuntu", "debian"):
+        table = APT_MIRRORS if os_id == "ubuntu" else DEB_MIRRORS
+        uri = table.get(mirror)
+        if not uri:
+            errors.append("未知镜像 %r（支持: %s）" % (mirror, ",".join(sorted(table))))
+            return None, None
+        if not codename:
+            errors.append("无法确定 %s 的 codename（/etc/os-release 里没有 VERSION_CODENAME）" % os_id)
+            return None, None
+        keyring = ("/usr/share/keyrings/ubuntu-archive-keyring.gpg" if os_id == "ubuntu"
+                   else "/usr/share/keyrings/debian-archive-keyring.gpg")
+        suites = "%s %s-updates %s-backports %s-security" % (codename, codename, codename, codename)
+        if os_id == "debian":
+            suites = "%s %s-updates %s-security" % (codename, codename, codename)
+        content = (
+            "# 由 wtool 生成（kind=%s mirror=%s）—— 如需修改请改清单后重跑\n"
+            "Types: deb\n"
+            "URIs: %s\n"
+            "Suites: %s\n"
+            "Components: main universe restricted multiverse\n"
+            "Signed-By: %s\n" % (kind, mirror, uri, suites, keyring)
+        )
+        dest = "/etc/apt/sources.list.d/ubuntu.sources" if os_id == "ubuntu" \
+               else "/etc/apt/sources.list.d/debian.sources"
+        return content, dest
+
+    if kind in ("yum-mirror", "distro-mirror") and os_id in (
+            "rocky", "centos", "rhel", "almalinux", "fedora"):
+        base = YUM_MIRRORS.get(mirror)
+        if not base:
+            errors.append("未知镜像 %r" % mirror)
+            return None, None
+        path = {"rocky": "/rocky", "centos": "/centos", "almalinux": "/almalinux",
+                "rhel": "/rocky", "fedora": "/fedora"}.get(os_id, "/" + os_id)
+        content = (
+            "# 由 wtool 生成（kind=%s mirror=%s）\n"
+            "[wtool-baseos]\n"
+            "name=wtool baseos ($releasever)\n"
+            "baseurl=%s%s/$releasever/BaseOS/$basearch/os/\n"
+            "enabled=1\n"
+            "gpgcheck=1\n\n"
+            "[wtool-appstream]\n"
+            "name=wtool appstream ($releasever)\n"
+            "baseurl=%s%s/$releasever/AppStream/$basearch/os/\n"
+            "enabled=1\n"
+            "gpgcheck=1\n" % (kind, mirror, base, path, base, path)
+        )
+        return content, "/etc/yum.repos.d/wtool-mirror.repo"
+
+    errors.append("kind=%r 不支持发行版 %r（支持 ubuntu/debian/rocky/centos/rhel/almalinux/fedora）"
+                  % (kind, os_id))
+    return None, None
 
 
 # --------------------------------------------------------------------------
@@ -227,6 +371,12 @@ def validate_entries(entries, project_root, home, state_dir, errors, warnings):
     seen_dest = {}
 
     for entry in entries:
+        # 只有 env / link / task 的 src 是"项目内相对路径"；
+        # sysfile 的 src 可选（也可用 kind 生成），source 的 src 是 URL
+        if entry.kind in ("sysfile", "source"):
+            if entry.kind == "sysfile" and entry.src and not is_safe_rel(entry.src):
+                errors.append("sysfile src=%r 必须是不含 .. 的相对路径" % entry.src)
+            continue
         if not is_safe_rel(entry.src):
             errors.append("%s src=%r 必须是不含 .. 的相对路径"
                           % (entry.kind, entry.src))
@@ -391,10 +541,9 @@ def merge_rc(text, project_id, block, prio, remove_only):
         if insert_at is None:
             # 没有比我更靠前的块：插到最前面，保证顺序与安装先后无关
             insert_at = blocks[0][0] if blocks else len(lines)
-        pad = []
-        if insert_at > 0 and lines and lines[insert_at - 1] != "":
-            pad = [""]
-        lines = lines[:insert_at] + pad + list(block) + lines[insert_at:]
+        # 不额外插入空行：任何"装饰性"空行都会在卸载后残留，
+        # 破坏"install→uninstall 内容字节级还原"这条不变量。
+        lines = lines[:insert_at] + list(block) + lines[insert_at:]
 
     new_text = "\n".join(lines) + ("\n" if lines else "")
     changed = new_text != (text if text is not None else "")
@@ -577,6 +726,146 @@ def _rcs_with_our_block(home, project_id):
     return out
 
 
+def when_matches(when, os_id, arch):
+    """逗号分隔 = AND。支持 os:ubuntu / !os:debian / arch:x86_64。"""
+    if not when:
+        return True
+    for cond in when.replace(",", " ").split():
+        if cond.startswith("!os:"):
+            if os_id == cond[4:]:
+                return False
+        elif cond.startswith("os:"):
+            if os_id != cond[3:]:
+                return False
+        elif cond.startswith("arch:"):
+            if arch != cond[5:]:
+                return False
+        else:
+            return False        # 未知条件按不匹配处理，避免误执行
+    return True
+
+
+def plan_provision(args, scratch):
+    """规划 provision：system-file → source → task 三个阶段。"""
+    project_root = os.path.abspath(args.project)
+    home = os.path.abspath(args.home)
+    state_dir = os.path.abspath(args.state)
+    errors, warnings = [], []
+    os.makedirs(scratch, exist_ok=True)
+
+    manifest_path = os.path.join(project_root, "wtool.xml")
+    meta, entries = parse_manifest(manifest_path, project_root, errors)
+    if meta is None:
+        raise PlanError("\n".join(errors))
+
+    project_id = meta["id"] or os.path.basename(project_root)
+    if not is_safe_rel(project_id):
+        errors.append("项目 id 非法: %r" % project_id)
+
+    sysfile_rows = []
+    source_rows = []
+    task_rows = []
+    idx = 0
+
+    for entry in entries:
+        if entry.kind == "sysfile":
+            if not when_matches(getattr(entry, "when", ""), args.os_id, args.arch):
+                warnings.append("when=%s 不匹配，跳过系统文件 %s" % (entry.when, entry.dest))
+                continue
+            dest = entry.dest
+            # disable 只是把原文件改名，先处理掉，不需要内容
+            if entry.mode == "disable":
+                sysfile_rows.append(("disable", dest, "", "", "no", entry.desc))
+                continue
+            if entry.src:
+                if not is_safe_rel(entry.src):
+                    errors.append("system-file src=%r 必须是相对路径" % entry.src)
+                    continue
+                abs_src = os.path.join(project_root, entry.src)
+                if not os.path.isfile(abs_src):
+                    errors.append("system-file src 不存在: %s" % abs_src)
+                    continue
+                content = read_text(abs_src)
+            else:
+                content, dest_hint = render_distro_mirror(
+                    entry.sf_kind, args.os_id, args.os_codename, entry.mirror, errors)
+                if content is None:
+                    continue
+                if entry.dest == "auto":
+                    dest = dest_hint
+            cf = os.path.join(scratch, "sysfile.%d" % idx)
+            idx += 1
+            with open(cf, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            sysfile_rows.append((entry.mode, dest, cf, sha256_text(content),
+                                 "yes" if entry.backup else "no", entry.desc))
+
+        elif entry.kind == "source":
+            if not when_matches(getattr(entry, "when", ""), args.os_id, args.arch):
+                warnings.append("when=%s 不匹配，跳过 source %s" % (entry.when, entry.src))
+                continue
+            src_dir = entry.dir or "$WTOOL_SRC/" + project_id.split("/")[-1]
+            src_dir = src_dir.replace("$WTOOL_SRC", args.src_root)
+            overlay = os.path.join(project_root, entry.overlay)
+            if not os.path.isdir(overlay):
+                overlay = ""
+            source_rows.append((src_dir, entry.src, entry.ref, entry.branch, overlay))
+
+        elif entry.kind == "task":
+            if not is_safe_rel(entry.src):
+                errors.append("provision src=%r 必须是相对路径" % entry.src)
+                continue
+            # 解析顺序：源码树（overlay 铺进去之后）> 项目根
+            # 这样 wsw.sh 可以放在 overlay/ 里，编译时它在源码树根目录
+            abs_src = ""
+            for entry_src in entries:
+                if entry_src.kind == "source":
+                    ov = os.path.join(project_root, entry_src.overlay, entry.src)
+                    if os.path.isfile(ov):
+                        sdir = entry_src.dir or "$WTOOL_SRC/" + project_id.split("/")[-1]
+                        sdir = sdir.replace("$WTOOL_SRC", args.src_root)
+                        abs_src = os.path.join(sdir, entry.src)
+                        break
+            if not abs_src:
+                cand = os.path.join(project_root, entry.src)
+                if os.path.isfile(cand):
+                    abs_src = cand
+            if not abs_src:
+                errors.append("provision src 找不到（项目根或 overlay/ 下都没有）: %s" % entry.src)
+                continue
+            task_rows.append((entry.runner, abs_src, entry.marker,
+                              entry.desc or entry.src, entry.when))
+
+    if errors:
+        raise PlanError("\n".join(errors))
+
+    os.makedirs(scratch, exist_ok=True)
+    with open(os.path.join(scratch, "sysfiles.tsv"), "w", encoding="utf-8") as fh:
+        for row in sysfile_rows:
+            fh.write("\t".join(row) + "\n")
+    with open(os.path.join(scratch, "sources.tsv"), "w", encoding="utf-8") as fh:
+        for row in source_rows:
+            fh.write("\t".join(row) + "\n")
+    with open(os.path.join(scratch, "tasks.tsv"), "w", encoding="utf-8") as fh:
+        for row in task_rows:
+            fh.write("\t".join(row) + "\n")
+
+    _write_meta(scratch, {
+        "project_id": project_id,
+        "project_root": project_root,
+        "engine": ENGINE_VERSION,
+        "os_id": args.os_id or "-",
+        "os_version": args.os_version or "-",
+        "os_codename": args.os_codename or "-",
+        "arch": args.arch or "-",
+        "jobs": args.jobs or "-",
+        "prefix": args.prefix or "-",
+        "src_root": args.src_root or "-",
+    })
+    return {"project_id": project_id, "warnings": warnings,
+            "sysfiles": sysfile_rows, "sources": source_rows, "tasks": task_rows}
+
+
 def _write_plan(scratch, rows):
     os.makedirs(scratch, exist_ok=True)
     with open(os.path.join(scratch, "plan.tsv"), "w",
@@ -595,6 +884,26 @@ def _write_meta(scratch, mapping):
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+def list_projects(root):
+    """扫描工作区里所有 wtool.xml，按 (priority, id) 排序输出。"""
+    root = os.path.abspath(root)
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in (".repo", ".git", "node_modules", "__pycache__")]
+        if "wtool.xml" not in filenames:
+            continue
+        errors = []
+        meta, _entries = parse_manifest(os.path.join(dirpath, "wtool.xml"),
+                                        dirpath, errors)
+        if meta is None:
+            continue
+        found.append((meta["priority"], meta["id"] or os.path.basename(dirpath), dirpath))
+        dirnames[:] = []          # 项目内部不再嵌套项目
+    for prio, pid, path in sorted(found):
+        print("%d\t%s\t%s" % (prio, pid, path))
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="wtool_plan.py", add_help=True)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -614,12 +923,24 @@ def build_parser():
     common(ip)
     up = sub.add_parser("plan-uninstall")
     common(up)
+    pp = sub.add_parser("plan-provision")
+    common(pp)
+    pp.add_argument("--os-id", default="")
+    pp.add_argument("--os-version", default="")
+    pp.add_argument("--os-codename", default="")
+    pp.add_argument("--arch", default="")
+    pp.add_argument("--jobs", default="")
+    pp.add_argument("--prefix", default="")
+    pp.add_argument("--src-root", default="")
 
     vp = sub.add_parser("validate")
     vp.add_argument("project")
     vp.add_argument("--home", required=True)
     vp.add_argument("--state", required=True)
     vp.add_argument("--force", action="store_true")
+
+    lp = sub.add_parser("list-projects")
+    lp.add_argument("--root", required=True)
     return p
 
 
@@ -643,6 +964,15 @@ def main(argv):
                 print("wtool: warning: %s" % w, file=sys.stderr)
             print("project   : %s" % res["project_id"])
             print("actions   : %d rc" % sum(1 for r in res["rows"] if r[0] == "rc"))
+        elif args.cmd == "plan-provision":
+            res = plan_provision(args, args.scratch)
+            for w in res["warnings"]:
+                print("wtool: warning: %s" % w, file=sys.stderr)
+            print("project   : %s" % res["project_id"])
+            print("actions   : %d sysfile, %d source, %d task"
+                  % (len(res["sysfiles"]), len(res["sources"]), len(res["tasks"])))
+        elif args.cmd == "list-projects":
+            list_projects(args.root)
         elif args.cmd == "validate":
             errors, warnings = [], []
             root = os.path.abspath(args.project)

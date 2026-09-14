@@ -4,7 +4,14 @@
 
 ---
 
-## 1. provision：安装软件 / 编译（最紧迫）
+## 1. provision：安装软件 / 编译 —— ✅ 已实现（2026-09-10）
+
+见 `docs/spec.md` §11。`<system-file>` / `<source>` / `<provision>` 三件套已落地，
+`os/ubuntu` 已按新方案迁移。下面保留原始设计说明作为历史记录。
+
+---
+
+## 1. provision：安装软件 / 编译（原始设计）
 
 **问题**：mytool 的 `os` 项目要 `sudo apt install`、`nvim` 项目要源码编译 neovim。这些操作**不可逆**，一旦混进 `install`，"完全配对"这条不变量就没了。
 

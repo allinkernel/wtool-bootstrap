@@ -23,6 +23,22 @@
 3. **Python 只算不写。** 除 scratch 目录外，py 不产生任何副作用。
 4. **Shell 只写不算。** 所有落盘动作集中在 `lib/wtool_fs.sh`，文本逻辑全在 py。
 
+### 两个角色：声明链接 vs 稳定地址
+
+很多疑问都源于把这两者混为一谈：
+
+| 角色 | 谁创建 | 在清单里声明吗 | 用途 | 例子 |
+|---|---|---|---|---|
+| **声明链接** | `<link>` | ✅ | "应用去这个位置找配置" | `~/.tmux.conf` |
+| **稳定地址** | 引擎 install 时自动 | ❌ | "整个项目的稳定、防搬家路径"，供**配置内部互相引用** | `~/.wtool/links/<id>`（指向项目根） |
+
+**规则**：
+- 清单只声明"应用去找的"链接；
+- 配置文件**内部**要引用本项目其它文件时，写 `$HOME/.wtool/links/<id>/...`（稳定地址），不要写仓库真实路径，也不要用 `$HOME` 之外的 env 变量（见下）。
+- 为什么不能只靠 env 变量（如 `WTOOL_TMUX_DIR`）：tmux 的 `#()` 命令在**渲染时**用 `sh -c` 执行，`$HOME` 必然存在；而自定义 env 变量只有"启动 tmux server 的那个 shell 里 source 过它"才在。**`$HOME/.wtool/links/<id>` 是唯一两者兼得的选择**（实测 tmux 3.4 验证）。
+
+> 代价：`id` 因此成了**对外契约**，会同时出现在 `~/.wtool/links/<id>`、rc 块、和配置文件的引用里。改 id = 改三处 + 重装。已写进本规范与 `terminal/tmux/wtool.xml` 的注释。
+
 ---
 
 ## 2. 角色划分
@@ -214,3 +230,127 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 ```sh
 ./tests/pairing_test.sh      # 期望 PASS: 20  FAIL: 0
 ```
+
+---
+
+## 10. 环境变量契约（谁提供、何时有效）
+
+分清三类，避免"以为配好了其实没有"：
+
+| 类 | 变量 | 谁产生 | 何时有效 | 重启 shell 后 |
+|---|---|---|---|---|
+| **A 长期** | `WTOOL_PREFIX` | `bootstrap` 项目的 `env.zsh`/`env.bash` | 每次开 shell | ✅ 有 |
+| **A 长期** | `WTOOL_OS_ID` / `WTOOL_OS_VERSION` / `WTOOL_OS_CODENAME` / `WTOOL_OS_LIKE` | 同上（`lib/wtool_os.sh` 读 `/etc/os-release`） | 每次开 shell | ✅ 有 |
+| **A 长期** | `WTOOL_ARCH` / `WTOOL_JOBS` | 同上 | 每次开 shell | ✅ 有 |
+| **A 长期** | `PATH` += `$WTOOL_PREFIX/bin` 和 `$WTOOL_PROJECT_DIR/bin`（`wtool` 命令） | 同上 | 每次开 shell | ✅ 有 |
+| **B 构建期** | `WTOOL_SRC_DIR` / `WTOOL_REF` | 引擎在跑 `wsw.sh` 前临时注入 | 仅该次构建 | ❌ 不该有 |
+| **C source 期** | `WTOOL_PROJECT_ID` / `WTOOL_PROJECT_DIR` / `WTOOL_PROJECT_ROOT` | rc 块 | source 期间（会被后加载的块覆盖） | ⚠️ 有但只对最后一个块成立 |
+
+**设计原则：引擎自足。** `wtool` 命令不依赖 shell 里有没有这些变量——
+`WTOOL_HOME/STATE/ROOT/PREFIX` 由引擎自己推导，`WTOOL_OS_*`/`ARCH`/`JOBS`
+由引擎现场探测（`wt_os_detect`），`WTOOL_SRC_DIR`/`REF` 从项目 `wtool.xml` 读。
+所以在 docker 里 `wtool provision` 也能正确工作，哪怕 shell 一个变量都没导出。
+
+**B 类为什么不能进 shell**：它描述的是"这一次构建"而不是"这台机器的常态"。
+`WTOOL_REF=v0.10.4` 只对 nvim 有意义；两个项目同时构建时还会互相覆盖。
+
+**`WTOOL_PREFIX` 的语义**：编译安装的唯一前缀，`wsw.sh` 只准往这里写。
+卸载 = 删掉 `$WTOOL_PREFIX` 下对应文件（不需要 journal）。
+
+---
+
+## 11. provision 层（不可逆操作，与 install 分离）
+
+`install` 只做可逆的事（软链 + rc 块 + 系统文件），`provision` 做**不可逆**的事
+（装包、编译）。两者永不互相调用。
+
+```sh
+wtool.sh provision <项目> [--dry-run] [--force] [--with-system]
+wtool.sh bootstrap          [--with-system] [--dry-run] [--force] [--no-system]
+```
+
+`bootstrap` = 扫描工作区所有 `wtool.xml`（按 priority）→ 逐个 provision → 逐个 install。
+
+### 三个阶段（顺序固定）
+
+| 阶段 | 清单元素 | 可逆？ | 需要 root？ |
+|---|---|---|---|
+| 1. 系统文件 | `<system-file>` | **是**（备份/还原，进 journal） | 是（能直写就不 sudo） |
+| 2. 上游源码 | `<source>` | 否（构建缓存，journal 记 `srcdir`） | 否 |
+| 3. 任务 | `<provision>` | 否（只记 marker 与日志） | 视任务而定 |
+
+### `<system-file>`：换源等
+
+| 属性 | 说明 |
+|---|---|
+| `dest` | 绝对路径；与 `kind` 搭配时可用 `auto` 让引擎按发行版决定 |
+| `src` | 项目内相对路径（自定义内容） |
+| `kind` | `apt-mirror` / `yum-mirror` / `distro-mirror`：引擎按 `/etc/os-release` 生成 |
+| `mirror` | `ustc` / `tuna` / `aliyun`（默认 `ustc`） |
+| `mode` | `replace`（备份后覆盖）/ `add`（不存在才建）/ `disable`（原文件改名禁用） |
+| `backup` | 默认 `replace` 时为 `true` |
+
+语义：写前把原文件复制到 `$WTOOL_STATE/<id>/system/<slug>/original`，
+journal 记 `sysfile`；`uninstall` 时从备份还原（原本不存在则删除，且只删内容仍是我们写的那份）。
+
+**提权策略**：`id -u == 0` 或目标可写 → 直接写；否则用 `sudo`；都没有则报错。
+
+### `<source>`：源码编译型项目（wsw.sh 约定）
+
+| 属性 | 说明 |
+|---|---|
+| `url` | 上游仓库地址 |
+| `ref` | **必填**，固定到 tag/commit（禁止浮动分支） |
+| `dir` | 源码树位置，默认 `$WTOOL_SRC/<id 末段>`（`~/.wtool/src/...`） |
+| `branch` | 本地分支名，默认 `wsw` |
+| `overlay` | 项目内要铺进源码树的目录，默认 `overlay` |
+
+执行：`clone/fetch` → `checkout --detach <ref>` → `checkout -B <branch>` →
+把 `overlay/*` 复制进源码树 → **提交到 `wsw` 分支**（这样工作区干净、`git diff` 有意义）。
+
+重跑时若源码树脏，且脏文件**全部来自 overlay** → 自动丢弃重铺；否则报错（`--force` 可强制）。
+
+### `<provision>`：任务
+
+| 属性 | 说明 |
+|---|---|
+| `src` | 脚本/playbook；解析顺序：源码树（overlay 铺入后）> 项目根 |
+| `runner` | `ansible`（`.yaml/.yml` 默认）或 `shell` |
+| `marker` | 幂等标记，成功后写 `$WTOOL_STATE/<id>/provisioned/<marker>`；重复执行会跳过 |
+| `when` | 逗号分隔的 AND 条件：`os:ubuntu`、`!os:debian`、`arch:x86_64` |
+| `desc` | 人类可读说明 |
+
+任务环境变量（只在任务执行期间有效）：`WTOOL_PREFIX`、`WTOOL_SOURCE_DIR`、
+`WTOOL_SOURCE_REF`、`WTOOL_PROJECT_ID/DIR/ROOT`、`WTOOL_OS_*`、`WTOOL_ARCH`、`WTOOL_JOBS`。
+
+### journal 新增动作
+
+| action | 含义 | uninstall 行为 |
+|---|---|---|
+| `sysfile` | 写过系统文件（记录备份路径与内容 sha） | 从备份还原 / 删除 |
+| `srcdir` | 克隆过源码树 | 无未提交改动时删除 |
+
+---
+
+## 12. 前置依赖与 bootstrap 顺序（实测）
+
+`wtool` 引擎需要：`sh`（POSIX）、**`python3`（3.6+，仅标准库）**、`git`。
+
+各系统默认情况：
+
+| 来源 | python3 | git | ca-certificates | apt 源协议 |
+|---|---|---|---|---|
+| Ubuntu **server/desktop ISO** 安装 | ✅ 有 | ❌ 缺 | ✅ 有 | HTTP |
+| Ubuntu **docker 镜像** | ❌ **缺** | ❌ 缺 | ❌ 缺 | HTTP |
+
+**因此首次引导的顺序是固定的**（顺序错了会陷在证书验证失败里）：
+
+```sh
+# 1) 用系统自带源装最小依赖（HTTP，不需要证书）
+apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git python3
+# 2) 换镜像源（HTTPS 现在能验证了）
+# 3) wtool provision --with-system && wtool install
+```
+
+`wtool bootstrap` 必须在第 1 步之后才能跑；引擎检测到缺 `python3` 会直接报错。
