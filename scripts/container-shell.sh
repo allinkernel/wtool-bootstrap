@@ -96,11 +96,24 @@ printf '    safe.directory=* ✓  GIT_OPTIONAL_LOCKS=0 ✓（只读挂载也能�
 say "3/4 装 wtool 引擎，然后装全部项目"
 cd "$WTOOL_DIR"
 # 挂载的通常是开发副本，可能有未提交改动 → 用 --force 跳过版本检查
-./install.sh --force
-printf '    引擎已装（根目录 linkfile → bootstrap/install.sh）\n'
+_rc=0
+./install.sh --force || _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    printf '    引擎已装（根目录 linkfile → bootstrap/install.sh）\n'
+else
+    warn "引擎安装返回 $_rc，继续（下面可能也会失败）"
+fi
 
 say "    wtool bootstrap $WTOOL_ARGS"
-"$WTOOL_DIR/bootstrap/wtool.sh" bootstrap $WTOOL_ARGS
+# ⚠️ 关键：即使这里失败也要走到最后进 shell，
+#    否则容器直接退出（docker ps 里就看不到了），你连排查的机会都没有
+_rc=0
+"$WTOOL_DIR/bootstrap/wtool.sh" bootstrap $WTOOL_ARGS || _rc=$?
+if [ "$_rc" -eq 0 ]; then
+    printf '    bootstrap 完成\n'
+else
+    warn "bootstrap 返回 $_rc —— 已经装好的部分仍然可用，下面照常进 shell"
+fi
 
 # ─────────────────────────────────────────────────────────────
 say "4/4 完成，进入 zsh"
@@ -126,4 +139,9 @@ cat <<'TIP'
   想静音：export ZSH_DISABLE_COMPFIX=true
 
 TIP
-exec zsh
+if command -v zsh >/dev/null 2>&1; then
+    exec zsh
+else
+    warn "zsh 没装上，给你 bash"
+    exec bash
+fi
