@@ -603,11 +603,38 @@ wt_publish_gh_release() {
     fi
     if gh release view "$_wtpub_tag" --repo "$_wtpub_repo" >/dev/null 2>&1; then
         wt_step "release $_wtpub_tag 已存在，复用"
-    else
-        gh release create "$_wtpub_tag" --repo "$_wtpub_repo" --title "$_wtpub_title" --notes "$_wtpub_notes" \
-            || wt_die "创建 release 失败: $_wtpub_repo $_wtpub_tag"
-        wt_step "创建 release $_wtpub_tag @ $_wtpub_repo"
+        return 0
     fi
+
+    # view 失败不等于"不存在"：网络抖一下、或者 API 最终一致性，都会让 view
+    # 报错。所以 create 失败之后要再判断一次，否则一个早就建好的 release
+    # 会让整个 publish 硬失败（实测在 shell/zsh 上撞过 422 already exists）。
+    _wtpub_err=$(mktemp "${TMPDIR:-/tmp}/wtool-gh.XXXXXX")
+    if gh release create "$_wtpub_tag" --repo "$_wtpub_repo" \
+            --title "$_wtpub_title" --notes "$_wtpub_notes" 2>"$_wtpub_err"; then
+        wt_step "创建 release $_wtpub_tag @ $_wtpub_repo"
+        rm -f -- "$_wtpub_err"
+        return 0
+    fi
+
+    # 两重判断，因为这两种失败模式完全不同：
+    #   1) create 自己说了"已存在" —— 确定性的，直接信它
+    #   2) create 因为别的原因失败，而 view 现在能通了 —— 说明刚才是 view 抖了
+    # 只做第 2 重是不够的：view 要是持续故障，就永远区分不出来。
+    if grep -qiE 'already[ _-]?exists|tag_name already' "$_wtpub_err" 2>/dev/null; then
+        wt_step "release $_wtpub_tag 已经存在（create 这么说的），复用"
+        rm -f -- "$_wtpub_err"
+        return 0
+    fi
+    if gh release view "$_wtpub_tag" --repo "$_wtpub_repo" >/dev/null 2>&1; then
+        wt_step "release $_wtpub_tag 已经存在（view 现在能看到了），复用"
+        rm -f -- "$_wtpub_err"
+        return 0
+    fi
+
+    cat -- "$_wtpub_err" >&2
+    rm -f -- "$_wtpub_err"
+    wt_die "创建 release 失败: $_wtpub_repo $_wtpub_tag"
 }
 
 # 上传资产（可重复执行，--clobber 覆盖同名）

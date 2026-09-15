@@ -206,6 +206,94 @@ fi
 chk "脚本拿到的是空输入（不是清单行）" \
     "$(cat "$T/out6/out-0/answer.txt" 2>/dev/null | sed 's/拿到 \[//;s/\]//')" ""
 
+echo "== 7. 第三方仓必须被挡住（而不是静默中断整个发布）=="
+# 曾经的真 bug：_perm=$(wt_publish_can_push ...) 在 set -e 下，
+# 命令替换返回非 0 会让脚本静默退出——保护逻辑从没生效，整个发布却无声中断。
+# 之前的测试打桩一律返回 ADMIN，正好绕过了这条路径。
+FS3="$T/ws3"
+mkdir -p "$FS3/third"
+cat > "$FS3/third/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="third" priority="10">
+  <publish to="neovim/neovim"/>
+</wtool>
+EOF
+git -C "$FS3/third" init -q 2>/dev/null || true
+git -C "$FS3/third" add -A 2>/dev/null || true
+git -C "$FS3/third" -c user.name=t -c user.email=t@t commit -q -m init 2>/dev/null || true
+
+# 打桩：viewerPermission 返回 READ（只读）
+mkdir -p "$T/bin-read"
+cat > "$T/bin-read/gh" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$T/gh.log"
+case "\$1 \$2" in
+    "repo view") echo "READ"; exit 0 ;;
+    *)           exit 0 ;;
+esac
+EOF
+chmod +x "$T/bin-read/gh"
+: > "$T/gh.log"
+_rc=0
+PATH="$T/bin-read:$PATH" WTOOL_ROOT="$FS3" WTOOL_STATE="$T/state7" \
+    "$WT" publish --out="$T/out7" > "$T/log7" 2>&1 || _rc=$?
+chk "退出码是 0（不是被 set -e 静默打断）" "$_rc" "0"
+grep -q '没有 neovim/neovim 的写权限' "$T/log7" \
+    && ok "明确报了没有写权限" || { bad "没报权限问题"; sed 's/^/     /' "$T/log7"; }
+grep -q 'kind=\"none\"' "$T/log7" && ok "给了怎么改的建议" || bad "没给建议"
+chk "没有产生任何 gh 写操作" "$(grep -cE 'release (create|upload)' "$T/gh.log" || true)" "0"
+
+echo "== 8. release view 失败但 release 其实存在 → 复用，不硬失败 =="
+# view 失败 ≠ 不存在：网络抖一下或 API 最终一致性都会让 view 报错，
+# 这时 create 会撞 422 already exists。硬失败会让整个发布停在一个
+# 早就建好的 release 上（实测在 shell/zsh 上撞过）。
+mkdir -p "$T/bin-race"
+cat > "$T/bin-race/gh" <<EOF
+#!/bin/sh
+case "\$1 \$2" in
+    "repo view")      echo "ADMIN"; exit 0 ;;
+    "release view")   exit 1 ;;
+    "release create") echo "HTTP 422: Release.tag_name already exists" >&2; exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$T/bin-race/gh"
+FS4="$T/ws4"; mkdir -p "$FS4/racy"
+cat > "$FS4/racy/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="racy" priority="10">
+  <publish to="fakeowner/racy"/>
+</wtool>
+EOF
+git -C "$FS4/racy" init -q 2>/dev/null || true
+git -C "$FS4/racy" add -A 2>/dev/null || true
+git -C "$FS4/racy" -c user.name=t -c user.email=t@t commit -q -m init 2>/dev/null || true
+_rc=0
+PATH="$T/bin-race:$PATH" WTOOL_ROOT="$FS4" WTOOL_STATE="$T/state8" \
+    "$WT" publish --out="$T/out8" > "$T/log8" 2>&1 || _rc=$?
+chk "退出码是 0" "$_rc" "0"
+grep -q '已经存在' "$T/log8" && ok "认 create 的 already exists，直接复用" \
+    || { bad "没有复用已存在的 release"; sed 's/^/     /' "$T/log8"; }
+grep -q '创建 release 失败' "$T/log8" && bad "误判成创建失败" || ok "没有误报创建失败"
+grep -q '上传' "$T/log8" && ok "复用之后照常上传资产" || bad "复用后没上传"
+
+# 场景 8b：view 只是抖了一下，create 说已存在，之后 view 恢复
+mkdir -p "$T/bin-flaky"
+cat > "$T/bin-flaky/gh" <<EOF
+#!/bin/sh
+case "\$1 \$2" in
+    "repo view")      echo "ADMIN"; exit 0 ;;
+    "release view")   exit 1 ;;
+    "release create") echo "HTTP 422: Release.tag_name already exists" >&2; exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$T/bin-flaky/gh"
+_rc=0
+PATH="$T/bin-flaky:$PATH" WTOOL_ROOT="$FS4" WTOOL_STATE="$T/state8b" \
+    "$WT" publish --out="$T/out8b" > "$T/log8b" 2>&1 || _rc=$?
+chk "view 持续故障 + create 报已存在 → 也能复用" "$_rc" "0"
+
 echo
 printf 'publish_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

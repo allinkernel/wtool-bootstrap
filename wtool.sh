@@ -666,7 +666,8 @@ wt_publish_resolve() {
         *)  [ -d "$WTOOL_ROOT/$_want" ] && _abs=$(cd -- "$WTOOL_ROOT/$_want" && pwd) ;;
     esac
 
-    _all=$(python3 "$PY" publish-list --root "$WTOOL_ROOT")
+    _all=$(python3 "$PY" publish-list --root "$WTOOL_ROOT") \
+        || wt_die "读不出项目表（python3 $PY publish-list 失败）"
     _hits=""
     # 先按路径精确匹配（用户直接给了目录）
     if [ -n "$_abs" ]; then
@@ -767,7 +768,12 @@ cmd_publish() {
 
         # 权限检查：第三方上游仓（neovim/neovim）在这里被挡下
         if [ "${WTOOL_ALLOW_FOREIGN:-0}" != 1 ]; then
-            _perm=$(wt_publish_can_push "$_repo"); _rc=$?
+            # 注意：不能写 `_perm=$(...)` 后紧跟 `_rc=$?`。
+            # set -e 下"只含赋值的简单命令"会继承命令替换的退出码，
+            # 非 0 就直接静默退出——保护逻辑没生效，整个发布却无声中断了。
+            # 放进 || 列表里才安全。
+            _rc=0
+            _perm=$(wt_publish_can_push "$_repo") || _rc=$?
             if [ "$_rc" = 1 ]; then
                 wt_warn "  没有 $_repo 的写权限（viewerPermission=$_perm）"
                 wt_warn "  这是第三方仓。要发布请在 wtool.xml 写 <publish to=\"自己的仓\"/>，"
