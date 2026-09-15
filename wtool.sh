@@ -37,7 +37,10 @@ if [ -z "${WTOOL_STATE:-}" ]; then
         WTOOL_STATE="$WTOOL_HOME/.local/state/wtool"
     fi
 fi
+# 必须 export：planner 和项目的 publish.sh 都要读它。
+# 不导出的话 Python 侧读不到，会退化用 basename 当项目 id。
 WTOOL_ROOT=${WTOOL_ROOT:-$(dirname -- "$here")}
+export WTOOL_ROOT
 WTOOL_REGISTRY="$WTOOL_STATE/registry.tsv"
 WTOOL_SRC=${WTOOL_SRC:-$WTOOL_HOME/.wtool/src}
 WTOOL_PREFIX=${WTOOL_PREFIX:-$WTOOL_HOME/.wtool/usr}

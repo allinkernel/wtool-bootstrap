@@ -132,6 +132,50 @@ else
     bad "有行前缀区没填满（列会错位）"
 fi
 
+echo "== 7. ★嵌套项目的 id 必须相对工作区根算（回归）=="
+# 曾经的真 bug：Python 侧用 os.environ.get("WTOOL_ROOT") 推项目 id，
+# 而 wtool.sh 里 WTOOL_ROOT 只是普通赋值、没 export，读不到就退化成
+# "项目目录的 basename"，于是 outer/inner 被当成 inner，跟
+# $WTOOL_STATE/outer/inner 对不上——已发布的项目在表格里显示成没发布。
+# 只有 id 恰好等于目录名的项目才碰巧对。
+WS2="$T/ws-nested"
+mkdir -p "$WS2/outer/inner" "$WS2/outer"
+cat > "$WS2/outer/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="outer" priority="10">
+  <link src="a.conf" dest=".a.conf"/>
+</wtool>
+EOF
+cat > "$WS2/outer/inner/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="outer/inner" priority="20">
+  <link src="b.conf" dest=".b.conf"/>
+</wtool>
+EOF
+S7="$T/state-nested"
+mkdir -p "$S7/outer/inner" "$S7/outer"
+printf 'link\tlink\t/home/x/.b.conf\t%s/b.conf\tsha\n' "$WS2" > "$S7/outer/inner/journal.tsv"
+printf '2026-09-15T00:00:00+0800\towner/inner\tsnapshot-2026-09-15\t1\tsource:abc\n' \
+    > "$S7/outer/inner/publish.tsv"
+printf 'link\tlink\t/home/x/.a.conf\t%s/a.conf\tsha\n' "$WS2" > "$S7/outer/journal.tsv"
+
+# 关键：不设 WTOOL_ROOT 环境变量，模拟真实调用（wtool.sh 里它以前没 export）
+TAB7=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS2" --state "$S7")
+printf '%s\n' "$TAB7" | awk '$1 == "outer" || $1 == "outer/inner" {print "     " $0}'
+chk "outer/inner 的 install 是 +（认得出自己的状态目录）" \
+    "$(printf '%s\n' "$TAB7" | awk '$1 == "outer/inner" {print $3; exit}')" "+"
+chk "outer/inner 的 publish 是 +" \
+    "$(printf '%s\n' "$TAB7" | awk '$1 == "outer/inner" {print $5; exit}')" "+"
+chk "outer 没被 inner 的状态带偏" \
+    "$(printf '%s\n' "$TAB7" | awk '$1 == "outer" {print $5; exit}')" "-"
+chk "汇总：已安装 2、已发布 1" \
+    "$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS2" --state "$S7" --summary | tail -1 | grep -o '已安装 [0-9]*，已发布 [0-9]*')" \
+    "已安装 2，已发布 1"
+
+# 另外，wtool.sh 必须真的把 WTOOL_ROOT 导出（导出后子进程才读得到）
+grep -qE '^export WTOOL_ROOT' "$bootstrap/wtool.sh" \
+    && ok "wtool.sh 导出了 WTOOL_ROOT" || bad "wtool.sh 没导出 WTOOL_ROOT"
+
 echo
 printf 'table_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

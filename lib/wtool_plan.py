@@ -1014,12 +1014,18 @@ def _read_tsv(path):
     return rows
 
 
-def project_state(project_root, state_dir):
-    """从 state 目录读出这个项目"做到哪一步了"。只看文件，不写。"""
-    pid = os.path.relpath(os.path.abspath(project_root),
-                          os.environ.get("WTOOL_ROOT", project_root))
+def project_state(project_root, state_dir, root=None):
+    """从 state 目录读出这个项目"做到哪一步了"。只看文件，不写。
+
+    项目 id 必须相对**工作区根**算，不能靠环境变量推：WTOOL_ROOT 在 shell 侧
+    只是个普通赋值、没 export，读不到就会退化成"项目目录的 basename"，
+    于是 terminal/tmux 被当成 tmux，跟 $WTOOL_STATE/terminal/tmux 对不上，
+    表格里已发布的项目显示成没发布。只有 id 恰好等于目录名的项目才碰巧对。
+    """
+    root = root or os.environ.get("WTOOL_ROOT") or os.path.dirname(os.path.abspath(project_root))
+    pid = os.path.relpath(os.path.abspath(project_root), os.path.abspath(root))
     if pid in (".", "/"):
-        pid = os.path.basename(project_root)
+        pid = os.path.basename(os.path.abspath(project_root))
     pdir = os.path.join(state_dir, pid)
 
     # install 过没有：journal 里有非注释行，或者 registry 里登记了它的软链
@@ -1059,7 +1065,7 @@ def render_table(root, state_dir, verbose=False):
     state_dir = os.path.abspath(state_dir)
     projects = []
     for prio, pid, path, pub in scan_projects(root):
-        st = project_state(path, state_dir)
+        st = project_state(path, state_dir, root=root)
         st["id"] = pid
         st["prio"] = prio
         st["path"] = path
@@ -1221,7 +1227,11 @@ def scan_projects(root):
         for sub in meta["publish"]["subs"]:
             sub_abs = os.path.normpath(os.path.join(dirpath, sub["path"]))
             declared[sub_abs] = dict(sub, _by=meta["id"] or os.path.basename(dirpath))
-        dirnames[:] = []          # 项目内部不再嵌套项目
+        # 这里**不能**剪枝。项目是可以嵌套的（repo manifest 里
+        # editor/astronvim_v5 和 editor/astronvim_v5/astronvim_v5_config
+        # 就是父子关系），剪掉就再也扫不到子项目了。
+        # 有 .repo 时 manifest 能补全，但没有 .repo 的工作区
+        # （比如从发布包解压出来的）就只能靠这次遍历。
 
     # repo manifest 补全：没有 wtool.xml 的项目
     for rel in sorted(_repo_manifest_projects(root)):
@@ -1270,7 +1280,7 @@ def publish_list(root):
                          pub.get("to") or "-"]))
 
 
-def publish_info(project_dir):
+def publish_info(project_dir, ws_root=None):
     """单个项目的发布信息，key<TAB>value 逐行输出，供 shell 读取。"""
     root = os.path.abspath(project_dir)
     errors = []
@@ -1284,7 +1294,8 @@ def publish_info(project_dir):
                             "to": "", "asset": "", "subs": [], "targets": []}}
     pub = meta["publish"]
     # 没有 wtool.xml 的项目用"相对工作区的路径"当 id，和 plan_install 的约定一致
-    _pid = meta["id"] or os.path.relpath(root, os.environ.get("WTOOL_ROOT", root))
+    _ws = ws_root or os.environ.get("WTOOL_ROOT") or root
+    _pid = meta["id"] or os.path.relpath(root, os.path.abspath(_ws))
     if _pid in (".", "/"):
         _pid = os.path.basename(root)
     print("project_id\t%s" % _pid)
@@ -1347,6 +1358,7 @@ def build_parser():
 
     pi = sub.add_parser("publish-info")
     pi.add_argument("project")
+    pi.add_argument("--root", default="")
 
     tb = sub.add_parser("table")
     tb.add_argument("--root", required=True)
@@ -1388,7 +1400,7 @@ def main(argv):
         elif args.cmd == "publish-list":
             publish_list(args.root)
         elif args.cmd == "publish-info":
-            return publish_info(args.project)
+            return publish_info(args.project, args.root or None)
         elif args.cmd == "table":
             lines, projects = render_table(args.root, args.state,
                                            verbose=args.verbose)
