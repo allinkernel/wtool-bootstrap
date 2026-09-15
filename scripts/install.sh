@@ -29,7 +29,8 @@ while [ -L "$self" ]; do
         *)  self=$(dirname -- "$self")/$target ;;
     esac
 done
-here=$(cd -- "$(dirname -- "$self")" && pwd)
+here=$(cd -- "$(dirname -- "$self")" && pwd)          # = <项目>/scripts
+proj=$(cd -- "$here/.." && pwd)                     # = <项目>
 
 say()  { printf 'wtool-bootstrap: %s\n' "$*"; }
 warn() { printf 'wtool-bootstrap: 警告: %s\n' "$*" >&2; }
@@ -38,7 +39,7 @@ die()  { printf 'wtool-bootstrap: 错误: %s\n' "$*" >&2; exit 1; }
 HOME_DIR=${HOME:-/root}
 BOOT_DST=${WTOOL_BOOTSTRAP_DST:-$HOME_DIR/.wtool/bootstrap}
 
-[ -x "$here/wtool.sh" ] || die "这里不是 wtool-bootstrap（找不到 wtool.sh）: $here"
+[ -x "$proj/wtool.sh" ] || die "这里不是 wtool-bootstrap（找不到 wtool.sh）: $proj"
 
 # --------------------------------------------------------------------------
 # 第一步：自举。把引擎挂到一个固定位置，这样任何 shell、任何目录下
@@ -48,16 +49,16 @@ say "引擎自举到 $BOOT_DST"
 mkdir -p -- "$(dirname -- "$BOOT_DST")"
 if [ -L "$BOOT_DST" ]; then
     _cur=$(readlink -f -- "$BOOT_DST" 2>/dev/null || true)
-    if [ "$_cur" = "$here" ]; then
+    if [ "$_cur" = "$proj" ]; then
         say "  已经指向这里，跳过"
     else
-        say "  改指向：$_cur → $here"
-        ln -sfn -- "$here" "$BOOT_DST"
+        say "  改指向：$_cur → $proj"
+        ln -sfn -- "$proj" "$BOOT_DST"
     fi
 elif [ -e "$BOOT_DST" ]; then
     die "$BOOT_DST 已经存在而且不是软链。先自己处理掉（确认里面没有你要的东西）再重试。"
 else
-    ln -sfn -- "$here" "$BOOT_DST"
+    ln -sfn -- "$proj" "$BOOT_DST"
     say "  已创建软链"
 fi
 
@@ -76,7 +77,7 @@ fi
 # 长得一样。（这不算第二份真相：manifest 仍是对 repo 客户端的权威描述，
 # 这里只是给没有 repo 的那种情况兜底。）
 # --------------------------------------------------------------------------
-ws=$(dirname -- "$here")
+ws=$(dirname -- "$proj")
 say "工作区入口（$ws）"
 _ln() {   # <链接名> <相对目标>
     _dest=$ws/$1; _target=$2
@@ -89,8 +90,8 @@ _ln() {   # <链接名> <相对目标>
     [ -e "$ws/$_target" ] || return 0
     ln -sfn -- "$_target" "$_dest" && say "  $1 -> $_target"
 }
-_ln install.sh   bootstrap/install.sh
-_ln uninstall.sh bootstrap/uninstall.sh
+_ln install.sh   bootstrap/scripts/install.sh
+_ln uninstall.sh bootstrap/scripts/uninstall.sh
 _ln README.md    wtool-base/README.md
 _ln guide.md     wtool-base/guide.md
 

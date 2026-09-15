@@ -19,7 +19,8 @@ while [ -L "$self" ]; do
         *)  self=$(dirname -- "$self")/$target ;;
     esac
 done
-here=$(cd -- "$(dirname -- "$self")" && pwd)
+here=$(cd -- "$(dirname -- "$self")" && pwd)          # = <项目>/scripts
+proj=$(cd -- "$here/.." && pwd)                     # = <项目>
 
 say() { printf 'wtool-bootstrap: %s\n' "$*"; }
 die() { printf 'wtool-bootstrap: 错误: %s\n' "$*" >&2; exit 1; }
@@ -48,18 +49,18 @@ if [ -n "${WTOOL_PROJECT_ID:-}" ]; then
     exit 0
 fi
 
-if [ -x "$here/wtool.sh" ]; then
+if [ -x "$proj/wtool.sh" ]; then
     say "让 wtool 逆着卸载各个项目"
-    _ws=$(dirname -- "$here")
-    python3 "$here/lib/wtool_plan.py" list-projects --root "$_ws" 2>/dev/null |
+    _ws=$(dirname -- "$proj")
+    python3 "$proj/lib/wtool_plan.py" list-projects --root "$_ws" 2>/dev/null |
     while IFS='	' read -r _prio _pid _path; do
         [ -n "${_path:-}" ] || continue
         _extra=""
         [ "$NO_SCRIPT" = 1 ] && _extra="--no-script"
         if [ "$DRY" = 1 ]; then
-            "$here/wtool.sh" uninstall "$_path" --dry-run $_extra || true
+            "$proj/wtool.sh" uninstall "$_path" --dry-run $_extra || true
         else
-            "$here/wtool.sh" uninstall "$_path" --force $_extra || true
+            "$proj/wtool.sh" uninstall "$_path" --force $_extra || true
         fi
     done
 fi

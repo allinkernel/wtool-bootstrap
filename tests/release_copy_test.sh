@@ -45,15 +45,16 @@ echo 'export TMUX_DEMO=1' > "$WS/terminal/tmux/env.zsh"
 echo 'agent notes' > "$WS/harness/notes.md"
 
 # bootstrap / wtool-base：假装是发布包解压出来的，用来验工作区入口
+mkdir -p "$WS/bootstrap/scripts"
 cp -f "$bootstrap/wtool.sh" "$WS/bootstrap/wtool.sh"
 mkdir -p "$WS/bootstrap/lib"
 cp -f "$bootstrap/lib/"*.py "$WS/bootstrap/lib/" 2>/dev/null || true
-cat > "$WS/bootstrap/install.sh" <<'EOF'
+cat > "$WS/bootstrap/scripts/install.sh" <<'EOF'
 #!/bin/sh
 echo "bootstrap install.sh 被调用了（WTOOL_PROJECT_ID=${WTOOL_PROJECT_ID:-未设置}）"
 EOF
-cp -f "$bootstrap/uninstall.sh" "$WS/bootstrap/uninstall.sh"
-chmod +x "$WS/bootstrap/install.sh" "$WS/bootstrap/uninstall.sh"
+cp -f "$bootstrap/scripts/uninstall.sh" "$WS/bootstrap/scripts/uninstall.sh"
+chmod +x "$WS/bootstrap/scripts/install.sh" "$WS/bootstrap/scripts/uninstall.sh"
 echo '# 用户文档' > "$WS/wtool-base/README.md"
 echo '# 使用指南' > "$WS/wtool-base/guide.md"
 
@@ -120,8 +121,8 @@ _ln() {
     [ -e "$ws/$_target" ] || return 0
     ln -sfn -- "$_target" "$_dest"
 }
-_ln install.sh   bootstrap/install.sh
-_ln uninstall.sh bootstrap/uninstall.sh
+_ln install.sh   bootstrap/scripts/install.sh
+_ln uninstall.sh bootstrap/scripts/uninstall.sh
 _ln README.md    wtool-base/README.md
 _ln guide.md     wtool-base/guide.md
 EOF
@@ -137,7 +138,8 @@ done
 
 echo "== 5. 入口软链不能覆盖用户的真实文件 =="
 WS2="$T/ws2"; mkdir -p "$WS2/bootstrap" "$WS2/wtool-base"
-cp -f "$WS/bootstrap/install.sh" "$WS2/bootstrap/install.sh"
+mkdir -p "$WS2/bootstrap/scripts"
+cp -f "$WS/bootstrap/scripts/install.sh" "$WS2/bootstrap/scripts/install.sh"
 echo '# 我自己写的 README' > "$WS2/wtool-base/README.md"
 echo 'this is mine' > "$WS2/README.md"          # 真实文件，不是软链
 env HOME="$H" "$WS2/bootstrap/install.sh" >/dev/null 2>&1 || true

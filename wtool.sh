@@ -1036,7 +1036,7 @@ _q() {
 # --------------------------------------------------------------------------
 cmd_init() {
     _dir=""; _id=""; _prio=""
-    _with_build=0; _with_install=0; _with_publish=0
+    _with_build=0; _with_install=0; _with_publish=0; _with_download=0
     while [ $# -gt 0 ]; do
         case $1 in
             --id)           shift; _id=${1:-} ;;
@@ -1044,7 +1044,8 @@ cmd_init() {
             --with-build)   _with_build=1 ;;
             --with-install) _with_install=1 ;;
             --with-publish) _with_publish=1 ;;
-            --all)          _with_build=1; _with_install=1; _with_publish=1 ;;
+            --with-download) _with_download=1 ;;
+            --all)          _with_build=1; _with_install=1; _with_publish=1; _with_download=1 ;;
             -*)             wt_die "未知参数: $1" ;;
             *)              _dir=$1 ;;
         esac
@@ -1052,9 +1053,10 @@ cmd_init() {
     done
     [ -n "$_dir" ] || wt_die "用法: wtool.sh init <目录> [--id ID] [--priority N] [--all]
 
-  --with-build    生成 build.sh（能编译的项目）
-  --with-install  生成 install.sh（有自己安装逻辑的项目）
-  --with-publish  生成 publish.sh（发布时要跑脚本的项目）
+  --with-build    生成 scripts/build.sh（能编译的项目）
+  --with-install  生成 scripts/install.sh（wtool.xml 表达不了的安装步骤）
+  --with-publish  生成 scripts/publish.sh（发布时要跑脚本的项目）
+  --with-download 生成 scripts/download.sh（能从发布页下现成的包）
   --all           三个都要
 
   纯声明式的项目（只靠 wtool.xml 的 link/env 就能装好）不需要任何脚本。"
@@ -1116,19 +1118,22 @@ EOF
     fi
 
     _tpl_dir="$here/templates"
+    mkdir -p -- "$_dir/scripts"
     _emit() {   # <脚本名> <说明>
-        [ -f "$_dir/$1" ] && { wt_warn "$1 已存在，不动它"; return 0; }
+        [ -f "$_dir/scripts/$1" ] && { wt_warn "scripts/$1 已存在，不动它"; return 0; }
         [ -f "$_tpl_dir/$1.tpl" ] || wt_die "缺少模板: $_tpl_dir/$1.tpl"
-        sed "s|@PROJECT_ID@|$_id|g" "$_tpl_dir/$1.tpl" > "$_dir/$1"
-        chmod +x -- "$_dir/$1"
-        wt_step "生成 $1  ($2)"
+        sed "s|@PROJECT_ID@|$_id|g" "$_tpl_dir/$1.tpl" > "$_dir/scripts/$1"
+        chmod +x -- "$_dir/scripts/$1"
+        wt_step "生成 scripts/$1  ($2)"
     }
     [ "$_with_build" = 1 ]   && _emit build.sh   "能构建"
     [ "$_with_install" = 1 ] && _emit install.sh "能安装"
     [ "$_with_publish" = 1 ] && _emit publish.sh "能发布"
+    [ "$_with_download" = 1 ] && _emit download.sh "能从发布页下现成的包"
 
     wt_info "已生成项目: $_dir  (id=$_id priority=$_prio)"
     wt_info "下一步：填 wtool.xml，然后 wtool validate $_dir"
+    wt_info "（动作脚本都在 scripts/ 下；不需要的脚本别留空壳——表格那一列靠它点亮）"
 }
 
 # --------------------------------------------------------------------------
