@@ -1297,7 +1297,10 @@ cmd_publish() {
     # 不豁免的话，下一次 publish 就会以"有未提交改动"把文档项目跳过 ——
     # 一次发布把下一次发布搞坏，自噬。这里只豁免**那一个文件**，
     # 而且必须它的改动只涉及这个文件才放行。
-    _doc_path=$(grep -rl --include='*.md' -F '<!-- >>> wtool:downloads >>>' \
+    # 和 wt_refresh_downloads 用同一个精确模式（整行就是标记），
+    # 不能用 -F 匹配子串 —— 提到这个标记的文档会被误伤
+    _doc_path=$(grep -rl --include='*.md' \
+                    -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' \
                     "$WTOOL_ROOT" 2>/dev/null | head -1)
 
     _done=0
@@ -1348,11 +1351,16 @@ cmd_publish() {
         fi
 
         if [ "$_kind" = "script" ]; then
-            _script_path=$_path/$_script
-            if [ ! -f "$_script_path" ]; then
-                wt_warn "  脚本不存在: $_script_path，跳过"
-                continue
-            fi
+            # 必须走 wt_project_script：它知道脚本住在 scripts/ 下，
+            # 也处理"老位置仍然认"的兼容。自己拼路径会漏掉这一层。
+            _script_path=$_script
+            case $_script_path in
+                /*) ;;
+                *)  _script_path=$(wt_project_script "$_path" "$_script") || {
+                        wt_warn "  脚本不存在: $_path/scripts/$_script，跳过"
+                        continue
+                    } ;;
+            esac
             _out=$_scratch/out-$_done
             rm -rf -- "$_out"; mkdir -p -- "$_out"
 
@@ -1484,7 +1492,10 @@ EOF
 # --------------------------------------------------------------------------
 wt_refresh_downloads() {
     # 目标文档靠标记自己声明，不写死路径
-    _doc=$(grep -rl --include='*.md' -F '<!-- >>> wtool:downloads >>>' \
+    # 只认"整行就是这个标记"的文件。用 -F 匹配子串会误伤：
+    # 任何一篇**提到**这个标记的文档都会被当成目标
+    # （实测把 harness/notes/05-next.md 当成了下载页，然后刷失败）。
+    _doc=$(grep -rl --include='*.md' -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' \
                "$WTOOL_ROOT" 2>/dev/null | head -1)
     if [ -z "$_doc" ]; then
         wt_info "没有文档带 wtool:downloads 标记，跳过下载链接刷新"
