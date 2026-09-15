@@ -68,6 +68,33 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# 工作区入口
+#
+# 用 `repo sync` 拿到的客户端，这些软链由 repo 按 manifest 的 linkfile 建。
+# 但**从发布包解压出来的工作区没有 repo 客户端**，那些软链就不存在——
+# 而 README 恰恰让人跑 `./install.sh`。所以这里补上，让两条路拿到的工作区
+# 长得一样。（这不算第二份真相：manifest 仍是对 repo 客户端的权威描述，
+# 这里只是给没有 repo 的那种情况兜底。）
+# --------------------------------------------------------------------------
+ws=$(dirname -- "$here")
+say "工作区入口（$ws）"
+_ln() {   # <链接名> <相对目标>
+    _dest=$ws/$1; _target=$2
+    if [ -L "$_dest" ]; then
+        [ "$(readlink -- "$_dest")" = "$_target" ] && return 0
+    elif [ -e "$_dest" ]; then
+        warn "  $1 已存在且不是软链，跳过（怕覆盖你的东西）"
+        return 0
+    fi
+    [ -e "$ws/$_target" ] || return 0
+    ln -sfn -- "$_target" "$_dest" && say "  $1 -> $_target"
+}
+_ln install.sh   bootstrap/install.sh
+_ln uninstall.sh bootstrap/uninstall.sh
+_ln README.md    wtool-base/README.md
+_ln guide.md     wtool-base/guide.md
+
+# --------------------------------------------------------------------------
 # 第二步：被引擎调用时到此为止
 # --------------------------------------------------------------------------
 if [ -n "${WTOOL_PROJECT_ID:-}" ]; then

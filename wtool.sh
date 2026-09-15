@@ -80,8 +80,46 @@ wt_meta_get() {
     awk -F'\t' -v k="$_key" '$1==k {print $2; found=1} END{exit !found}' "$_file"
 }
 
+# 这个目录是不是"从发布包解压出来的副本"？
+#
+# 是的话就不该要求它是 git 仓库——发布包里没有 .git（带了会大好几倍，
+# 而且 clone 出来的历史对"我只想装上用"的人毫无意义）。
+# 每个源码包都会带一个 wtool/.wtool-dist/<id>.json 标记，记着打包时的
+# commit 和来源仓，正好拿来当版本信息，比 git 还准（它记的是发布那一刻）。
+wt_release_marker() {   # <项目目录> → 打印标记文件路径
+    _rm_dir=$1
+    _rm_ws=$(python3 -c '
+import os, sys
+p, root = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+print(os.path.relpath(p, root))
+' "$_rm_dir" "$WTOOL_ROOT" 2>/dev/null) || return 1
+    case $_rm_ws in ..|../*|/*) return 1 ;; esac
+    _rm_name=$(printf '%s' "$_rm_ws" | tr '/' '-')
+    _rm_file="$WTOOL_ROOT/.wtool-dist/$_rm_name.json"
+    [ -f "$_rm_file" ] && printf '%s\n' "$_rm_file"
+}
+
 wt_git_precheck() {
     _dir=$1
+
+    # 发布包解压出来的副本：认标记，不认 .git
+    _marker=$(wt_release_marker "$_dir" 2>/dev/null || true)
+    if [ -n "$_marker" ] && ! git -C "$_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        _mcommit=$(python3 -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.load(fh).get("commit") or "-")
+' "$_marker" 2>/dev/null || echo "-")
+        _mrepo=$(python3 -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.load(fh).get("repo") or "-")
+' "$_marker" 2>/dev/null || echo "-")
+        WTOOL_HEAD=$(printf '%s' "$_mcommit" | cut -c1-12)
+        wt_info "这是发布副本（$_mrepo @ ${WTOOL_HEAD}），跳过 git 检查"
+        return 0
+    fi
+
     if git -C "$_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         if [ -n "$(git -C "$_dir" status --porcelain -uno 2>/dev/null)" ]; then
             if [ "${WTOOL_FORCE:-0}" = 1 ]; then
@@ -942,6 +980,13 @@ cmd_publish() {
         wt_die "没有任何项目声明了 publish"
     fi
 
+    # 上一轮 publish 在结尾重写过带下载块的文档，于是那个文件是"未提交"的。
+    # 不豁免的话，下一次 publish 就会以"有未提交改动"把文档项目跳过 ——
+    # 一次发布把下一次发布搞坏，自噬。这里只豁免**那一个文件**，
+    # 而且必须它的改动只涉及这个文件才放行。
+    _doc_path=$(grep -rl --include='*.md' -F '<!-- >>> wtool:downloads >>>' \
+                    "$WTOOL_ROOT" 2>/dev/null | head -1)
+
     _done=0
     # 清单走 fd 3，不走 stdin。脚本自己（或它调用的 docker/gh）读 stdin 是常事，
     # 从 stdin 读清单会被它们偷走行，表现是后面的项目被静默跳过。
@@ -1039,7 +1084,21 @@ cmd_publish() {
             wt_warn "  $_path 不是 git 仓库，无法确定版本，跳过（用 --force 也推不出有意义的包）"
             continue
         fi
-        if [ "${WTOOL_FORCE:-0}" != 1 ] && [ -n "$(git -C "$_path" status --porcelain 2>/dev/null)" ]; then
+        _dirty=$(git -C "$_path" status --porcelain 2>/dev/null || true)
+        if [ -n "$_dirty" ] && [ -n "$_doc_path" ]; then
+            case $_doc_path in
+                "$_path"/*)
+                    _doc_rel=${_doc_path#"$_path"/}
+                    # 只看"除了那个文档之外还有没有别的改动"
+                    _other=$(printf '%s\n' "$_dirty" | awk -v d="$_doc_rel" '$NF != d')
+                    if [ -z "$_other" ]; then
+                        wt_info "  只有自动生成的下载块变了，按干净处理（记得提交 $_doc_rel）"
+                        _dirty=""
+                    fi
+                    ;;
+            esac
+        fi
+        if [ "${WTOOL_FORCE:-0}" != 1 ] && [ -n "$_dirty" ]; then
             wt_warn "  $_path 有未提交改动，拒绝发布（先提交，或加 --force）"
             continue
         fi
