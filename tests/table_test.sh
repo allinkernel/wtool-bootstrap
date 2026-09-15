@@ -51,7 +51,8 @@ cat > "$WS/scripted/wtool.xml" <<'EOF'
   <publish kind="script" script="publish.sh"/>
 </wtool>
 EOF
-for f in build.sh install.sh publish.sh; do echo '#!/bin/sh' > "$WS/scripted/$f"; done
+mkdir -p "$WS/scripted/scripts"
+for f in build.sh install.sh publish.sh; do echo '#!/bin/sh' > "$WS/scripted/scripts/$f"; done
 
 # 什么都没有：三列都该是灰点
 cat > "$WS/nowhere/wtool.xml" <<'EOF'
@@ -87,27 +88,36 @@ EOF
 S="$T/state"
 tbl() { env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S" "$@"; }
 # 取某一行的某一列。列都是单字符（可能带颜色），用 grep -o 抽转义码更好使。
-cell() {   # <项目 id> <列号 3..5>
+cell() {   # <项目 id> <列号 3..6>
     tbl --color=always | awk -v id="$1" '$1 == id {print $'"$2"'; exit}'
 }
 
-echo "== 1. build 列：只看 build.sh 在不在 =="
-chk "scripted 有 build.sh → 亮绿" "$(cell scripted 3)" "$(printf '\033[92m●\033[0m')"
+echo "== 1. build 列：有脚本但没构建过 = TODO，构建过才亮 =="
+chk "scripted 有 build.sh 但没构建过 → 灰 -" "$(cell scripted 3)" "$(printf '\033[2m-\033[0m')"
 chk "declarative 没脚本 → 灰点" "$(cell declarative 3)" "$(printf '\033[2m·\033[0m')"
 chk "nowhere 没脚本 → 灰点" "$(cell nowhere 3)" "$(printf '\033[2m·\033[0m')"
 
-echo "== 2. install 列：脚本优先，否则看 wtool.xml 有没有 link/env =="
-chk "scripted 有 install.sh → 亮绿" "$(cell scripted 4)" "$(printf '\033[92m●\033[0m')"
-chk "declarative 没脚本但有 link/env → 绿（引擎通用机制）" \
-    "$(cell declarative 4)" "$(printf '\033[32m●\033[0m')"
-chk "nowhere 既没脚本也没 link/env → 灰点" "$(cell nowhere 4)" "$(printf '\033[2m·\033[0m')"
+# 记一笔"构建过"，build 列应该变亮
+mkdir -p "$S/scripted"
+printf 'build\t2026-09-15T00:00:00+0800\t\n' > "$S/scripted/actions.tsv"
+chk "构建过之后 build 变亮绿" "$(cell scripted 3)" "$(printf '\033[92m●\033[0m')"
+# 但 download 列仍然没做过（两个动作各自独立）
+chk "同项目的 download 列仍是灰点（没有 download.sh）" \
+    "$(cell scripted 4)" "$(printf '\033[2m·\033[0m')"
+
+echo "== 2. install 列：能力看脚本/清单，状态看装没装 =="
+# install 列现在是三态：装了才是绿/亮绿，没装是 TODO
+chk "scripted 有 install.sh 但没装过 → TODO" "$(cell scripted 5)" "$(printf '\033[2m-\033[0m')"
+chk "declarative 有 link/env 但没装过 → TODO" \
+    "$(cell declarative 5)" "$(printf '\033[2m-\033[0m')"
+chk "nowhere 既没脚本也没 link/env → 灰点" "$(cell nowhere 5)" "$(printf '\033[2m·\033[0m')"
 
 echo "== 3. publish 列：脚本优先，否则看 kind 是不是 none =="
-chk "scripted 有 publish.sh → 亮绿" "$(cell scripted 5)" "$(printf '\033[92m●\033[0m')"
-chk "declarative 没脚本但能打源码包 → 绿" \
-    "$(cell declarative 5)" "$(printf '\033[32m●\033[0m')"
+chk "scripted 有 publish.sh 但没发过 → TODO" "$(cell scripted 6)" "$(printf '\033[2m-\033[0m')"
+chk "declarative 能打源码包但没发过 → TODO" \
+    "$(cell declarative 6)" "$(printf '\033[2m-\033[0m')"
 chk "nowhere 声明了 kind=none → 灰点（不是 TODO）" \
-    "$(cell nowhere 5)" "$(printf '\033[2m·\033[0m')"
+    "$(cell nowhere 6)" "$(printf '\033[2m·\033[0m')"
 
 echo "== 4. 嵌套项目的 id 相对工作区根算 =="
 # 曾经的真 bug：Python 侧靠 os.environ['WTOOL_ROOT'] 推 id，而 wtool.sh 里
@@ -123,8 +133,8 @@ printf '2026-09-15T00:00:00+0800\towner/x\tsnapshot-2026-09-15\t1\tsource:abc\n'
     > "$S/declarative/publish.tsv"
 V=$(tbl --verbose)
 printf '%s\n' "$V" | awk '$1 == "declarative" {print "     " $0}'
-chk "装过之后 install 格子还是绿的（能力不随状态变）" \
-    "$(cell declarative 4)" "$(printf '\033[32m●\033[0m')"
+chk "装过之后 install 变绿（通用机制）" \
+    "$(cell declarative 5)" "$(printf '\033[32m●\033[0m')"
 printf '%s\n' "$V" | grep -q 'declarative.*发布过' && ok "verbose 里显示了发布状态" \
     || bad "verbose 里没有发布状态"
 
@@ -174,7 +184,7 @@ else
 fi
 
 echo "== 9. 表头列名齐全 =="
-for col in 项目 prio build install publish; do
+for col in 项目 prio build download install publish; do
     tbl | head -1 | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
 done
 

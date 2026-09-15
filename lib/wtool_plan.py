@@ -1047,6 +1047,20 @@ def project_state(project_root, state_dir, root=None):
         pid = os.path.basename(os.path.abspath(project_root))
     pdir = os.path.join(state_dir, pid)
 
+    # 做过哪些动作（build / download）。actions.tsv 只追加，不参与回滚，
+    # 和 journal 是两件事，所以分开两张表。
+    actions = {}
+    for row in _read_tsv(os.path.join(pdir, "actions.tsv")):
+        if row and len(row) >= 2:
+            actions[row[0]] = row[1]
+    # 产物清单：当前磁盘上的东西是谁产出的（build 还是 download）
+    artifacts = _read_tsv(os.path.join(pdir, "artifacts.tsv"))
+    artifact_source = ""
+    for row in artifacts:
+        if len(row) >= 3 and row[2]:
+            artifact_source = row[2]
+            break
+
     # install 过没有：journal 里有非注释行，或者 registry 里登记了它的软链
     journal = os.path.join(pdir, "journal.tsv")
     installed = any(True for _ in _read_tsv(journal))
@@ -1069,7 +1083,9 @@ def project_state(project_root, state_dir, root=None):
     published = any(True for _ in _read_tsv(os.path.join(pdir, "publish.tsv")))
 
     return {"id": pid, "installed": installed, "provisioned": provisioned,
-            "published": published, "markers": markers, "sysfiles": sysfiles}
+            "published": published, "markers": markers, "sysfiles": sysfiles,
+            "actions": actions, "artifacts": artifacts,
+            "artifact_source": artifact_source}
 
 
 # 能力标记。用圆点而不是勾/叉：圆点在等宽字体里宽度确定，
@@ -1083,13 +1099,25 @@ C_DIM = "\033[2m"
 C_OFF = "\033[0m"
 
 
-def _cell(kind, color_on):
-    """kind: 'script' | 'generic' | 'none'"""
+def _cell(kind, done, color_on):
+    """一格。kind: 'script' | 'generic' | 'none'；done: 用户做过没有。
+
+    三种样子：
+      亮绿 ●  项目提供了脚本，而且已经做过了
+      绿   ●  引擎的通用机制能办（这对 install 是"装过了"，对 publish 是"发过了"）
+      灰   ·  没这项能力
+      黄   -  有这项能力，但用户还没做（TODO）
+
+    "-" 和 "·" 的区别很重要：前者是"你可以做但还没做"，后者是"这件事跟你这个
+    项目无关"。混成一个符号，人就分不清该不该动手。
+    """
+    if kind == "none":
+        return (C_DIM + DOT_NONE + C_OFF) if color_on else DOT_NONE
+    if not done:
+        return (C_DIM + "-" + C_OFF) if color_on else "-"
     if kind == "script":
         return (C_BRIGHT + DOT_SCRIPT + C_OFF) if color_on else DOT_SCRIPT
-    if kind == "generic":
-        return (C_GREEN + DOT_GENERIC + C_OFF) if color_on else DOT_GENERIC
-    return (C_DIM + DOT_NONE + C_OFF) if color_on else DOT_NONE
+    return (C_GREEN + DOT_GENERIC + C_OFF) if color_on else DOT_GENERIC
 
 
 def project_caps(path, pub):
@@ -1103,9 +1131,15 @@ def project_caps(path, pub):
     """
     caps = {}
 
-    caps["build"] = "script" if os.path.isfile(os.path.join(path, "build.sh")) else "none"
+    def _script(name):
+        """脚本现在住在 scripts/ 下；项目根的老位置仍然认（引擎会给警告）"""
+        return (os.path.isfile(os.path.join(path, "scripts", name))
+                or os.path.isfile(os.path.join(path, name)))
 
-    has_script = os.path.isfile(os.path.join(path, "install.sh"))
+    caps["build"] = "script" if _script("build.sh") else "none"
+    caps["download"] = "script" if _script("download.sh") else "none"
+
+    has_script = _script("install.sh")
     errors, entries = [], []
     wf = os.path.join(path, "wtool.xml")
     if os.path.isfile(wf):
@@ -1114,7 +1148,7 @@ def project_caps(path, pub):
     caps["install"] = ("script" if has_script
                        else "generic" if declarative else "none")
 
-    if os.path.isfile(os.path.join(path, "publish.sh")):
+    if _script("publish.sh"):
         caps["publish"] = "script"
     elif pub["kind"] != "none":
         caps["publish"] = "generic"
@@ -1148,8 +1182,8 @@ def render_table(root, state_dir, verbose=False, color=None):
 
     c_id = max([_width("项目")] + [_width(p["id"]) for p in projects]) if projects else 4
     # 列内容都是单个字符（可能带 ANSI 颜色），列宽固定 1 + 两边各留一个空格
-    headers = ["项目", "prio", "build", "install", "publish"]
-    widths = [c_id, 4, 5, 7, 7]
+    headers = ["项目", "prio", "build", "download", "install", "publish"]
+    widths = [c_id, 4, 5, 8, 7, 7]
 
     out = []
     head = "  ".join(_pad(h, w) for h, w in zip(headers, widths))
@@ -1157,12 +1191,17 @@ def render_table(root, state_dir, verbose=False, color=None):
     out.append("-" * _width(head))
 
     for p in projects:
+        acts = p["actions"]
         cells = [
             _pad(p["id"], widths[0]),
             _pad(str(p["prio"]), widths[1]),
-            _pad(_cell(p["caps"]["build"], color), widths[2]),
-            _pad(_cell(p["caps"]["install"], color), widths[3]),
-            _pad(_cell(p["caps"]["publish"], color), widths[4]),
+            # build / download：脚本在不在决定能力，actions.tsv 决定做没做过
+            _pad(_cell(p["caps"]["build"], "build" in acts, color), widths[2]),
+            _pad(_cell(p["caps"]["download"], "download" in acts, color), widths[3]),
+            # install：装了没有看 journal
+            _pad(_cell(p["caps"]["install"], p["installed"], color), widths[4]),
+            # publish：发过没有看本地发布记录
+            _pad(_cell(p["caps"]["publish"], p["published"], color), widths[5]),
         ]
         out.append("  ".join(cells).rstrip())
 
@@ -1170,8 +1209,10 @@ def render_table(root, state_dir, verbose=False, color=None):
         out.append("")
         for p in projects:
             detail = []
+            if p["artifact_source"]:
+                detail.append("当前产物来自 %s" % p["artifact_source"])
             if p["caps"]["install"] == "script":
-                detail.append("装法由 install.sh 决定")
+                detail.append("装法由 scripts/install.sh 决定")
             elif p["caps"]["install"] == "generic":
                 detail.append("装过" if p["installed"] else "没装")
             if p["cap_prov"]:
@@ -1188,7 +1229,7 @@ def render_table(root, state_dir, verbose=False, color=None):
                 when = recs[-1][2] if recs and len(recs[-1]) > 2 else "?"
                 detail.append("发布过（%s）" % when)
             elif p["caps"]["publish"] == "script":
-                detail.append("发布走 publish.sh")
+                detail.append("发布走 scripts/publish.sh")
             else:
                 detail.append("没发布过")
             out.append("  %s  %s" % (_pad(p["id"], c_id), "；".join(detail)))
@@ -1203,8 +1244,12 @@ def table_summary(projects):
     pub = sum(1 for p in projects if p["published"])
     todo_pub = sum(1 for p in projects
                    if p["pub"]["kind"] != "none" and not p["published"])
-    return ("共 %d 个项目：已安装 %d，已发布 %d，可发布未发布 %d"
-            % (n, installed, pub, todo_pub))
+    todo_build = sum(1 for p in projects
+                     if p["caps"]["build"] == "script" and "build" not in p["actions"])
+    todo_inst = sum(1 for p in projects
+                    if p["caps"]["install"] != "none" and not p["installed"])
+    return ("共 %d 个项目：已安装 %d（待装 %d），已发布 %d（待发 %d），待构建 %d"
+            % (n, installed, todo_inst, pub, todo_pub, todo_build))
 
 
 # --------------------------------------------------------------------------

@@ -933,7 +933,7 @@ cmd_table() {
     # shellcheck disable=SC2086
     python3 "$PY" table --root "$WTOOL_ROOT" --state "$WTOOL_STATE" $_args
     echo
-    printf '+ 已完成   - 待做(TODO)   . 无此能力\n'
+    printf '亮绿 ● 项目提供了脚本且已做过   绿 ● 引擎通用机制已办      灰 - 能做还没做(TODO)      灰 · 无此能力\n'
 }
 
 # --------------------------------------------------------------------------
