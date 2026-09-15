@@ -561,9 +561,14 @@ wt_pack_source() {
     fi
 
     _wtpub_tar="$_wtpub_out.tmp.$$.tar"
+    # --transform 结尾那个 S 不能少：默认情况下 GNU tar 会把变换同时应用到
+    # **符号链接的指向**上，于是包里的相对软链会被改写成
+    #   themes/foo.zsh-theme -> wtool/bar.zsh-theme
+    # 解压出来全是断链。S = 不要动符号链接的指向。
+    # （实测 oh-my-zsh 的 themes/*.zsh-theme 和 plugins/*/*.plugin.zsh 中招。）
     # shellcheck disable=SC2086
     tar -C "$WTOOL_ROOT" \
-        --transform="s|^|$_wtpub_prefix/|" \
+        --transform="s|^|$_wtpub_prefix/|S" \
         --sort=name --numeric-owner --owner=0 --group=0 $_wtpub_mtime \
         --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
         --exclude='.mypy_cache' --exclude='.pytest_cache' --exclude='.ruff_cache' \
@@ -571,7 +576,7 @@ wt_pack_source() {
         -cf "$_wtpub_tar" "$_wtpub_rel" || { rm -f "$_wtpub_tar"; wt_die "tar 打包失败: $_wtpub_rel"; }
 
     if [ -n "$_wtpub_extra_dir" ] && [ -n "$_wtpub_extra_rel" ]; then
-        tar -C "$_wtpub_extra_dir" --transform="s|^|$_wtpub_prefix/|" \
+        tar -C "$_wtpub_extra_dir" --transform="s|^|$_wtpub_prefix/|S" \
             --sort=name --numeric-owner --owner=0 --group=0 \
             -rf "$_wtpub_tar" "$_wtpub_extra_rel" \
             || { rm -f "$_wtpub_tar"; wt_die "追加 $_wtpub_extra_rel 失败"; }

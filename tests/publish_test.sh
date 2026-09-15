@@ -294,6 +294,53 @@ PATH="$T/bin-flaky:$PATH" WTOOL_ROOT="$FS4" WTOOL_STATE="$T/state8b" \
     "$WT" publish --out="$T/out8b" > "$T/log8b" 2>&1 || _rc=$?
 chk "view 持续故障 + create 报已存在 → 也能复用" "$_rc" "0"
 
+echo "== 9. ★相对符号链接不能在包里被改写（回归）=="
+# 曾经的真 bug：--transform 默认连**符号链接的指向**一起改写，于是包里变成
+#   themes/foo.zsh-theme -> wtool/bar.zsh-theme
+# 解压出来全是断链。oh-my-zsh 里 themes/*.zsh-theme 和
+# plugins/*/*.plugin.zsh 都中招了。
+# 只在真去下载发布包解压时才暴露——光看 tar -tf 是看不出来的，
+# 所以这条测试必须真解压再检查软链。
+FS5="$T/ws5"; mkdir -p "$FS5/lnk/themes" "$FS5/lnk/plugins/pp"
+printf 'colours\n' > "$FS5/lnk/themes/real.zsh-theme"
+ln -sf real.zsh-theme "$FS5/lnk/themes/alias.zsh-theme"
+printf 'plug\n' > "$FS5/lnk/plugins/pp/real.zsh"
+ln -sf real.zsh "$FS5/lnk/plugins/pp/alias.plugin.zsh"
+ln -sf /etc/hostname "$FS5/lnk/abs-link"
+cat > "$FS5/lnk/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="lnk" priority="10">
+  <publish kind="source" to="fakeowner/lnk"/>
+</wtool>
+EOF
+git -C "$FS5/lnk" init -q 2>/dev/null || true
+git -C "$FS5/lnk" add -A 2>/dev/null || true
+git -C "$FS5/lnk" -c user.name=t -c user.email=t@t commit -q -m init 2>/dev/null || true
+
+_rc=0
+PATH="$T/bin:$PATH" WTOOL_ROOT="$FS5" WTOOL_STATE="$T/state9" \
+    "$WT" publish lnk --out="$T/out9" > "$T/log9" 2>&1 || _rc=$?
+chk "发布成功" "$_rc" "0"
+
+LPKG=$(ls "$T/out9"/out-0/*.tar.* 2>/dev/null | head -1)
+mkdir -p "$T/x9"
+case $(file -b -- "$LPKG") in
+    *Zstandard*) zstd -dc -- "$LPKG" | tar -xf - -C "$T/x9" ;;
+    *gzip*)      gzip -dc -- "$LPKG" | tar -xf - -C "$T/x9" ;;
+    *)           tar -xf "$LPKG" -C "$T/x9" ;;
+esac
+
+B="$T/x9/wtool/lnk"
+chk "相对软链的指向没被改写" "$(readlink "$B/themes/alias.zsh-theme")" "real.zsh-theme"
+chk "嵌套的相对软链也没被改写" "$(readlink "$B/plugins/pp/alias.plugin.zsh")" "real.zsh"
+chk "绝对软链保持绝对" "$(readlink "$B/abs-link")" "/etc/hostname"
+if [ -r "$B/themes/alias.zsh-theme" ]; then
+    ok "解压后软链打得开（不是断链）"
+else
+    bad "解压后是断链——--transform 又动了符号链接的指向"
+fi
+chk "顺着软链读到的内容对" "$(cat "$B/themes/alias.zsh-theme" 2>/dev/null)" "colours"
+
 echo
 printf 'publish_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]
