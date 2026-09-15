@@ -4,7 +4,7 @@
 # 全程在临时目录里跑，绝不碰真实 $HOME。
 #   1. install  → uninstall 必须字节级回到安装前
 #   2. install 幂等（第二次无变更）
-#   3. 安装顺序不影响 ~/.zshrc 的最终内容
+#   3. 安装顺序不影响 ~/.wtool/.zshrc 的最终内容（用户 rc 里只有一个 loader 块）
 #   4. 仓库脏 / 非 git 时拒绝安装
 #   5. 软链被用户换成真实文件时，uninstall 不删它
 set -eu
@@ -66,8 +66,16 @@ after_install=$(snap "$h/home")
     && ok "软链已创建" || bad "软链已创建"
 [ -d "$h/home/.wtool/links/terminal/tmux" ] \
     && ok "中转链接已创建" || bad "中转链接已创建"
-grep -q '# >>> wtool:terminal/tmux' "$h/home/.zshrc" \
-    && ok "rc 块已写入" || bad "rc 块已写入"
+# 用户 rc 里只有**一个** loader 块；项目的块收在 ~/.wtool/.zshrc 里
+grep -q '^# >>> wtool >>>$' "$h/home/.zshrc" \
+    && ok "用户 rc 里只有一个 loader 块" || bad "用户 rc 里没有 loader 块"
+grep -q '# >>> wtool:terminal/tmux' "$h/home/.wtool/.zshrc" \
+    && ok "项目块写进了 ~/.wtool/.zshrc" || bad "~/.wtool/.zshrc 里没有项目块"
+[ "$(grep -c 'wtool:' "$h/home/.zshrc" || true)" = 0 ] \
+    && ok "用户 rc 里没有散落的项目块（只有 loader）" || bad "用户 rc 里还有项目块"
+# loader 必须真的指向汇总文件，否则 a source 空
+grep -q 'source\|\.' "$h/home/.zshrc" && grep -q '\.wtool/\.zshrc' "$h/home/.zshrc" \
+    && ok "loader 指向 ~/.wtool/.zshrc" || bad "loader 没指向汇总文件"
 grep -q 'setopt auto_cd' "$h/home/.zshrc" \
     && ok "原有 rc 内容保留" || bad "原有 rc 内容保留"
 
@@ -105,7 +113,7 @@ mkrepo "$pa" "zz/late" 50
 mkrepo "$pb" "aa/early" 10
 "$boot/wtool.sh" install "$pa" > /dev/null 2>&1
 "$boot/wtool.sh" install "$pb" > /dev/null 2>&1
-order1=$(grep -o 'wtool:[a-z/]*' "$h/home/.zshrc" | tr '\n' ' ')
+order1=$(grep -o '^# >>> wtool:[a-z/]*' "$h/home/.wtool/.zshrc" | sed 's/^# >>> //' | tr '\n' ' ')
 
 h2=$(newhome)
 export WTOOL_HOME="$h2/home" WTOOL_STATE="$h2/state"
@@ -114,10 +122,10 @@ mkrepo "$pa2" "zz/late" 50
 mkrepo "$pb2" "aa/early" 10
 "$boot/wtool.sh" install "$pb2" > /dev/null 2>&1
 "$boot/wtool.sh" install "$pa2" > /dev/null 2>&1
-order2=$(grep -o 'wtool:[a-z/]*' "$h2/home/.zshrc" | tr '\n' ' ')
+order2=$(grep -o '^# >>> wtool:[a-z/]*' "$h2/home/.wtool/.zshrc" | sed 's/^# >>> //' | tr '\n' ' ')
 
 check "两种安装顺序得到相同的 rc 块顺序" "$order1" "$order2"
-check "低优先级在前" "wtool:aa/early wtool:aa/early wtool:zz/late wtool:zz/late " "$order1"
+check "低优先级在前" "wtool:aa/early wtool:zz/late " "$order1"
 rm -rf "$h" "$h2"
 
 # --------------------------------------------------------------------------
@@ -203,7 +211,7 @@ if command -v zsh >/dev/null 2>&1; then
     before_rc=$(cat "$h/home/.zshrc")
     "$boot/wtool.sh" install "$moved" > "$h/move.log" 2>&1
     after_rc=$(cat "$h/home/.zshrc")
-    check "仓库搬家后 rc 块不变" "$before_rc" "$after_rc"
+    check "仓库搬家后 loader 块不变" "$before_rc" "$after_rc"
     got2=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1; printf "%s" \
         "$WTOOL_PROJECT_ROOT"')
     check "搬家后 WTOOL_PROJECT_ROOT 指向新位置" "$moved" "$got2"
@@ -228,8 +236,8 @@ rm -rf "$bcopy/.git" "$bcopy/lib/__pycache__"
     bad "install bootstrap" "$(cat "$h/boot.log")"; }
 [ -d "$h/home/.wtool/links/bootstrap" ] \
     && ok "bootstrap 中转链接已创建" || bad "bootstrap 中转链接已创建"
-grep -q '# >>> wtool:bootstrap' "$h/home/.zshrc" \
-    && ok "bootstrap 的 rc 块已写入" || bad "bootstrap 的 rc 块已写入"
+grep -q '# >>> wtool:bootstrap' "$h/home/.wtool/.zshrc" \
+    && ok "bootstrap 的块写进了汇总文件" || bad "bootstrap 的块没写进去"
 
 if command -v zsh >/dev/null 2>&1; then
     got=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1;

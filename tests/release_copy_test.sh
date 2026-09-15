@@ -76,8 +76,12 @@ env HOME="$H" WTOOL_ROOT="$WS" WTOOL_STATE="$T/state" \
 grep -q '发布副本' "$T/log1" && ok "认出了这是发布副本" || bad "没认出发布副本"
 grep -q 'd0a872a12345' "$T/log1" && ok "版本取自标记里的 commit" || bad "没取到 commit"
 has "软链接建好了" "$H/.wtool/links/terminal/tmux"
-has "shell 托管块写了" "$H/.zshrc"
-grep -q 'TMUX_DEMO\|env.zsh' "$H/.zshrc" && ok "托管块指向项目的 env" || bad "托管块内容不对"
+has "用户 rc 里写了 loader 块" "$H/.zshrc"
+has "环境变量汇总文件也写了" "$H/.wtool/.zshrc"
+grep -q '^# >>> wtool >>>$' "$H/.zshrc" \
+    && ok "用户 rc 里只有 loader 块" || bad "用户 rc 里的块不对"
+grep -q 'TMUX_DEMO\|terminal/tmux' "$H/.wtool/.zshrc" \
+    && ok "项目的 env 收在 ~/.wtool/.zshrc 里" || bad "汇总文件里没有这个项目"
 
 echo "== 2. 没有标记的目录仍然拒绝（别把门开太大）=="
 mkdir -p "$WS/plain"

@@ -713,24 +713,28 @@ def plan_install(args, scratch):
         for rc in entry.rc_files:
             desired[rc] = entry.src
 
-    all_rc = sorted(set(desired) | set(_rcs_with_our_block(home, project_id)))
-    for rc in all_rc:
-        env_rel = desired.get(rc)
-        block = None
-        if env_rel is not None:
-            block = render_block(project_id, meta["schema"], meta["priority"],
-                                 args.head, meta["manifest_sha"], env_rel)
-        old = read_text(rc)
-        new_text, removed_sha, changed = merge_rc(old, project_id, block,
-                                                  meta["priority"], env_rel is None)
-        if not changed:
+    # 每个项目的环境变量不再直接写进用户的 ~/.zshrc，而是各自写成一个块文件
+    # 放在状态目录里；用户的 rc 里只留**一个** loader 块，source 汇总文件。
+    #
+    # 好处：wtool 从此不需要在用户真正的 rc 里做"按优先级排序插入"这种危险操作，
+    # 排序和增删全在自己生成的文件里做，出错也炸不到用户的东西。
+    # 想彻底去掉 wtool 对环境的影响，删掉那一个块即可。
+    state = os.path.abspath(args.state)
+    for rc, env_rel in sorted(desired.items()):
+        shell = "zsh" if rc.endswith("zshrc") else "bash"
+        block = render_block(project_id, meta["schema"], meta["priority"],
+                             args.head, meta["manifest_sha"], env_rel)
+        new_text = "\n".join(block) + "\n"
+        dest = os.path.join(state, project_id, "env.%s" % shell)
+        # 内容没变就别出这条动作，否则每次 install 都"有变更"，
+        # 幂等性检查（和"没有需要变更的内容"这句提示）都会失效
+        if read_text(dest) == new_text:
             continue
-        rc_file = os.path.join(scratch, "rc.%d" % rc_index)
-        with open(rc_file, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        blk_file = os.path.join(scratch, "envblock.%s" % shell)
+        with open(blk_file, "w", encoding="utf-8", errors="surrogateescape") as fh:
             fh.write(new_text)
-        rc_index += 1
-        new_block_sha = sha256_text("\n".join(block) + "\n") if block else "-"
-        rows.append(("rc", "file", rc, rc_file, sha256_text(new_text), new_block_sha))
+        rows.append(("envblock", shell, dest, blk_file,
+                     sha256_text(new_text), env_rel))
 
     _write_plan(scratch, rows)
     _write_meta(scratch, {
@@ -770,17 +774,23 @@ def plan_uninstall(args, scratch):
         raise PlanError("项目 id 非法: %r" % project_id)
 
     rows = []
-    rc_index = 0
+    # 删掉这个项目的 env 块文件。汇总文件由 shell 侧的 wt_env_sync 重新生成，
+    # 块文件一没，这个项目自然就从汇总里消失了。
+    state = os.path.abspath(args.state)
+    for shell in ("zsh", "bash"):
+        blk = os.path.join(state, project_id, "env.%s" % shell)
+        if os.path.isfile(blk):
+            rows.append(("envblock-del", shell, blk, "-", "-", "-"))
+    # 老版本把块直接写在用户的 rc 里，这里顺手清掉（迁移）
     for rc in sorted(_rcs_with_our_block(home, project_id)):
         old = read_text(rc)
         new_text, removed_sha, changed = merge_rc(old, project_id, None,
                                                   DEFAULT_PRIORITY, True)
         if not changed:
             continue
-        rc_file = os.path.join(scratch, "rc.%d" % rc_index)
+        rc_file = os.path.join(scratch, "rc.%d" % len(rows))
         with open(rc_file, "w", encoding="utf-8", errors="surrogateescape") as fh:
             fh.write(new_text)
-        rc_index += 1
         rows.append(("rc", "file", rc, rc_file, sha256_text(new_text),
                      removed_sha or "-"))
 
@@ -1198,6 +1208,157 @@ def table_summary(projects):
 
 
 # --------------------------------------------------------------------------
+# 环境变量汇总
+#
+# 每个项目的 env 块单独存在 $WTOOL_STATE/<id>/env.<shell>，
+# 这里把它们按 (priority, id) 拼成一个文件，再由用户 rc 里的**唯一一个**
+# loader 块 source 进去。
+#
+# 为什么不让每个项目往用户的 rc 里各写一段：
+#   * 用户 rc 会被 N 个项目改来改去，脏且危险（要在别人的文件里做排序插入）
+#   * 想彻底撤销得逐个块删，漏一个就留垃圾
+# 现在用户的 rc 里只有一个块，删掉它 wtool 对环境的影响就没了。
+# --------------------------------------------------------------------------
+LOADER_BEGIN = "# >>> wtool >>>"
+LOADER_END = "# <<< wtool <<<"
+LOADER_OLD_RE = re.compile(r"^# >>> wtool:(\S+) .* >>>\s*$")
+
+AGG_HEADER = """# 由 wtool 生成 —— 不要手改，改了下次 install/uninstall 会被覆盖。
+#
+# 每个项目的环境变量按 priority 排在这里；要改内容请去改各自项目里的
+# env 文件（见每段开头的 # >>> wtool:<项目> 注释）。
+#
+# 这个文件被 ~/.{shell}rc 里的一小段托管块 source。想彻底去掉 wtool
+# 对环境的影响，删掉那里的 # >>> wtool >>> 块即可。
+"""
+
+
+def _loader_block(shell):
+    return [
+        LOADER_BEGIN,
+        "# wtool 装的东西都从这里生效。所有项目的环境变量都收在下面这个文件里，",
+        "# 这里只是把它 source 进来 —— 想彻底去掉 wtool 的影响，删掉这个块即可。",
+        '[ -f "$HOME/.wtool/.%src" ] && . "$HOME/.wtool/.%src"' % (shell, shell),
+        LOADER_END,
+    ]
+
+
+def collect_env_blocks(state, shell):
+    """扫出所有项目的 env 块，按 (priority, id) 排序。"""
+    state = os.path.abspath(state)
+    found = []
+    if not os.path.isdir(state):
+        return found
+    for dirpath, dirnames, filenames in os.walk(state):
+        name = "env.%s" % shell
+        if name not in filenames:
+            continue
+        pid = os.path.relpath(dirpath, state)
+        prio = DEFAULT_PRIORITY
+        meta = os.path.join(dirpath, "meta.tsv")
+        text = read_text(meta)
+        if text:
+            for line in text.split("\n"):
+                if line.startswith("priority\t"):
+                    try:
+                        prio = int(line.split("\t", 1)[1])
+                    except ValueError:
+                        pass
+        found.append((prio, pid, read_text(os.path.join(dirpath, name)) or ""))
+    found.sort(key=lambda t: (t[0], t[1]))
+    return found
+
+
+def render_env(home, state, shell):
+    """算出两个文件的新内容：用户的 rc，和汇总文件。
+
+    返回 (rc_path, rc_text|None, agg_path, agg_text|None)
+    None 表示这个文件不该存在（要删掉）。
+    """
+    home = os.path.abspath(home)
+    rc_path = os.path.join(home, ".%src" % shell)
+    agg_path = os.path.join(home, ".wtool", ".%src" % shell)
+
+    blocks = collect_env_blocks(state, shell)
+
+    # 汇总文件
+    if blocks:
+        parts = [AGG_HEADER.format(shell=shell)]
+        for _prio, pid, text in blocks:
+            parts.append("")
+            parts.append(text.rstrip("\n"))
+        agg_text = "\n".join(parts).rstrip("\n") + "\n"
+    else:
+        agg_text = None
+
+    # 用户的 rc：先把它里面所有 wtool 的块（老的 per-project 块 + 新的 loader）
+    # 全部剥掉，再按需要补上 loader。这样迁移是自动的，也不会堆积。
+    old = read_text(rc_path)
+    if old is None and agg_text is None:
+        return rc_path, None, agg_path, None
+
+    lines = (old or "").split("\n")
+    kept, skipping = [], False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == LOADER_BEGIN or LOADER_OLD_RE.match(stripped):
+            skipping = True
+            continue
+        if skipping:
+            if stripped == LOADER_END or re.match(r"^# <<< wtool:\S+ <<<\s*$", stripped):
+                skipping = False
+            continue
+        kept.append(line)
+
+    while kept and not kept[-1].strip():
+        kept.pop()
+
+    if agg_text is None:
+        # 一个项目都没装：rc 恢复成剥掉块之后的样子
+        new_rc = "\n".join(kept)
+        new_rc = new_rc + "\n" if new_rc else ""
+        if old is None:
+            return rc_path, None, agg_path, None
+        if new_rc == "":
+            return rc_path, None, agg_path, None      # 文件空了就删掉
+        return rc_path, new_rc, agg_path, None
+
+    body = "\n".join(kept).rstrip("\n")
+    new_rc = (body + "\n\n" if body else "") + "\n".join(_loader_block(shell)) + "\n"
+    return rc_path, new_rc, agg_path, agg_text
+
+
+def plan_env(args, scratch):
+    """把 render_env 的结果落成动作行，交给 shell 执行（Python 只算不写）。"""
+    rows = []
+    for shell in ("zsh", "bash"):
+        rc_path, rc_text, agg_path, agg_text = render_env(args.home, args.state, shell)
+
+        if rc_text is None:
+            if os.path.isfile(rc_path):
+                rows.append(("remove", "file", rc_path, "-", "-", "-"))
+        else:
+            old = read_text(rc_path)
+            if old != rc_text:
+                f = os.path.join(scratch, "env-rc.%s" % shell)
+                with open(f, "w", encoding="utf-8", errors="surrogateescape") as fh:
+                    fh.write(rc_text)
+                rows.append(("write", "file", rc_path, f, sha256_text(rc_text), "-"))
+
+        if agg_text is None:
+            if os.path.isfile(agg_path):
+                rows.append(("remove", "file", agg_path, "-", "-", "-"))
+        else:
+            old = read_text(agg_path)
+            if old != agg_text:
+                f = os.path.join(scratch, "env-agg.%s" % shell)
+                with open(f, "w", encoding="utf-8", errors="surrogateescape") as fh:
+                    fh.write(agg_text)
+                rows.append(("write", "file", agg_path, f, sha256_text(agg_text), "-"))
+    return rows
+
+
+# --------------------------------------------------------------------------
 # 下载链接块
 #
 # 发布之后要把"没有 git clone 时怎么装"那一节的下载地址刷新掉。
@@ -1561,6 +1722,11 @@ def build_parser():
     pi.add_argument("project")
     pi.add_argument("--root", default="")
 
+    pe = sub.add_parser("plan-env")
+    pe.add_argument("--home", required=True)
+    pe.add_argument("--state", required=True)
+    pe.add_argument("--scratch", required=True)
+
     ud = sub.add_parser("update-downloads")
     ud.add_argument("--doc", required=True)
     ud.add_argument("--rows", required=True)
@@ -1586,7 +1752,7 @@ def main(argv):
             for w in res["warnings"]:
                 print("wtool: warning: %s" % w, file=sys.stderr)
             n_link = sum(1 for r in res["rows"] if r[0] == "link")
-            n_rc = sum(1 for r in res["rows"] if r[0] == "rc")
+            n_rc = sum(1 for r in res["rows"] if r[0] in ("rc", "envblock"))
             print("project   : %s" % res["project_id"])
             print("root      : %s" % res["project_root"])
             print("actions   : %d link, %d rc" % (n_link, n_rc))
@@ -1609,6 +1775,10 @@ def main(argv):
             publish_list(args.root)
         elif args.cmd == "publish-info":
             return publish_info(args.project, args.root or None)
+        elif args.cmd == "plan-env":
+            rows = plan_env(args, args.scratch)
+            _write_plan(args.scratch, rows)
+            print("actions   : %d" % len(rows))
         elif args.cmd == "update-downloads":
             # 内容从 stdout 出，由 shell 落盘（Python 只算不写）
             update_downloads(args.doc, args.rows)

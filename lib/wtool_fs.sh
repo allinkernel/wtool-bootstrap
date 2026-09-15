@@ -220,13 +220,33 @@ wt_plan_exec() {
                 wt_registry_set "$_dest" "$WTOOL_PROJECT_ID" "$_kind"
                 ;;
             rc)
-                # 记下"这个 rc 文件本来不存在，是我们创建的"，卸载时好还原
+                # 老版本写在用户 rc 里的块。现在只用于迁移清理，
+                # 不再有新的写入走这条路。
                 if [ ! -e "$_dest" ]; then
                     wt_journal_add rccreate file "$_dest"
                     wt_created_rc_add "$_dest"
                 fi
                 wt_atomic_write "$_dest" "$_source"
                 wt_journal_add rc file "$_dest" "-" "$_extra"
+                ;;
+            envblock)
+                # 项目的环境变量块，落在状态目录里（不是用户的 rc）
+                wt_ensure_dir "$(dirname -- "$_dest")"
+                wt_atomic_write "$_dest" "$_source"
+                ;;
+            envblock-del)
+                [ -e "$_dest" ] && rm -f -- "$_dest"
+                ;;
+            write)
+                # 汇总文件 / 用户 rc 的新内容
+                wt_ensure_dir "$(dirname -- "$_dest")"
+                wt_atomic_write "$_dest" "$_source"
+                ;;
+            remove)
+                # 一个项目都没装了：汇总文件和 loader 块都该消失，
+                # 让用户的 rc 回到没装过 wtool 的样子
+                [ -e "$_dest" ] && rm -f -- "$_dest"
+                wt_remove_dir_if_empty "$(dirname -- "$_dest")"
                 ;;
             *)
                 wt_die "未知动作: $_action"
@@ -673,4 +693,58 @@ wt_publish_record() {
         "$_wtpub_repo" "$_wtpub_tag" "$_wtpub_n" "$_wtpub_detail" \
         >> "$WTOOL_STATE/$_wtpub_id/publish.tsv" 2>/dev/null \
         || wt_warn "写 publish.tsv 失败（不影响发布）"
+}
+
+
+# --------------------------------------------------------------------------
+# 动作记录：这个项目上执行过哪些动作
+#
+# 表格里那三列的"做没做过"就靠它。跟 journal 分开：
+#   journal      "当前该撤销什么"，uninstall 逆着做，重复执行只更新
+#   actions.tsv  "做过什么"的时间线，只追加，不参与回滚
+# 两件事混在一张表里，迟早会互相污染。
+# --------------------------------------------------------------------------
+wt_record_action() {   # <项目 id> <动作名> [说明]
+    _ra_id=$1; _ra_act=$2; _ra_note=${3:-}
+    [ -n "$_ra_id" ] || return 0
+    wt_dry && return 0
+    mkdir -p -- "$WTOOL_STATE/$_ra_id" 2>/dev/null || return 0
+    printf '%s\t%s\t%s\n' "$_ra_act" "$(date +%Y-%m-%dT%H:%M:%S%z)" "$_ra_note" \
+        >> "$WTOOL_STATE/$_ra_id/actions.tsv" 2>/dev/null || true
+}
+
+# 最近一次动作的时间戳（没有就打印空）
+wt_last_action() {   # <项目 id> <动作名>
+    _la_f="$WTOOL_STATE/$1/actions.tsv"
+    [ -f "$_la_f" ] || return 0
+    awk -F'\t' -v a="$2" '$1 == a {t = $2} END {if (t) print t}' "$_la_f"
+}
+
+wt_has_action() {   # <项目 id> <动作名>
+    [ -n "$(wt_last_action "$1" "$2")" ]
+}
+
+
+# --------------------------------------------------------------------------
+# 环境变量汇总：每次 install/uninstall 之后重新生成
+#
+# 顺序很重要 —— 先让项目的 env 块落盘（wt_plan_exec 干的），
+# 再从这里把它们拼成 ~/.wtool/.zshrc，最后保证用户 rc 里只有一个 loader 块。
+#
+# 这一步是**全量重算**，不是增量修改。所以：
+#   * 重复 install 不会堆积
+#   * 删掉某个项目的块文件，它就自然从汇总里消失，不需要额外的"删除"逻辑
+#   * 早期版本散在用户 rc 里的 per-project 块，会在这里被自动清掉（迁移）
+# --------------------------------------------------------------------------
+wt_env_sync() {
+    wt_dry && return 0
+    _es_scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-env.XXXXXX") || return 0
+    if ! python3 "$PY" plan-env --home "$WTOOL_HOME" --state "$WTOOL_STATE" \
+            --scratch "$_es_scratch" >/dev/null 2>&1; then
+        rm -rf -- "$_es_scratch"
+        wt_warn "环境变量汇总失败，跳过（rc 里的块可能不同步）"
+        return 0
+    fi
+    wt_plan_exec "$_es_scratch/plan.tsv"
+    rm -rf -- "$_es_scratch"
 }

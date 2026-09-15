@@ -1,7 +1,9 @@
 #!/bin/sh
 # wtool —— wtool 集合的引擎（唯一一份，住在 wtool-bootstrap 里）
 #
-#   wtool.sh build     [<项目>...] [--dry-run]      跑项目自己的 build.sh
+#   wtool.sh build     [<项目>...|all] [--dry-run]  跑项目自己的 scripts/build.sh
+#   wtool.sh download  [<项目>...|all] [--dry-run]  跑 scripts/download.sh
+#                      用发布页上现成的包代替自己编；产物落在和 build 相同的位置
 #   wtool.sh install   <项目目录> [--dry-run] [--force] [--no-script]
 #                      wtool.xml 的 link/rc 铺完之后，再跑项目自己的 install.sh
 #   wtool.sh uninstall <项目目录> [--dry-run] [--force]
@@ -178,6 +180,47 @@ wt_print_plan() {
     done < "$_plan"
 }
 
+
+# --------------------------------------------------------------------------
+# all 的展开
+#
+# 四个动作命令统一规矩：
+#   不带参数       只列出来，不动任何东西
+#   <项目>         对那一个动手
+#   all            对全部动手
+#
+# 为什么裸命令不等于 all：`wtool install` 误触一次就往 $HOME 里铺一堆东西，
+# 而"我想看看有哪些项目"是高频得多的操作。默认安全，要动手就明写。
+# --------------------------------------------------------------------------
+wt_all_projects() {   # <过滤条件>：build | download | install | publish | 空=全部
+    _ap_filter=$1
+    python3 "$PY" publish-list --root "$WTOOL_ROOT" |
+    while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
+        [ -n "${_pid:-}" ] || continue
+        case $_ap_filter in
+            build)    wt_project_script "$_path" build.sh    >/dev/null 2>&1 || continue ;;
+            download) wt_project_script "$_path" download.sh >/dev/null 2>&1 || continue ;;
+            publish)  [ "$_kind" = "none" ] && continue ;;
+            install)  ;;
+        esac
+        printf '%s\n' "$_pid"
+    done
+}
+
+# 把参数里的 all 展开；返回空格分隔的项目名
+wt_expand_targets() {   # <过滤条件> <参数...>
+    _et_filter=$1; shift
+    _et_out=""
+    for _et_a in "$@"; do
+        if [ "$_et_a" = "all" ]; then
+            _et_out="$_et_out $(wt_all_projects "$_et_filter" | tr '\n' ' ')"
+        else
+            _et_out="$_et_out $_et_a"
+        fi
+    done
+    printf '%s\n' "$_et_out"
+}
+
 # --------------------------------------------------------------------------
 # 项目自己的脚本：build.sh / install.sh / publish.sh
 #
@@ -188,16 +231,40 @@ wt_print_plan() {
 #
 # 存在性检查是**能力标记**的来源：表格里哪一列亮绿，就看这个脚本在不在。
 # --------------------------------------------------------------------------
+#
+# 脚本固定放在 <项目>/scripts/ 下：
+#     terminal/tmux/scripts/build.sh
+#     editor/astronvim_v5/scripts/download.sh
+#
+# 为什么单独一层目录，而不是散在项目根：项目根上放的是**内容和声明**
+# （wtool.xml、配置文件、源码），scripts/ 下放的是**动作**。
+# 分开之后一眼能看出"这个项目会对我做什么"。
+#
+# 兼容：老位置（项目根）也认，但会警告。等项目都迁完就只认 scripts/。
 wt_project_script() {   # <项目目录> <脚本名>  → 打印脚本绝对路径，没有则返回 1
     _ps_dir=$1; _ps_name=$2
-    [ -f "$_ps_dir/$_ps_name" ] || return 1
-    printf '%s\n' "$_ps_dir/$_ps_name"
+    if [ -f "$_ps_dir/scripts/$_ps_name" ]; then
+        printf '%s\n' "$_ps_dir/scripts/$_ps_name"
+        return 0
+    fi
+    if [ -f "$_ps_dir/$_ps_name" ]; then
+        wt_warn "  $_ps_name 还在项目根目录，应该挪到 scripts/ 下：$_ps_dir"
+        printf '%s\n' "$_ps_dir/$_ps_name"
+        return 0
+    fi
+    return 1
 }
 
 # 跑项目脚本：喂环境变量、cd 到项目目录、stdin 接 /dev/null
 wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
     _rs_dir=$1; _rs_name=$2; shift 2
     _rs_path=$(wt_project_script "$_rs_dir" "$_rs_name") || return 1
+    # 脚本可能在容器/独立环境里跑，所以路径提前算好喂给它，
+    # 不要求脚本自己去推 WTOOL_STATE 和项目 id
+    WTOOL_ARTIFACTS="$WTOOL_STATE/${WTOOL_PROJECT_ID:-$(basename -- "$_rs_dir")}/artifacts.tsv"
+    if ! wt_dry; then
+        mkdir -p -- "$(dirname -- "$WTOOL_ARTIFACTS")"
+    fi
 
     # dry-run 时把 --dry-run 转给脚本，让它自己把计划打出来。
     # 直接跳过的话，"wtool build xxx --dry-run"就只会说一句"要执行 build.sh"，
@@ -216,12 +283,102 @@ wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
         export WTOOL_HOME
         export WTOOL_PREFIX WTOOL_JOBS WTOOL_ARCH
         export WTOOL_OS_ID WTOOL_OS_VERSION WTOOL_OS_CODENAME WTOOL_OS_LIKE
+        # 产物清单：脚本用它声明"我产出了什么"。install / uninstall /
+        # publish / 表格 全都读它，谁都不许靠猜（见 guide.md「产物契约」）。
+        export WTOOL_ARTIFACTS
+        export WTOOL_STATE_DIR="$WTOOL_STATE/$WTOOL_PROJECT_ID"
         cd -- "$_rs_dir" || exit 1
         # stdin 接 /dev/null：脚本不该从终端读，也不该偷引擎的输入
         # （清单走 fd 3，就是为了防这个——见 cmd_publish 的注释）
         # shellcheck disable=SC2086
         exec sh "$_rs_path" $_rs_args < /dev/null
     )
+}
+
+
+# --------------------------------------------------------------------------
+# 构建门槛
+#
+# 有些项目的构建很重（astronvim_v5 要编 nvim、装 75 个 mason 包、
+# 编 251 个 treeseitter parser，峰值 10G 磁盘、几 G 内存）。
+# 在这种机器上硬跑只会跑一小时后失败，不如一开始就说清楚，
+# 并把它导向"下载现成的包"这条路。
+#
+# 门槛按项目声明（wtool.xml 里的 <build min-cores= min-mem= min-disk=/>），
+# 引擎给一个宽松的默认值兜底 —— 写死在引擎里的话，tmux 那种纯配置项目
+# 也会被无意义地拦一下。
+# --------------------------------------------------------------------------
+wt_default_min_cores=4
+wt_default_min_mem_gb=8
+wt_default_min_disk_gb=10
+
+wt_check_build_env() {   # <项目目录> <项目 id> → 不满足返回 1
+    _ce_dir=$1; _ce_pid=$2
+    _ce_cores=$wt_default_min_cores
+    _ce_mem=$wt_default_min_mem_gb
+    _ce_disk=$wt_default_min_disk_gb
+
+    # 项目自己在 wtool.xml 里声明的要求
+    _ce_xml="$_ce_dir/wtool.xml"
+    if [ -f "$_ce_xml" ]; then
+        _ce_vals=$(python3 - "$_ce_xml" <<'PYGATE' 2>/dev/null || true
+import sys, xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+except Exception:
+    sys.exit(0)
+for b in root.iter("build"):
+    print(b.get("min-cores") or "", b.get("min-mem") or "", b.get("min-disk") or "")
+PYGATE
+)
+        [ -n "$_ce_vals" ] && set -- $_ce_vals && {
+            [ -n "${1:-}" ] && _ce_cores=$1
+            [ -n "${2:-}" ] && _ce_mem=$2
+            [ -n "${3:-}" ] && _ce_disk=$3
+        }
+    fi
+
+    _ce_have_cores=$(nproc 2>/dev/null || echo 1)
+    _ce_have_mem=$(awk '/^MemTotal:/ {printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 0)
+    _ce_have_disk=$(df -Pk "$WTOOL_HOME" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1048576}' || echo 0)
+
+    _ce_bad=""
+    [ "$_ce_have_cores" -ge "$_ce_cores" ] || _ce_bad="$_ce_bad
+    CPU 核心：有 $_ce_have_cores，需要 $_ce_cores"
+    [ "$_ce_have_mem" -ge "$_ce_mem" ] || _ce_bad="$_ce_bad
+    内存：有 ${_ce_have_mem}G，需要 ${_ce_mem}G"
+    [ "$_ce_have_disk" -ge "$_ce_disk" ] || _ce_bad="$_ce_bad
+    磁盘（\$HOME 所在分区）：有 ${_ce_have_disk}G，需要 ${_ce_disk}G"
+
+    [ -z "$_ce_bad" ] && return 0
+
+    if [ "${WTOOL_FORCE:-0}" = 1 ]; then
+        wt_warn "  $_ce_pid 的构建环境不达标，--force 继续：$_ce_bad"
+        return 0
+    fi
+
+    wt_warn "  $_ce_pid 的构建环境不达标：$_ce_bad"
+    wt_warn ""
+    wt_warn "  这台机器上硬编会很慢，而且多半会在中途因为磁盘或内存失败。"
+    wt_warn "  建议改成下载现成的包（发布页上已经有人编好了）："
+    wt_warn "      wtool download $_ce_pid"
+    wt_warn "      wtool install  $_ce_pid"
+    wt_warn ""
+    wt_warn "  确认要在这台机器上编，就加 --force。"
+    return 1
+}
+
+# 并行度按内存封顶。
+# 32 核配 16G 内存的机器很常见，WTOOL_JOBS=nproc 会让 nvim 的构建 OOM ——
+# 核心数只决定快慢，内存不够是直接失败。
+wt_effective_jobs() {
+    _ej_cores=${WTOOL_JOBS:-$(nproc 2>/dev/null || echo 4)}
+    _ej_mem=$(awk '/^MemTotal:/ {printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 0)
+    [ "$_ej_mem" -gt 0 ] || { printf '%s\n' "$_ej_cores"; return 0; }
+    _ej_cap=$(( _ej_mem / 2 ))
+    [ "$_ej_cap" -lt 1 ] && _ej_cap=1
+    [ "$_ej_cores" -gt "$_ej_cap" ] && _ej_cores=$_ej_cap
+    printf '%s\n' "$_ej_cores"
 }
 
 # --------------------------------------------------------------------------
@@ -242,8 +399,8 @@ cmd_build() {
     done
 
     if [ -z "$_targets" ]; then
-        # 不带参数：列出所有能构建的项目，不做任何事
-        wt_info "这些项目提供了 build.sh："
+        # 不带参数：只列出来，不动任何东西（要动手写 all）
+        wt_info "这些项目提供了 scripts/build.sh："
         _n=0
         while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
             [ -n "${_pid:-}" ] || continue
@@ -255,9 +412,12 @@ cmd_build() {
 $(python3 "$PY" publish-list --root "$WTOOL_ROOT")
 EOF
         [ "$_n" -gt 0 ] || wt_info "  （一个都没有）"
-        wt_info "用 wtool build <项目> 构建其中一个"
+        wt_info "构建其中一个：wtool build <项目>；全部：wtool build all"
         return 0
     fi
+
+    _targets=$(wt_expand_targets build $_targets)
+    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目（试试 wtool build 看有哪些）"
 
     _done=0
     for _want in $_targets; do
@@ -270,12 +430,78 @@ EOF
             wt_warn "  没有 build.sh，这个项目不需要构建"
             continue
         fi
-        wt_info "  脚本 : build.sh"
+        wt_info "  脚本 : scripts/build.sh"
         WTOOL_PROJECT_ID=$_pid
+        wt_check_build_env "$_path" "$_pid" || continue
+        WTOOL_JOBS=$(wt_effective_jobs)
+        wt_info "  并行 : -j$WTOOL_JOBS（按内存封顶，nproc=$(nproc 2>/dev/null || echo ?)）"
+        wt_record_action "$_pid" build
         wt_run_project_script "$_path" build.sh || wt_die "build.sh 失败: $_pid"
         _done=$((_done + 1))
     done
     wt_info "build 完成（$_done 个项目）"
+}
+
+# --------------------------------------------------------------------------
+# download：用发布页上现成的包代替"自己编"
+#
+# 和 build 是一对：两者都要把产物放到**同样的路径**上，
+# 之后的 install 完全不关心产物是编出来的还是下下来的。
+# 所以任何一个项目同时提供 scripts/build.sh 和 scripts/download.sh 时，
+# 这两条路必须等价（见 guide.md「产物契约」）。
+#
+# 具体怎么下载、从哪拿、按什么选包，是项目脚本自己的事 ——
+# 引擎只负责：找到脚本、喂好环境（含 WTOOL_ARTIFACTS）、记一笔"做过了"。
+# --------------------------------------------------------------------------
+cmd_download() {
+    _targets=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            --force)   WTOOL_FORCE=1 ;;
+            -*)        wt_die "未知参数: $arg" ;;
+            *)         _targets="$_targets $arg" ;;
+        esac
+    done
+
+    if [ -z "$_targets" ]; then
+        wt_info "这些项目提供了 scripts/download.sh："
+        _n=0
+        while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
+            [ -n "${_pid:-}" ] || continue
+            if wt_project_script "$_path" download.sh >/dev/null 2>&1; then
+                wt_step "$_pid"
+                _n=$((_n + 1))
+            fi
+        done <<EOF
+$(python3 "$PY" publish-list --root "$WTOOL_ROOT")
+EOF
+        [ "$_n" -gt 0 ] || wt_info "  （一个都没有）"
+        wt_info "用 wtool download <项目> 下载其中一个；wtool download all 全部"
+        return 0
+    fi
+
+    _targets=$(wt_expand_targets download $_targets)
+    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目（试试 wtool download 看有哪些）"
+
+    _done=0
+    for _want in $_targets; do
+        _row=$(wt_publish_resolve "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+
+        wt_info "── $_pid"
+        if ! wt_project_script "$_path" download.sh >/dev/null 2>&1; then
+            wt_warn "  没有 scripts/download.sh，这个项目只能自己编（wtool build $_pid）"
+            continue
+        fi
+        WTOOL_PROJECT_ID=$_pid
+        wt_info "  脚本 : scripts/download.sh"
+        wt_run_project_script "$_path" download.sh || { wt_warn "  download.sh 失败，跳过"; continue; }
+        wt_record_action "$_pid" download
+        _done=$((_done + 1))
+    done
+    wt_info "download 完成（$_done 个项目）"
 }
 
 # --------------------------------------------------------------------------
@@ -335,6 +561,9 @@ cmd_install() {
         wt_run_project_script "$_project" install.sh || wt_die "install.sh 失败: $WTOOL_PROJECT_ID"
     fi
 
+    # 全量重算环境变量汇总（用户的 rc 里始终只有一个 loader 块）
+    wt_env_sync
+
     wt_info "install 完成"
 }
 
@@ -387,6 +616,16 @@ cmd_uninstall() {
         wt_step "rc    $_dest"
     done < "$_scratch/plan.tsv"
 
+    # 1.5) plan 里剩下的动作（envblock-del 之类）。
+    #      以前这里只手工处理了 rc 行，从没跑过 plan_exec ——
+    #      新增的动作就这么被静默丢掉了，表现为"卸载完 loader 块还在"。
+    if [ -s "$_scratch/plan.tsv" ]; then
+        awk -F'\t' '$1 != "rc"' "$_scratch/plan.tsv" > "$_scratch/plan.rest.tsv" 2>/dev/null || true
+        if [ -s "$_scratch/plan.rest.tsv" ]; then
+            wt_plan_exec "$_scratch/plan.rest.tsv"
+        fi
+    fi
+
     # 2) 逆序回放 journal
     if [ -f "$WTOOL_JOURNAL" ]; then
         wt_journal_reverse | while IFS='	' read -r _action _kind _dest _target _sha; do
@@ -433,6 +672,11 @@ cmd_uninstall() {
         fi
         rmdir -- "$WTOOL_HOME/.wtool" 2>/dev/null || true
     fi
+
+    # 4.5) 重算环境变量汇总。必须在第 5 步之前：
+    #      最后一个项目卸载完时，汇总文件要消失、loader 块要从 rc 里剥掉，
+    #      剥完 rc 才可能变成空文件，第 5 步才有东西可删。
+    wt_env_sync
 
     # 5) 收尾：当初由 wtool 创建的 rc 文件，如果现在已经空了就删掉
     #    （必须放在最后：只有最后一个项目卸载完，共享的 ~/.zshrc 才会变空）
@@ -1242,6 +1486,7 @@ _cmd=${1:-}
 
 case $_cmd in
     build)     cmd_build "$@" ;;
+    download)  cmd_download "$@" ;;
     install)   cmd_install "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     provision) cmd_provision "$@" ;;
