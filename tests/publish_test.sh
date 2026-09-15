@@ -263,7 +263,7 @@ else
     bad "后面的项目没发布——stdin 又被偷了"
 fi
 chk "脚本拿到的是空输入（不是清单行）" \
-    "$(cat "$T/out6/out-0/answer.txt" 2>/dev/null | sed 's/拿到 \[//;s/\]//')" ""
+    "$(cat "$T/out6/answer.txt" 2>/dev/null | sed 's/拿到 \[//;s/\]//')" ""
 
 echo "== 7. 第三方仓必须被挡住（而不是静默中断整个发布）=="
 # 曾经的真 bug：_perm=$(wt_publish_can_push ...) 在 set -e 下，
@@ -381,7 +381,7 @@ PATH="$T/bin:$PATH" WTOOL_ROOT="$FS5" WTOOL_STATE="$T/state9" \
     "$WT" publish lnk --out="$T/out9" > "$T/log9" 2>&1 || _rc=$?
 chk "发布成功" "$_rc" "0"
 
-LPKG=$(ls "$T/out9"/out-0/*.tar.* 2>/dev/null | head -1)
+LPKG=$(ls "$T/out9"/*.tar.* 2>/dev/null | head -1)
 mkdir -p "$T/x9"
 case $(file -b -- "$LPKG") in
     *Zstandard*) zstd -dc -- "$LPKG" | tar -xf - -C "$T/x9" ;;
