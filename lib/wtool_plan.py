@@ -1258,7 +1258,9 @@ def render_downloads(rows):
         out.append("tar -xf %s" % name)
     out.append("```")
     out.append("")
-    out.append("跑完 `~/self/wtool/` 就是一个完整的工作区，接着看下一节。")
+    out.append("跑完 `~/self/wtool/` 就是一个完整的工作区。")
+    out.append("接着 `cd ~/self/wtool && ./bootstrap/install.sh`（第一次要用完整路径，")
+    out.append("它会把根目录的 `./install.sh` 等入口补齐，之后就能直接用短的了）。")
     out.append("")
 
     out.append("### PowerShell（Windows 10 及以上自带 tar）")
