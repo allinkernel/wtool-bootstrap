@@ -372,12 +372,19 @@ PYGATE
 # 32 核配 16G 内存的机器很常见，WTOOL_JOBS=nproc 会让 nvim 的构建 OOM ——
 # 核心数只决定快慢，内存不够是直接失败。
 wt_effective_jobs() {
+    # 默认就是 nproc —— 不要凭"32 核配 24G 大概会 OOM"这种猜测去砍并行度，
+    # 那会让一台完全跑得动的机器慢上两倍多，而且没有任何测量依据。
+    #
+    # 只在明显失衡的机器上才轻微封顶：核心数远超内存（比如 32 核 8G）。
+    # 按 1 核约 1G 算，够宽松。想自己控制就设 WTOOL_JOBS。
     _ej_cores=${WTOOL_JOBS:-$(nproc 2>/dev/null || echo 4)}
     _ej_mem=$(awk '/^MemTotal:/ {printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 0)
     [ "$_ej_mem" -gt 0 ] || { printf '%s\n' "$_ej_cores"; return 0; }
-    _ej_cap=$(( _ej_mem / 2 ))
-    [ "$_ej_cap" -lt 1 ] && _ej_cap=1
-    [ "$_ej_cores" -gt "$_ej_cap" ] && _ej_cores=$_ej_cap
+    if [ "$_ej_cores" -gt "$_ej_mem" ]; then
+        wt_warn "  并行度从 -j$_ej_cores 降到 -j$_ej_mem：核心数远超内存（${_ej_mem}G）"
+        wt_warn "  想用满就设 WTOOL_JOBS=$_ej_cores（后果自负）"
+        _ej_cores=$_ej_mem
+    fi
     printf '%s\n' "$_ej_cores"
 }
 

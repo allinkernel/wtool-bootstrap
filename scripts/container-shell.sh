@@ -95,11 +95,15 @@ printf '    safe.directory=* ✓  GIT_OPTIONAL_LOCKS=0 ✓（只读挂载也能�
 # ─────────────────────────────────────────────────────────────
 say "3/4 装 wtool 引擎，然后装全部项目"
 cd "$WTOOL_DIR"
+# 根目录的 ./install.sh 是 repo 按 linkfile 建的软链；从发布包解压出来的
+# 工作区没有它，所以退回到脚本本体（scripts/ 迁移之后路径变了）。
+_engine_install=./install.sh
+[ -x "$_engine_install" ] || _engine_install=bootstrap/scripts/install.sh
 # 挂载的通常是开发副本，可能有未提交改动 → 用 --force 跳过版本检查
 _rc=0
-./install.sh --force || _rc=$?
+"$_engine_install" --force || _rc=$?
 if [ "$_rc" -eq 0 ]; then
-    printf '    引擎已装（根目录 linkfile → bootstrap/install.sh）\n'
+    printf '    引擎已装（%s）\n' "$_engine_install"
 else
     warn "引擎安装返回 $_rc，继续（下面可能也会失败）"
 fi
