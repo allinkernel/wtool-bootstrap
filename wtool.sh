@@ -1293,16 +1293,6 @@ cmd_publish() {
         wt_die "没有任何项目声明了 publish"
     fi
 
-    # 上一轮 publish 在结尾重写过带下载块的文档，于是那个文件是"未提交"的。
-    # 不豁免的话，下一次 publish 就会以"有未提交改动"把文档项目跳过 ——
-    # 一次发布把下一次发布搞坏，自噬。这里只豁免**那一个文件**，
-    # 而且必须它的改动只涉及这个文件才放行。
-    # 和 wt_refresh_downloads 用同一个精确模式（整行就是标记），
-    # 不能用 -F 匹配子串 —— 提到这个标记的文档会被误伤
-    _doc_path=$(grep -rl --include='*.md' \
-                    -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' \
-                    "$WTOOL_ROOT" 2>/dev/null | head -1)
-
     _done=0
     # 清单走 fd 3，不走 stdin。脚本自己（或它调用的 docker/gh）读 stdin 是常事，
     # 从 stdin 读清单会被它们偷走行，表现是后面的项目被静默跳过。
@@ -1405,23 +1395,18 @@ cmd_publish() {
             wt_warn "  $_path 不是 git 仓库，无法确定版本，跳过（用 --force 也推不出有意义的包）"
             continue
         fi
-        _dirty=$(git -C "$_path" status --porcelain 2>/dev/null || true)
-        if [ -n "$_dirty" ] && [ -n "$_doc_path" ]; then
-            case $_doc_path in
-                "$_path"/*)
-                    _doc_rel=${_doc_path#"$_path"/}
-                    # 只看"除了那个文档之外还有没有别的改动"
-                    _other=$(printf '%s\n' "$_dirty" | awk -v d="$_doc_rel" '$NF != d')
-                    if [ -z "$_other" ]; then
-                        wt_info "  只有自动生成的下载块变了，按干净处理（记得提交 $_doc_rel）"
-                        _dirty=""
-                    fi
-                    ;;
-            esac
-        fi
+        # 脏检查扣掉 wtool 自己生成的文件（下载块、以后的 release.json）。
+        # 不扣的话：一次 publish 写完文档 → 项目变脏 → 下一轮 publish
+        # 以"有未提交改动"拒绝它 —— 一次发布把下一次发布堵死。
+        _dirty=$(wt_git_dirty "$_path")
         if [ "${WTOOL_FORCE:-0}" != 1 ] && [ -n "$_dirty" ]; then
             wt_warn "  $_path 有未提交改动，拒绝发布（先提交，或加 --force）"
+            wt_warn "  （wtool 自己生成的文件已豁免，下面是真实改动）"
+            printf '%s\n' "$_dirty" | head -5 | sed 's/^/      /' >&2
             continue
+        fi
+        if [ -z "$_dirty" ] && [ -n "$(git -C "$_path" status --porcelain 2>/dev/null)" ]; then
+            wt_info "  只有 wtool 自己生成的文件变了，按干净处理（记得提交）"
         fi
 
         _commit=$(git -C "$_path" rev-parse HEAD 2>/dev/null || echo "")

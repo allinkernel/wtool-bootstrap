@@ -189,6 +189,9 @@ wt_atomic_write() {
         chmod --reference="$_real" "$_tmp" 2>/dev/null || true
     fi
     mv -f -- "$_tmp" "$_real" || wt_die "替换失败: $_real"
+    # 登记：这是 wtool 写的，不是用户手改的。
+    # 唯一写文件入口就在这里，所以登记一次就够，不用每个调用点都记。
+    wt_generated_add "$_real"
 }
 
 # --------------------------------------------------------------------------
@@ -747,4 +750,49 @@ wt_env_sync() {
     fi
     wt_plan_exec "$_es_scratch/plan.tsv"
     rm -rf -- "$_es_scratch"
+}
+
+
+# --------------------------------------------------------------------------
+# wtool 自己生成的文件
+#
+# 问题：publish 会改写受版本控制的文件（文档里的下载块、以后的 release.json）。
+# 改完这些文件就"脏"了，**下一轮 publish 会以"有未提交改动"拒绝这个项目** ——
+# 一次发布把下一次发布堵死。
+#
+# 做法：wtool 每次写文件都登记在册，脏检查时只豁免**它自己写过的那些**。
+# 用户手改的内容照样算脏，不受影响。
+#
+# 为什么不用"特判某个文件名"：生成物会越来越多（release.json、
+# pre_release.json、README 的下载块……），特判会一个个堆上去，
+# 而且分不清"这是 wtool 写的"还是"用户改的"。
+# --------------------------------------------------------------------------
+wt_generated_add() {   # <绝对路径>
+    wt_dry && return 0
+    mkdir -p -- "$WTOOL_STATE" 2>/dev/null || return 0
+    printf '%s\t%s\t%s\n' "$1" "${WTOOL_PROJECT_ID:--}" \
+        "$(date +%Y-%m-%dT%H:%M:%S%z)" >> "$WTOOL_STATE/generated.tsv" 2>/dev/null || true
+}
+
+# 这个文件是 wtool 自己写的吗
+wt_generated_owns() {   # <绝对路径>
+    _go_f="$WTOOL_STATE/generated.tsv"
+    [ -f "$_go_f" ] || return 1
+    awk -F'\t' -v p="$1" '$1 == p { found = 1 } END { exit !found }' "$_go_f"
+}
+
+# 项目里"真正脏"的文件（扣掉 wtool 自己写过的那几个）
+# 输出和 `git status --porcelain` 一样，没有输出就是干净
+wt_git_dirty() {   # <项目目录>
+    _gd_dir=$(cd -- "$1" && pwd)
+    _gd_all=$(git -C "$_gd_dir" status --porcelain 2>/dev/null || true)
+    [ -n "$_gd_all" ] || return 0
+    printf '%s\n' "$_gd_all" | while IFS= read -r _gd_line; do
+        [ -n "$_gd_line" ] || continue
+        # porcelain 格式：XY<空格>路径（重命名是 "XY 旧 -> 新"）
+        _gd_f=$(printf '%s' "$_gd_line" | cut -c4-)
+        case $_gd_f in *' -> '*) _gd_f=${_gd_f##* -> } ;; esac
+        _gd_abs="$_gd_dir/$_gd_f"
+        wt_generated_owns "$_gd_abs" || printf '%s\n' "$_gd_line"
+    done
 }
