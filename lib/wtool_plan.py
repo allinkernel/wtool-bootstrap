@@ -1146,15 +1146,64 @@ def table_summary(projects):
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
-def scan_projects(root):
-    """扫描工作区里所有项目，返回 [(priority, id, abspath, publish_info)]。
+def _repo_manifest_projects(root):
+    """从 repo 客户端的 manifest 里读出全部项目路径。
 
-    除了有 wtool.xml 的项目，还会补上被 <sub> 声明的子项目——上游仓
-    （如 neovim/neovim）不可能往里塞 wtool.xml，只能由伞项目从外面替它表态。
+    为什么需要：'没写 wtool.xml 就按源码发布' 这条规则要求知道**完整的项目表**，
+    而 wtool 自己扫不出来——没有 wtool.xml 的项目（harness、themes/...）它看不见。
+    只有 repo 的 manifest 知道全表。
+    """
+    repo_dir = os.path.join(root, ".repo")
+    merged = os.path.join(repo_dir, "manifest.xml")
+    if not os.path.isfile(merged):
+        return {}
+    manifests_dir = os.path.join(repo_dir, "manifests")
+
+    paths, removed, seen = {}, set(), set()
+
+    def load(path, depth=0):
+        if depth > 8 or path in seen:
+            return
+        seen.add(path)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                root_el = ET.fromstring(fh.read())
+        except (OSError, ET.ParseError):
+            return
+        for el in root_el:
+            if el.tag == "include":
+                name = el.get("name")
+                if name:
+                    load(os.path.join(manifests_dir, name), depth + 1)
+            elif el.tag == "project":
+                p = el.get("path") or el.get("name") or ""
+                if p:
+                    paths[p.rstrip("/")] = el.get("name") or ""
+            elif el.tag == "remove-project":
+                n = el.get("name")
+                if n:
+                    removed.add(n)
+
+    load(merged)
+    # remove-project 按 name 匹配
+    return {p: n for p, n in paths.items() if n not in removed}
+
+
+def scan_projects(root):
+    """工作区里的全部项目，返回 [(priority, id, abspath, publish_info)]。
+
+    项目表来自两处，按优先级合并：
+      1. 有 wtool.xml 的目录 —— 它自己声明怎么发布
+      2. repo manifest 里的项目 —— 自己没有 wtool.xml 的按默认源码发布
+         （harness、themes/... 这些没有 wtool.xml 的项目只能从 manifest 知道）
+    另外项目可以用 <sub> 替子树里没有 wtool.xml 的项目表态——上游仓
+    （neovim/neovim）不可能往里塞 wtool.xml，只能从伞项目外面声明。
+    <sub> 优先于 manifest 的默认值。
     """
     root = os.path.abspath(root)
-    found = []
-    declared = {}          # abspath -> publish_info（来自 <sub>）
+    found = []            # (prio, id, path, publish)
+    declared = {}         # abspath -> 来自 <sub> 的 publish
+    known = set()
 
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames
@@ -1168,21 +1217,39 @@ def scan_projects(root):
             continue
         found.append((meta["priority"], meta["id"] or os.path.basename(dirpath),
                       dirpath, meta["publish"]))
-        # 记下伞项目替子树表的态
+        known.add(os.path.abspath(dirpath))
         for sub in meta["publish"]["subs"]:
             sub_abs = os.path.normpath(os.path.join(dirpath, sub["path"]))
             declared[sub_abs] = dict(sub, _by=meta["id"] or os.path.basename(dirpath))
         dirnames[:] = []          # 项目内部不再嵌套项目
 
-    known = {os.path.abspath(p) for _prio, _pid, p, _pub in found}
+    # repo manifest 补全：没有 wtool.xml 的项目
+    for rel in sorted(_repo_manifest_projects(root)):
+        abs_p = os.path.normpath(os.path.join(root, rel))
+        if abs_p in known or not os.path.isdir(abs_p):
+            continue
+        if rel in (".", ""):
+            continue
+        pub = {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
+               "to": "", "asset": "", "subs": [], "targets": [], "_from": "manifest"}
+        found.append((DEFAULT_PRIORITY, rel, abs_p, pub))
+        known.add(abs_p)
+
+    # <sub> 覆盖 manifest 的默认值
     for sub_abs, sub in sorted(declared.items()):
+        pub = {"kind": sub["kind"], "script": "", "tag": DEFAULT_PUBLISH_TAG,
+               "to": sub["to"], "asset": "", "subs": [], "targets": [],
+               "_sub_of": sub["_by"]}
         if os.path.abspath(sub_abs) in known:
-            continue              # 自己有 wtool.xml 的，以自己为准
+            for i, (prio, pid, path, old) in enumerate(found):
+                if os.path.abspath(path) == os.path.abspath(sub_abs) and \
+                        old.get("kind") == "source" and old.get("_from") == "manifest":
+                    found[i] = (prio, pid, path, pub)
+            continue
         rel = os.path.relpath(sub_abs, root)
-        found.append((DEFAULT_PRIORITY, rel, sub_abs,
-                      {"kind": sub["kind"], "script": "", "tag": DEFAULT_PUBLISH_TAG,
-                       "to": sub["to"], "asset": "", "subs": [], "targets": [],
-                       "_sub_of": sub["_by"]}))
+        found.append((DEFAULT_PRIORITY, rel, sub_abs, pub))
+        known.add(os.path.abspath(sub_abs))
+
     return sorted(found)
 
 
