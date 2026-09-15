@@ -88,43 +88,62 @@ EOF
 S="$T/state"
 tbl() { env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S" "$@"; }
 # 取某一行的某一列。列都是单字符（可能带颜色），用 grep -o 抽转义码更好使。
+# 表格带边框，所以 awk 的 $1 是竖线、$2 才是项目 id；列号统一 +1
 cell() {   # <项目 id> <列号 3..6>
-    tbl --color=always | awk -v id="$1" '$1 == id {print $'"$2"'; exit}'
+    # 带边框之后，每个 │ 两侧都有空格，所以 awk 的字段是：
+    #   $1=│ $2=id $3=│ $4=prio $5=│ $6=build $7=│ $8=download ...
+    # 第 n 列 = $(2*n)
+    tbl --color=always | awk -v id="$1" -v c="$2" '$2 == id {print $(2 * c); exit}'
 }
 
-echo "== 1. build 列：有脚本但没构建过 = TODO，构建过才亮 =="
-chk "scripted 有 build.sh 但没构建过 → 灰 -" "$(cell scripted 3)" "$(printf '\033[2m-\033[0m')"
-chk "declarative 没脚本 → 灰点" "$(cell declarative 3)" "$(printf '\033[2m·\033[0m')"
-chk "nowhere 没脚本 → 灰点" "$(cell nowhere 3)" "$(printf '\033[2m·\033[0m')"
+echo "== 1. build 列：有脚本就是可执行，跑过就是已完成 =="
+chk "scripted 有 build.sh，没跑过 → 可执行（黄）" \
+    "$(cell scripted 3)" "$(printf '\033[33m可执行\033[0m')"
+chk "declarative 没脚本 → 不支持（红）" \
+    "$(cell declarative 3)" "$(printf '\033[31m不支持\033[0m')"
 
-# 记一笔"构建过"，build 列应该变亮
 mkdir -p "$S/scripted"
 printf 'build\t2026-09-15T00:00:00+0800\t\n' > "$S/scripted/actions.tsv"
-chk "构建过之后 build 变亮绿" "$(cell scripted 3)" "$(printf '\033[92m●\033[0m')"
-# 但 download 列仍然没做过（两个动作各自独立）
-chk "同项目的 download 列仍是灰点（没有 download.sh）" \
-    "$(cell scripted 4)" "$(printf '\033[2m·\033[0m')"
+chk "构建过之后 build 变已完成（绿）" \
+    "$(cell scripted 3)" "$(printf '\033[32m已完成\033[0m')"
+chk "同项目的 download 仍是 不支持（没有 download.sh）" \
+    "$(cell scripted 4)" "$(printf '\033[31m不支持\033[0m')"
 
-echo "== 2. install 列：能力看脚本/清单，状态看装没装 =="
-# install 列现在是三态：装了才是绿/亮绿，没装是 TODO
-chk "scripted 有 install.sh 但没装过 → TODO" "$(cell scripted 5)" "$(printf '\033[2m-\033[0m')"
-chk "declarative 有 link/env 但没装过 → TODO" \
-    "$(cell declarative 5)" "$(printf '\033[2m-\033[0m')"
-chk "nowhere 既没脚本也没 link/env → 灰点" "$(cell nowhere 5)" "$(printf '\033[2m·\033[0m')"
+echo "== 2. install 列：能力看脚本/清单，状态看装没装、前置做没做 =="
+# 注意此时 scripted 已经记过一笔 build，前置就绪
+chk "scripted 前置已就绪 → 可执行（黄）" \
+    "$(cell scripted 5)" "$(printf '\033[33m可执行\033[0m')"
+chk "declarative 没有 build/download → 直接可执行（黄）" \
+    "$(cell declarative 5)" "$(printf '\033[33m可执行\033[0m')"
+chk "nowhere 既没脚本也没 link/env → 不支持（红）" \
+    "$(cell nowhere 5)" "$(printf '\033[31m不支持\033[0m')"
 
-echo "== 3. publish 列：脚本优先，否则看 kind 是不是 none =="
-chk "scripted 有 publish.sh 但没发过 → TODO" "$(cell scripted 6)" "$(printf '\033[2m-\033[0m')"
-chk "declarative 能打源码包但没发过 → TODO" \
-    "$(cell declarative 6)" "$(printf '\033[2m-\033[0m')"
-chk "nowhere 声明了 kind=none → 灰点（不是 TODO）" \
-    "$(cell nowhere 6)" "$(printf '\033[2m·\033[0m')"
+# 把 build 记录撤掉：install 应该退回"待构建下载"
+rm -f "$S/scripted/actions.tsv"
+chk "★前置没做时 install 变成 待构建下载（蓝）" \
+    "$(cell scripted 5)" "$(printf '\033[34m待构建下载\033[0m')"
+printf 'build\t2026-09-15T00:00:00+0800\t\n' > "$S/scripted/actions.tsv"
+
+echo "== 3. publish 列：源码包没有前置依赖，脚本型要等构建 =="
+chk "scripted 已构建、没发过 → 可执行（黄）" \
+    "$(cell scripted 6)" "$(printf '\033[33m可执行\033[0m')"
+chk "declarative 打源码包，不需要构建 → 可执行（黄）" \
+    "$(cell declarative 6)" "$(printf '\033[33m可执行\033[0m')"
+chk "nowhere 声明了 kind=none → 不支持（红）" \
+    "$(cell nowhere 6)" "$(printf '\033[31m不支持\033[0m')"
+
+rm -f "$S/scripted/actions.tsv"
+chk "★脚本型没构建过 → publish 是 待构建下载（蓝）" \
+    "$(cell scripted 6)" "$(printf '\033[34m待构建下载\033[0m')"
+printf 'build\t2026-09-15T00:00:00+0800\t\n' > "$S/scripted/actions.tsv"
 
 echo "== 4. 嵌套项目的 id 相对工作区根算 =="
 # 曾经的真 bug：Python 侧靠 os.environ['WTOOL_ROOT'] 推 id，而 wtool.sh 里
 # 那个变量没 export，读不到就退化成 basename，outer/inner 被当成 inner，
 # 跟状态目录对不上，已发布的项目在表里显示成没发布。
-chk "outer/inner 是自己一行" "$(tbl | awk '$1 == "outer/inner" {print $1}')" "outer/inner"
-chk "outer 也还在" "$(tbl | awk '$1 == "outer" {print $1}')" "outer"
+chk "outer/inner 是自己一行" \
+    "$(tbl | awk '$2 == "outer/inner" {print $2}')" "outer/inner"
+chk "outer 也还在" "$(tbl | awk '$2 == "outer" {print $2}')" "outer"
 
 echo "== 5. 状态只在 --verbose 里出现，不影响能力格子 =="
 mkdir -p "$S/declarative"
@@ -132,9 +151,9 @@ printf 'link\tlink\t/home/x/.a.conf\t%s/a.conf\tsha\n' "$WS" > "$S/declarative/j
 printf '2026-09-15T00:00:00+0800\towner/x\tsnapshot-2026-09-15\t1\tsource:abc\n' \
     > "$S/declarative/publish.tsv"
 V=$(tbl --verbose)
-printf '%s\n' "$V" | awk '$1 == "declarative" {print "     " $0}'
-chk "装过之后 install 变绿（通用机制）" \
-    "$(cell declarative 5)" "$(printf '\033[32m●\033[0m')"
+printf '%s\n' "$V" | awk '$2 == "declarative" {print "     " $0}'
+chk "装过之后 install 变已完成（绿）" \
+    "$(cell declarative 5)" "$(printf '\033[32m已完成\033[0m')"
 printf '%s\n' "$V" | grep -q 'declarative.*发布过' && ok "verbose 里显示了发布状态" \
     || bad "verbose 里没有发布状态"
 
@@ -152,7 +171,7 @@ printf '{"project":"deep/bbb","repo":"x/y","commit":"abc","view":"release","layo
 printf '{ 这不是 json' > "$WS2/.wtool-dist/broken.json"
 TAB7=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS2" --state "$T/state7" 2>"$T/err7") || true
 chk "有坏标记也不崩" "$?" "0"
-chk "deep/bbb 靠发布标记被找到" "$(printf '%s\n' "$TAB7" | awk '$1 == "deep/bbb" {print $1}')" "deep/bbb"
+chk "deep/bbb 靠发布标记被找到" "$(printf '%s\n' "$TAB7" | awk '$2 == "deep/bbb" {print $2}')" "deep/bbb"
 
 echo "== 8. 列对齐（CJK 双宽 + ANSI 转义不能算进宽度）=="
 if tbl | python3 -c '
@@ -171,9 +190,11 @@ def w(t):
                    or 0xFFE0 <= o <= 0xFFE6) else 1
     return n
 
-lines = [l for l in sys.stdin.read().split("\n") if l.strip() and not l.startswith("-")]
+lines = [l for l in sys.stdin.read().split("\n") if l.strip().startswith("\u2502")]
+# 带边框：第一行和最后一行是框线，数据/表头行以 │ 开头且以 │ 结尾
 head = lines[0]
-prefix_w = w(head) - w(ANSI.sub("", head).split()[-1]) - 2
+plain_head = ANSI.sub("", head)
+prefix_w = w(plain_head) - w(plain_head.split()[-1]) - 2
 short = [l for l in lines if w(l) < prefix_w]
 print("     前缀区应宽 %d，各行宽度 %s" % (prefix_w, sorted({w(l) for l in lines})))
 sys.exit(1 if short else 0)
@@ -185,7 +206,7 @@ fi
 
 echo "== 9. 表头列名齐全 =="
 for col in 项目 prio build download install publish; do
-    tbl | head -1 | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
+    tbl | sed -n 2p | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
 done
 
 echo

@@ -1088,77 +1088,111 @@ def project_state(project_root, state_dir, root=None):
             "artifact_source": artifact_source}
 
 
-# 能力标记。用圆点而不是勾/叉：圆点在等宽字体里宽度确定，
-# 而且"有没有这个能力"和"做没做过"是两件事，不该共用一套符号。
-DOT_SCRIPT = "\u25cf"     # ● 项目自己提供了脚本 —— 亮绿
-DOT_GENERIC = "\u25cf"    # ● 引擎的通用机制能办 —— 绿
-DOT_NONE = "\u00b7"       # · 这个项目没这项能力 —— 暗
-C_BRIGHT = "\033[92m"
+# 表格里的四种状态。用文字而不是符号：圆点、横杠这类符号没有约定俗成的含义，
+# 看表的人（包括三个月后的自己）得先猜一遍。
+LBL_NONE = "不支持"
+LBL_TODO = "待构建下载"
+LBL_CAN = "可执行"
+LBL_DONE = "已完成"
+
+C_RED = "\033[31m"
+C_YELLOW = "\033[33m"
 C_GREEN = "\033[32m"
-C_DIM = "\033[2m"
+C_BLUE = "\033[34m"
 C_OFF = "\033[0m"
 
+_LBL_COLOR = {LBL_NONE: C_RED, LBL_TODO: C_BLUE, LBL_CAN: C_YELLOW, LBL_DONE: C_GREEN}
 
-def _cell(kind, done, color_on):
-    """一格。kind: 'script' | 'generic' | 'none'；done: 用户做过没有。
 
-    三种样子：
-      亮绿 ●  项目提供了脚本，而且已经做过了
-      绿   ●  引擎的通用机制能办（这对 install 是"装过了"，对 publish 是"发过了"）
-      灰   ·  没这项能力
-      黄   -  有这项能力，但用户还没做（TODO）
+def _state_cell(state, color_on):
+    if not color_on:
+        return state
+    return _LBL_COLOR[state] + state + C_OFF
 
-    "-" 和 "·" 的区别很重要：前者是"你可以做但还没做"，后者是"这件事跟你这个
-    项目无关"。混成一个符号，人就分不清该不该动手。
+
+def pipeline_states(path, pub, st):
+    """算出这个项目在四个格子里的状态。
+
+    这是一条流水线：build 或 download → install → publish，后面的依赖前面的。
+
+    每个格子只有四种取值：
+      不支持      这个项目没这项能力
+      可执行      现在就能跑
+      待构建下载  能力有，但要先 build 或 download
+      已完成      跑过了
+
+    注意 publish 对 kind="source" 没有前置依赖 —— 它打的是源码包，
+    不需要任何构建产物。
     """
-    if kind == "none":
-        return (C_DIM + DOT_NONE + C_OFF) if color_on else DOT_NONE
-    if not done:
-        return (C_DIM + "-" + C_OFF) if color_on else "-"
-    if kind == "script":
-        return (C_BRIGHT + DOT_SCRIPT + C_OFF) if color_on else DOT_SCRIPT
-    return (C_GREEN + DOT_GENERIC + C_OFF) if color_on else DOT_GENERIC
-
-
-def project_caps(path, pub):
-    """这个项目能做什么。三条来源，按"项目说得越具体越优先"排：
-
-      build    build.sh 在不在 —— 能不能编译只有项目自己知道
-      install  install.sh 在不在；没有的话看 wtool.xml 有没有 link/env
-               （纯声明式项目靠通用机制就能装好，不必写脚本）
-      publish  publish.sh 在不在；没有的话看 <publish kind> 是不是 none
-               （默认的 source 打包够绝大多数项目用）
-    """
-    caps = {}
-
     def _script(name):
-        """脚本现在住在 scripts/ 下；项目根的老位置仍然认（引擎会给警告）"""
+        # 脚本住在 scripts/ 下；项目根的老位置仍然认（引擎会给警告）
         return (os.path.isfile(os.path.join(path, "scripts", name))
                 or os.path.isfile(os.path.join(path, name)))
 
-    caps["build"] = "script" if _script("build.sh") else "none"
-    caps["download"] = "script" if _script("download.sh") else "none"
+    has_build = _script("build.sh")
+    has_download = _script("download.sh")
 
+    acts = st.get("actions") or {}
+    built = "build" in acts
+    downloaded = "download" in acts
+
+    out = {}
+
+    # build / download：有脚本就能跑，跑过就是完成
+    if has_build:
+        out["build"] = LBL_DONE if built else LBL_CAN
+    else:
+        out["build"] = LBL_NONE
+    if has_download:
+        out["download"] = LBL_DONE if downloaded else LBL_CAN
+    else:
+        out["download"] = LBL_NONE
+
+    # install：能力来自 wtool.xml 的 link/env，或项目自己的 scripts/install.sh
     has_script = _script("install.sh")
     errors, entries = [], []
     wf = os.path.join(path, "wtool.xml")
     if os.path.isfile(wf):
         _m, entries = parse_manifest(wf, path, errors)
     declarative = bool({e.kind for e in entries} & {"link", "env"})
-    caps["install"] = ("script" if has_script
-                       else "generic" if declarative else "none")
 
-    if _script("publish.sh"):
-        caps["publish"] = "script"
-    elif pub["kind"] != "none":
-        caps["publish"] = "generic"
+    if not (has_script or declarative):
+        out["install"] = LBL_NONE
+    elif st.get("installed"):
+        out["install"] = LBL_DONE
+    elif (has_build or has_download) and not (built or downloaded):
+        # 这个项目要先产出东西才能装
+        out["install"] = LBL_TODO
     else:
-        caps["publish"] = "none"
-    return caps
+        out["install"] = LBL_CAN
+
+    # publish
+    if pub["kind"] == "none":
+        out["publish"] = LBL_NONE
+    elif st.get("published"):
+        out["publish"] = LBL_DONE
+    elif pub["kind"] == "script" and has_build and not built:
+        # 脚本型发布要拿构建产物，没构建就发不了
+        out["publish"] = LBL_TODO
+    else:
+        out["publish"] = LBL_CAN
+
+    return out
+
+
+def project_caps(path, pub):
+    """兼容旧调用：只回答"有没有能力"，不看状态。"""
+    st = {"actions": {}, "installed": False, "published": False}
+    states = pipeline_states(path, pub, st)
+    return {k: ("none" if v == LBL_NONE else "script")
+            for k, v in states.items()}
 
 
 def render_table(root, state_dir, verbose=False, color=None):
-    """画表格。返回 (文本行列表, 项目列表)。"""
+    """画表格。返回 (文本行列表, 项目列表)。
+
+    带表框。CJK 是双宽字符，ANSI 转义不占宽度，两者都得算对，否则框会歪。
+    """
     state_dir = os.path.abspath(state_dir)
     if color is None:
         color = sys.stdout.isatty()
@@ -1170,7 +1204,7 @@ def render_table(root, state_dir, verbose=False, color=None):
         st["prio"] = prio
         st["path"] = path
         st["pub"] = pub
-        st["caps"] = project_caps(path, pub)
+        st["cells"] = pipeline_states(path, pub, st)
 
         # provision 的适用性仍然看清单里有没有那几类条目
         errors, entries = [], []
@@ -1180,41 +1214,55 @@ def render_table(root, state_dir, verbose=False, color=None):
         st["cap_prov"] = bool({e.kind for e in entries} & {"sysfile", "source", "task"})
         projects.append(st)
 
-    c_id = max([_width("项目")] + [_width(p["id"]) for p in projects]) if projects else 4
-    # 列内容都是单个字符（可能带 ANSI 颜色），列宽固定 1 + 两边各留一个空格
     headers = ["项目", "prio", "build", "download", "install", "publish"]
-    widths = [c_id, 4, 5, 8, 7, 7]
+    keys = [None, None, "build", "download", "install", "publish"]
 
-    out = []
-    head = "  ".join(_pad(h, w) for h, w in zip(headers, widths))
-    out.append(head.rstrip())
-    out.append("-" * _width(head))
+    # 列宽：表头和数据里最宽的那个（按显示宽度算）
+    widths = []
+    for i, h in enumerate(headers):
+        w = _width(h)
+        if keys[i]:
+            w = max(w, max([_width(v) for v in _LBL_COLOR] or [0]))
+        if i == 0:
+            w = max([w] + [_width(p["id"]) for p in projects])
+        widths.append(w)
 
+    def _row(cells_plain, cells_colored):
+        """一格一格拼，宽度按**去掉 ANSI 之后**的可见宽度算。"""
+        out = ["\u2502"]
+        for plain, colored, w in zip(cells_plain, cells_colored, widths):
+            out.append(" " + colored + " " * (w - _width(plain)) + " \u2502")
+        return "".join(out)
+
+    top = "\u250c" + "\u252c".join("\u2500" * (w + 2) for w in widths) + "\u2510"
+    mid = "\u251c" + "\u253c".join("\u2500" * (w + 2) for w in widths) + "\u2524"
+    bot = "\u2514" + "\u2534".join("\u2500" * (w + 2) for w in widths) + "\u2518"
+
+    out = [top]
+    out.append(_row(headers, headers))
+    out.append(mid)
     for p in projects:
-        acts = p["actions"]
-        cells = [
-            _pad(p["id"], widths[0]),
-            _pad(str(p["prio"]), widths[1]),
-            # build / download：脚本在不在决定能力，actions.tsv 决定做没做过
-            _pad(_cell(p["caps"]["build"], "build" in acts, color), widths[2]),
-            _pad(_cell(p["caps"]["download"], "download" in acts, color), widths[3]),
-            # install：装了没有看 journal
-            _pad(_cell(p["caps"]["install"], p["installed"], color), widths[4]),
-            # publish：发过没有看本地发布记录
-            _pad(_cell(p["caps"]["publish"], p["published"], color), widths[5]),
+        plain = [p["id"], str(p["prio"])] + [p["cells"][k] for k in keys[2:]]
+        colored = [p["id"], str(p["prio"])] + [
+            _state_cell(p["cells"][k], color) for k in keys[2:]
         ]
-        out.append("  ".join(cells).rstrip())
+        out.append(_row(plain, colored))
+    out.append(bot)
 
     if verbose:
         out.append("")
         for p in projects:
             detail = []
+            # 表格里只有状态标签，这里补"什么时候装的"这类查得到的细节
+            if p["installed"]:
+                _meta = os.path.join(state_dir, p["id"], "meta.tsv")
+                _when = ""
+                for row in _read_tsv(_meta):
+                    if len(row) >= 2 and row[0] == "installed_at":
+                        _when = "（%s）" % row[1][:16]
+                detail.append("装过%s" % _when)
             if p["artifact_source"]:
                 detail.append("当前产物来自 %s" % p["artifact_source"])
-            if p["caps"]["install"] == "script":
-                detail.append("装法由 scripts/install.sh 决定")
-            elif p["caps"]["install"] == "generic":
-                detail.append("装过" if p["installed"] else "没装")
             if p["cap_prov"]:
                 d = []
                 if p["markers"]:
@@ -1228,11 +1276,9 @@ def render_table(root, state_dir, verbose=False, color=None):
                 recs = _read_tsv(os.path.join(state_dir, p["id"], "publish.tsv"))
                 when = recs[-1][2] if recs and len(recs[-1]) > 2 else "?"
                 detail.append("发布过（%s）" % when)
-            elif p["caps"]["publish"] == "script":
+            elif p["pub"]["kind"] == "script":
                 detail.append("发布走 scripts/publish.sh")
-            else:
-                detail.append("没发布过")
-            out.append("  %s  %s" % (_pad(p["id"], c_id), "；".join(detail)))
+            out.append("  %-*s  %s" % (widths[0], p["id"], "；".join(detail)))
 
     return out, projects
 

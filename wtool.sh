@@ -933,7 +933,13 @@ cmd_table() {
     # shellcheck disable=SC2086
     python3 "$PY" table --root "$WTOOL_ROOT" --state "$WTOOL_STATE" $_args
     echo
-    printf '亮绿 ● 项目提供了脚本且已做过   绿 ● 引擎通用机制已办      灰 - 能做还没做(TODO)      灰 · 无此能力\n'
+    _c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
+    printf '  %s  这个项目没这项能力\n' "$(_c 31 不支持)"
+    printf '  %s  现在就能跑\n' "$(_c 33 可执行)"
+    printf '  %s  能力有，但要先 build 或 download\n' "$(_c 34 待构建下载)"
+    printf '  %s  跑过了\n' "$(_c 32 已完成)"
+    printf '\n  流水线：build 或 download → install → publish，后面的依赖前面的。\n'
+    printf '  前置没做时 install/publish 会直接报错告诉你去跑哪条，不会替你跑。\n'
 }
 
 # --------------------------------------------------------------------------
