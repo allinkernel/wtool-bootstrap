@@ -176,6 +176,51 @@ chk "汇总：已安装 2、已发布 1" \
 grep -qE '^export WTOOL_ROOT' "$bootstrap/wtool.sh" \
     && ok "wtool.sh 导出了 WTOOL_ROOT" || bad "wtool.sh 没导出 WTOOL_ROOT"
 
+echo "== 8. ★解压出来的工作区（没有 .repo）靠 .wtool-dist 标记找项目 =="
+# 这条路径以前没有任何测试覆盖：本机工作区没有 .wtool-dist/，
+# 所以 _dist_marker_projects 里 json 没导入这种硬 bug 也能一路全绿，
+# 直到真去下载发布包解压才炸出来。
+WS3="$T/ws-dist"
+mkdir -p "$WS3/aaa" "$WS3/deep/bbb" "$WS3/.wtool-dist"
+cat > "$WS3/aaa/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="aaa" priority="10">
+  <link src="a.conf" dest=".a.conf"/>
+</wtool>
+EOF
+# deep/bbb 故意**没有** wtool.xml：只能靠发布标记找到它
+cat > "$WS3/.wtool-dist/aaa.json" <<'EOF'
+{
+  "project": "aaa",
+  "repo": "fakeowner/aaa",
+  "commit": "1111111111111111111111111111111111111111",
+  "view": "release",
+  "layout": "wtool/aaa"
+}
+EOF
+cat > "$WS3/.wtool-dist/deep-bbb.json" <<'EOF'
+{
+  "project": "deep/bbb",
+  "repo": "fakeowner/bbb",
+  "commit": "2222222222222222222222222222222222222222",
+  "view": "release",
+  "layout": "wtool/deep/bbb"
+}
+EOF
+# 一个坏标记：不能因为它把整张表搞崩
+printf '{ 这不是 json' > "$WS3/.wtool-dist/broken.json"
+
+TAB8=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS3" --state "$T/state-dist" 2>"$T/err8")
+_rc=$?
+chk "有坏标记也不报错退出" "$_rc" "0"
+printf '%s\n' "$TAB8" | awk '{print "     " $0}'
+chk "aaa 来自 wtool.xml" \
+    "$(printf '%s\n' "$TAB8" | awk '$1 == "aaa" {print $2; exit}')" "10"
+chk "deep/bbb 靠发布标记被找到" \
+    "$(printf '%s\n' "$TAB8" | awk '$1 == "deep/bbb" {print $4; exit}')" "."
+chk "项目数是 2（坏标记被忽略）" \
+    "$(printf '%s\n' "$TAB8" | grep -cE '^[a-z]')" "2"
+
 echo
 printf 'table_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

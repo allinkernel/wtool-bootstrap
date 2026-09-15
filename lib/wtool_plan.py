@@ -24,6 +24,7 @@ plan.tsv 列（制表符分隔，无表头）：
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import sys
