@@ -998,7 +998,15 @@ def _width(text):
 
 
 def _pad(text, width):
-    return text + " " * max(0, width - _width(text))
+    """按显示宽度右侧补空格。ANSI 转义序列不占宽度，要排掉再算。"""
+    return text + " " * max(0, width - _width(_strip_ansi(text)))
+
+
+ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def _strip_ansi(text):
+    return ANSI_RE.sub("", text)
 
 
 def _read_tsv(path):
@@ -1054,16 +1062,63 @@ def project_state(project_root, state_dir, root=None):
             "published": published, "markers": markers, "sysfiles": sysfiles}
 
 
-def _cap(state, applicable):
-    """一个能力格子：. 没这项能力；+ 做了；- 能做没做。"""
-    if not applicable:
-        return "."
-    return "+" if state else "-"
+# 能力标记。用圆点而不是勾/叉：圆点在等宽字体里宽度确定，
+# 而且"有没有这个能力"和"做没做过"是两件事，不该共用一套符号。
+DOT_SCRIPT = "\u25cf"     # ● 项目自己提供了脚本 —— 亮绿
+DOT_GENERIC = "\u25cf"    # ● 引擎的通用机制能办 —— 绿
+DOT_NONE = "\u00b7"       # · 这个项目没这项能力 —— 暗
+C_BRIGHT = "\033[92m"
+C_GREEN = "\033[32m"
+C_DIM = "\033[2m"
+C_OFF = "\033[0m"
 
 
-def render_table(root, state_dir, verbose=False):
-    """画表格。返回文本行列表。"""
+def _cell(kind, color_on):
+    """kind: 'script' | 'generic' | 'none'"""
+    if kind == "script":
+        return (C_BRIGHT + DOT_SCRIPT + C_OFF) if color_on else DOT_SCRIPT
+    if kind == "generic":
+        return (C_GREEN + DOT_GENERIC + C_OFF) if color_on else DOT_GENERIC
+    return (C_DIM + DOT_NONE + C_OFF) if color_on else DOT_NONE
+
+
+def project_caps(path, pub):
+    """这个项目能做什么。三条来源，按"项目说得越具体越优先"排：
+
+      build    build.sh 在不在 —— 能不能编译只有项目自己知道
+      install  install.sh 在不在；没有的话看 wtool.xml 有没有 link/env
+               （纯声明式项目靠通用机制就能装好，不必写脚本）
+      publish  publish.sh 在不在；没有的话看 <publish kind> 是不是 none
+               （默认的 source 打包够绝大多数项目用）
+    """
+    caps = {}
+
+    caps["build"] = "script" if os.path.isfile(os.path.join(path, "build.sh")) else "none"
+
+    has_script = os.path.isfile(os.path.join(path, "install.sh"))
+    errors, entries = [], []
+    wf = os.path.join(path, "wtool.xml")
+    if os.path.isfile(wf):
+        _m, entries = parse_manifest(wf, path, errors)
+    declarative = bool({e.kind for e in entries} & {"link", "env"})
+    caps["install"] = ("script" if has_script
+                       else "generic" if declarative else "none")
+
+    if os.path.isfile(os.path.join(path, "publish.sh")):
+        caps["publish"] = "script"
+    elif pub["kind"] != "none":
+        caps["publish"] = "generic"
+    else:
+        caps["publish"] = "none"
+    return caps
+
+
+def render_table(root, state_dir, verbose=False, color=None):
+    """画表格。返回 (文本行列表, 项目列表)。"""
     state_dir = os.path.abspath(state_dir)
+    if color is None:
+        color = sys.stdout.isatty()
+
     projects = []
     for prio, pid, path, pub in scan_projects(root):
         st = project_state(path, state_dir, root=root)
@@ -1071,26 +1126,20 @@ def render_table(root, state_dir, verbose=False):
         st["prio"] = prio
         st["path"] = path
         st["pub"] = pub
+        st["caps"] = project_caps(path, pub)
 
-        # 这个项目有没有"可 provision 的东西"：看清单里有没有这几类条目
-        errors = []
-        entries = []
+        # provision 的适用性仍然看清单里有没有那几类条目
+        errors, entries = [], []
         wf = os.path.join(path, "wtool.xml")
         if os.path.isfile(wf):
             _m, entries = parse_manifest(wf, path, errors)
-        kinds = {e.kind for e in entries}
-        has_prov = bool(kinds & {"sysfile", "source", "task"})
-        has_install = bool(kinds & {"link", "env"})
-
-        st["cap_install"] = has_install
-        st["cap_prov"] = has_prov
-        st["cap_pub"] = pub["kind"] != "none"
+        st["cap_prov"] = bool({e.kind for e in entries} & {"sysfile", "source", "task"})
         projects.append(st)
 
-    # 列宽
     c_id = max([_width("项目")] + [_width(p["id"]) for p in projects]) if projects else 4
-    headers = ["项目", "prio", "install", "provision", "publish", "uninstall"]
-    widths = [c_id, 4, 7, 9, 7, 9]
+    # 列内容都是单个字符（可能带 ANSI 颜色），列宽固定 1 + 两边各留一个空格
+    headers = ["项目", "prio", "build", "install", "publish"]
+    widths = [c_id, 4, 5, 7, 7]
 
     out = []
     head = "  ".join(_pad(h, w) for h, w in zip(headers, widths))
@@ -1101,11 +1150,9 @@ def render_table(root, state_dir, verbose=False):
         cells = [
             _pad(p["id"], widths[0]),
             _pad(str(p["prio"]), widths[1]),
-            _pad(_cap(p["installed"], p["cap_install"]), widths[2]),
-            _pad(_cap(p["provisioned"], p["cap_prov"]), widths[3]),
-            _pad(_cap(p["published"], p["cap_pub"]), widths[4]),
-            # 卸载：装了才谈得上卸，没装就是"还没做"
-            _pad(_cap(p["installed"], p["cap_install"]), widths[5]),
+            _pad(_cell(p["caps"]["build"], color), widths[2]),
+            _pad(_cell(p["caps"]["install"], color), widths[3]),
+            _pad(_cell(p["caps"]["publish"], color), widths[4]),
         ]
         out.append("  ".join(cells).rstrip())
 
@@ -1113,7 +1160,9 @@ def render_table(root, state_dir, verbose=False):
         out.append("")
         for p in projects:
             detail = []
-            if p["cap_install"]:
+            if p["caps"]["install"] == "script":
+                detail.append("装法由 install.sh 决定")
+            elif p["caps"]["install"] == "generic":
                 detail.append("装过" if p["installed"] else "没装")
             if p["cap_prov"]:
                 d = []
@@ -1125,13 +1174,11 @@ def render_table(root, state_dir, verbose=False):
             if p["pub"]["kind"] == "none":
                 detail.append("不发布")
             elif p["published"]:
-                detail.append("发布过")
                 recs = _read_tsv(os.path.join(state_dir, p["id"], "publish.tsv"))
-                if recs:
-                    detail.append("最近 %s @ %s" % (recs[-1][2] if len(recs[-1]) > 2 else "?",
-                                                   recs[-1][1] if len(recs[-1]) > 1 else "?"))
-            elif p["pub"]["kind"] == "script":
-                detail.append("发布走脚本 %s" % (p["pub"]["script"] or "?"))
+                when = recs[-1][2] if recs and len(recs[-1]) > 2 else "?"
+                detail.append("发布过（%s）" % when)
+            elif p["caps"]["publish"] == "script":
+                detail.append("发布走 publish.sh")
             else:
                 detail.append("没发布过")
             out.append("  %s  %s" % (_pad(p["id"], c_id), "；".join(detail)))
@@ -1148,6 +1195,117 @@ def table_summary(projects):
                    if p["pub"]["kind"] != "none" and not p["published"])
     return ("共 %d 个项目：已安装 %d，已发布 %d，可发布未发布 %d"
             % (n, installed, pub, todo_pub))
+
+
+# --------------------------------------------------------------------------
+# 下载链接块
+#
+# 发布之后要把"没有 git clone 时怎么装"那一节的下载地址刷新掉。
+# 这件事必须由脚本做：手工维护的链接一定会过期，而过期的下载链接
+# 比没有链接更糟——照着做的人只会得到一个 404。
+#
+# 生成的是完整可复制的命令，不是光秃秃的 URL 列表：
+# 目标读者是"拿到一台干净机器、只想赶紧装上"的人。
+# --------------------------------------------------------------------------
+DL_BEGIN = "<!-- >>> wtool:downloads >>> -->"
+DL_END = "<!-- <<< wtool:downloads <<< -->"
+
+
+def splice_block(text, begin, end, body):
+    """把 text 里 begin/end 之间的内容换成 body。找不到标记就返回 None。"""
+    lines = text.split("\n")
+    try:
+        i = next(k for k, l in enumerate(lines) if l.strip() == begin)
+        j = next(k for k, l in enumerate(lines) if l.strip() == end and k > i)
+    except StopIteration:
+        return None
+    return "\n".join(lines[:i + 1] + body.split("\n") + lines[j:])
+
+
+def render_downloads(rows):
+    """rows: [(项目 id, 仓 owner/repo, tag, 资产名, 下载 URL, 字节数)]
+
+    输出一整套可直接粘贴的命令。分 PowerShell 和 bash 两版，
+    因为这两种人是真的会在不同机器上照着做的。
+    """
+    rows = sorted(rows)
+    out = []
+    out.append("<!-- 这一块由 `wtool publish` 自动重写，不要手改。 -->")
+    out.append("")
+    if not rows:
+        out.append("> 还没有发布过任何项目。在任意一台能访问 GitHub 的机器上跑")
+        out.append("> `wtool publish` 之后，这里会自动填上。")
+        return "\n".join(out)
+
+    out.append("每个项目的最新发布包都在它自己的 release 页面上。")
+    out.append("全部下载并解开之后，你会得到一个完整的工作区目录。")
+    out.append("")
+    out.append("| 项目 | 版本 | 包 | 大小 |")
+    out.append("|---|---|---|---|")
+    for pid, repo, tag, name, url, size in rows:
+        out.append("| `%s` | [%s](https://github.com/%s/releases/tag/%s) | [%s](%s) | %s |"
+                   % (pid, tag, repo, tag, name, url, _human_size(size)))
+    out.append("")
+
+    # 下载目录和最终的目录名：解压出来第一层就是 wtool/
+    out.append("### bash（Linux / macOS / WSL）")
+    out.append("")
+    out.append("```bash")
+    out.append("mkdir -p ~/self && cd ~/self")
+    for _pid, _repo, _tag, name, url, _size in rows:
+        out.append('curl -fL -o %s \\\n  %s' % (name, url))
+    for _pid, _repo, _tag, name, _url, _size in rows:
+        out.append("tar -xf %s" % name)
+    out.append("```")
+    out.append("")
+    out.append("跑完 `~/self/wtool/` 就是一个完整的工作区，接着看下一节。")
+    out.append("")
+
+    out.append("### PowerShell（Windows 10 及以上自带 tar）")
+    out.append("")
+    out.append("```powershell")
+    _bs = chr(92)
+    out.append('$d = "$HOME%sself"; New-Item -ItemType Directory -Force -Path $d | Out-Null; Set-Location $d' % _bs)
+    for _pid, _repo, _tag, name, url, _size in rows:
+        out.append('Invoke-WebRequest -Uri "%s" -OutFile "%s"' % (url, name))
+    for _pid, _repo, _tag, name, _url, _size in rows:
+        out.append("tar -xf %s" % name)
+    out.append("```")
+    out.append("")
+    out.append("跑完 `$HOME%sself%swtool` 就是一个完整的工作区。" % (_bs, _bs))
+    return "\n".join(out)
+
+
+def _human_size(n):
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "K", "M", "G"):
+        if n < 1024 or unit == "G":
+            return ("%d%s" % (n, unit)) if unit == "B" else ("%.1f%s" % (n, unit))
+        n /= 1024.0
+    return "?"
+
+
+def update_downloads(doc_path, rows_tsv):
+    """把下载块写进文档。rows_tsv 是 shell 侧收集好的 TSV。"""
+    rows = []
+    for parts in _read_tsv(rows_tsv):
+        if len(parts) < 6:
+            continue
+        rows.append(tuple(parts[:6]))
+    try:
+        with open(doc_path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        raise PlanError("读不了文档: %s: %s" % (doc_path, exc))
+
+    body = render_downloads(rows)
+    new = splice_block(text, DL_BEGIN, DL_END, body)
+    if new is None:
+        raise PlanError("文档里找不到下载块标记 %s: %s" % (DL_BEGIN, doc_path))
+    sys.stdout.write(new)
 
 
 # --------------------------------------------------------------------------
@@ -1401,6 +1559,10 @@ def build_parser():
     pi.add_argument("project")
     pi.add_argument("--root", default="")
 
+    ud = sub.add_parser("update-downloads")
+    ud.add_argument("--doc", required=True)
+    ud.add_argument("--rows", required=True)
+
     tb = sub.add_parser("table")
     tb.add_argument("--root", required=True)
     tb.add_argument("--state", required=True)
@@ -1442,6 +1604,10 @@ def main(argv):
             publish_list(args.root)
         elif args.cmd == "publish-info":
             return publish_info(args.project, args.root or None)
+        elif args.cmd == "update-downloads":
+            # 内容从 stdout 出，由 shell 落盘（Python 只算不写）
+            update_downloads(args.doc, args.rows)
+            return 0
         elif args.cmd == "table":
             lines, projects = render_table(args.root, args.state,
                                            verbose=args.verbose)

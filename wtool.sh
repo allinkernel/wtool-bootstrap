@@ -1,7 +1,9 @@
 #!/bin/sh
 # wtool —— wtool 集合的引擎（唯一一份，住在 wtool-bootstrap 里）
 #
-#   wtool.sh install   <项目目录> [--dry-run] [--force]
+#   wtool.sh build     [<项目>...] [--dry-run]      跑项目自己的 build.sh
+#   wtool.sh install   <项目目录> [--dry-run] [--force] [--no-script]
+#                      wtool.xml 的 link/rc 铺完之后，再跑项目自己的 install.sh
 #   wtool.sh uninstall <项目目录> [--dry-run] [--force]
 #   wtool.sh uninstall --id <项目id> [--dry-run] [--force]
 #   wtool.sh provision <项目目录> [--dry-run] [--force] [--with-system]
@@ -16,7 +18,8 @@
 #   wtool.sh validate  <项目目录>
 #   wtool.sh doctor
 #   wtool.sh env       [--quiet|--json]   输出可用的环境变量（带中文说明）
-#   wtool.sh scaffold  <目录> [--id ID]
+#   wtool.sh init      <目录> [--id ID] [--priority N] [--all]
+#                      新建一个 wtool 项目（生成 wtool.xml + 可选脚本模板）
 #   wtool.sh version
 #
 # 设计原则：Python 只算不写（除 scratch），Shell 只写不算（除读 journal）。
@@ -138,19 +141,121 @@ wt_print_plan() {
 }
 
 # --------------------------------------------------------------------------
-# install
+# 项目自己的脚本：build.sh / install.sh / publish.sh
+#
+# 约定（见 guide.md「项目拓扑」）：
+#   子项目只提供 wtool.xml + 自己需要的脚本和源码，剩下的全交给 wtool。
+#   引擎负责按名找到脚本、喂好环境变量、把输出透到终端；
+#   脚本自己决定做什么，不需要知道 wtool 的内部结构。
+#
+# 存在性检查是**能力标记**的来源：表格里哪一列亮绿，就看这个脚本在不在。
 # --------------------------------------------------------------------------
-cmd_install() {
-    _project=""
+wt_project_script() {   # <项目目录> <脚本名>  → 打印脚本绝对路径，没有则返回 1
+    _ps_dir=$1; _ps_name=$2
+    [ -f "$_ps_dir/$_ps_name" ] || return 1
+    printf '%s\n' "$_ps_dir/$_ps_name"
+}
+
+# 跑项目脚本：喂环境变量、cd 到项目目录、stdin 接 /dev/null
+wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
+    _rs_dir=$1; _rs_name=$2; shift 2
+    _rs_path=$(wt_project_script "$_rs_dir" "$_rs_name") || return 1
+
+    # dry-run 时把 --dry-run 转给脚本，让它自己把计划打出来。
+    # 直接跳过的话，"wtool build xxx --dry-run"就只会说一句"要执行 build.sh"，
+    # 等于什么都没告诉你。脚本要支持 --dry-run（模板里有）。
+    _rs_args="$*"
+    if wt_dry; then
+        _rs_args="$_rs_args --dry-run"
+    fi
+
+    (
+        # 项目脚本能拿到的环境（和 provision 任务的约定保持一致）
+        export WTOOL_PROJECT_ID="${WTOOL_PROJECT_ID:-$(basename -- "$_rs_dir")}"
+        export WTOOL_PROJECT_DIR="$_rs_dir"
+        export WTOOL_PROJECT_ROOT="$_rs_dir"
+        export WTOOL_WORKSPACE="$WTOOL_ROOT"
+        export WTOOL_HOME
+        export WTOOL_PREFIX WTOOL_JOBS WTOOL_ARCH
+        export WTOOL_OS_ID WTOOL_OS_VERSION WTOOL_OS_CODENAME WTOOL_OS_LIKE
+        cd -- "$_rs_dir" || exit 1
+        # stdin 接 /dev/null：脚本不该从终端读，也不该偷引擎的输入
+        # （清单走 fd 3，就是为了防这个——见 cmd_publish 的注释）
+        # shellcheck disable=SC2086
+        exec sh "$_rs_path" $_rs_args < /dev/null
+    )
+}
+
+# --------------------------------------------------------------------------
+# build：跑项目自己的 build.sh
+#
+# 「能构建」这件事只有项目自己知道——编什么、要不要 docker、产物在哪。
+# 引擎不做任何假设，只负责找到脚本、把环境喂好、把输出原样透出来。
+# --------------------------------------------------------------------------
+cmd_build() {
+    _targets=""
     for arg in "$@"; do
         case $arg in
             --dry-run) WTOOL_DRY_RUN=1 ;;
             --force)   WTOOL_FORCE=1 ;;
             -*)        wt_die "未知参数: $arg" ;;
-            *)         _project=$arg ;;
+            *)         _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_project" ] || wt_die "用法: wtool.sh install <项目目录> [--dry-run] [--force]"
+
+    if [ -z "$_targets" ]; then
+        # 不带参数：列出所有能构建的项目，不做任何事
+        wt_info "这些项目提供了 build.sh："
+        _n=0
+        while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
+            [ -n "${_pid:-}" ] || continue
+            if [ -f "$_path/build.sh" ]; then
+                wt_step "$_pid"
+                _n=$((_n + 1))
+            fi
+        done <<EOF
+$(python3 "$PY" publish-list --root "$WTOOL_ROOT")
+EOF
+        [ "$_n" -gt 0 ] || wt_info "  （一个都没有）"
+        wt_info "用 wtool build <项目> 构建其中一个"
+        return 0
+    fi
+
+    _done=0
+    for _want in $_targets; do
+        _row=$(wt_publish_resolve "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+
+        wt_info "── $_pid"
+        if ! wt_project_script "$_path" build.sh >/dev/null; then
+            wt_warn "  没有 build.sh，这个项目不需要构建"
+            continue
+        fi
+        wt_info "  脚本 : build.sh"
+        WTOOL_PROJECT_ID=$_pid
+        wt_run_project_script "$_path" build.sh || wt_die "build.sh 失败: $_pid"
+        _done=$((_done + 1))
+    done
+    wt_info "build 完成（$_done 个项目）"
+}
+
+# --------------------------------------------------------------------------
+# install
+# --------------------------------------------------------------------------
+cmd_install() {
+    _project=""
+    _no_script=0
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)   WTOOL_DRY_RUN=1 ;;
+            --force)     WTOOL_FORCE=1 ;;
+            --no-script) _no_script=1 ;;
+            -*)          wt_die "未知参数: $arg" ;;
+            *)           _project=$arg ;;
+        esac
+    done
+    [ -n "$_project" ] || wt_die "用法: wtool.sh install <项目目录> [--dry-run] [--force] [--no-script]"
     [ -d "$_project" ] || wt_die "项目目录不存在: $_project"
     _project=$(cd -- "$_project" && pwd)
 
@@ -175,6 +280,23 @@ cmd_install() {
         printf 'installed_at\t%s\n' "$(wt_now)" >> "$WTOOL_META"
         printf 'engine\t%s\n' "$ENGINE_VERSION" >> "$WTOOL_META"
     fi
+
+    # 项目自己的 install.sh 在这之后跑：
+    #   1) wtool.xml 的 link/rc 是通用机制，先铺好，脚本才能依赖
+    #      ~/.wtool/links/<id> 这个稳定地址；
+    #   2) 项目特有的安装步骤（编好的东西怎么摆、shell 集成怎么加）
+    #      只有项目自己知道，交给脚本。
+    #
+    # ⚠️ 正因为引擎会跑 install.sh，**项目里不能再放"调用 wtool install"的存根**，
+    #    那会变成 install.sh → wtool install → install.sh 的无限递归。
+    #    存根已经全部删除；需要自定义安装的项目才提供 install.sh。
+    if [ "$_no_script" = 1 ]; then
+        wt_info "跳过项目自己的 install.sh（--no-script）"
+    elif wt_project_script "$_project" install.sh >/dev/null; then
+        wt_info "项目脚本: install.sh"
+        wt_run_project_script "$_project" install.sh || wt_die "install.sh 失败: $WTOOL_PROJECT_ID"
+    fi
+
     wt_info "install 完成"
 }
 
@@ -448,6 +570,13 @@ cmd_bootstrap() {
             # shellcheck disable=SC2086
             cmd_provision "$_path" $_prov || wt_die "provision 失败: $_pid"
         fi
+        # 构建在安装之前：install.sh 负责"登记和收尾"，
+        # 它需要的东西得先由 build.sh 生产出来。没有 build.sh 就跳过。
+        if [ "$_install_only" = 0 ] && [ "$WTOOL_DRY_RUN" != 1 ] \
+                && wt_project_script "$_path" build.sh >/dev/null; then
+            # shellcheck disable=SC2086
+            cmd_build "$_path" $_common || wt_die "build 失败: $_pid"
+        fi
         # shellcheck disable=SC2086
         cmd_install "$_path" $_common || wt_die "install 失败: $_pid"
     done < "$_list"
@@ -610,41 +739,113 @@ _q() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-cmd_scaffold() {
-    _dir=""; _id=""
+# --------------------------------------------------------------------------
+# init：新建一个 wtool 项目
+#
+# 目标是把「加一个项目」变成一条命令：目录、wtool.xml、env 文件、
+# 以及三个可选脚本的模板都生成好，填空即可。
+#
+#   wtool init ./terminal/foo
+#   wtool init ./terminal/foo --id terminal/foo --priority 55 --with-build
+#
+# 只生成**真的需要**的脚本：不需要构建就别要 build.sh —— 表格里那一列
+# 是靠脚本存在与否点亮的，放一个空壳进去等于撒谎。
+# --------------------------------------------------------------------------
+cmd_init() {
+    _dir=""; _id=""; _prio=""
+    _with_build=0; _with_install=0; _with_publish=0
     while [ $# -gt 0 ]; do
         case $1 in
-            --id) shift; _id=${1:-} ;;
-            -*)   wt_die "未知参数: $1" ;;
-            *)    _dir=$1 ;;
+            --id)           shift; _id=${1:-} ;;
+            --priority)     shift; _prio=${1:-} ;;
+            --with-build)   _with_build=1 ;;
+            --with-install) _with_install=1 ;;
+            --with-publish) _with_publish=1 ;;
+            --all)          _with_build=1; _with_install=1; _with_publish=1 ;;
+            -*)             wt_die "未知参数: $1" ;;
+            *)              _dir=$1 ;;
         esac
         shift
     done
-    [ -n "$_dir" ] || wt_die "用法: wtool.sh scaffold <目录> [--id ID]"
-    [ -n "$_id" ] || _id=$(basename -- "$(cd -- "$_dir" 2>/dev/null && pwd || echo "$_dir")")
-    mkdir -p -- "$_dir"
-    [ -f "$_dir/wtool.xml" ] || cat > "$_dir/wtool.xml" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="$_id" priority="100">
-  <!-- 被 source 的部分；shells 省略时按扩展名推断 -->
-  <env src="env.zsh" shells="zsh"/>
+    [ -n "$_dir" ] || wt_die "用法: wtool.sh init <目录> [--id ID] [--priority N] [--all]
 
-  <!-- src 相对本目录，dest 相对 \$HOME -->
-  <!-- <link src="some.conf" dest=".some.conf"/> -->
+  --with-build    生成 build.sh（能编译的项目）
+  --with-install  生成 install.sh（有自己安装逻辑的项目）
+  --with-publish  生成 publish.sh（发布时要跑脚本的项目）
+  --all           三个都要
+
+  纯声明式的项目（只靠 wtool.xml 的 link/env 就能装好）不需要任何脚本。"
+    [ -n "$_prio" ] || _prio=100
+
+    # id 默认取相对工作区的路径，这样嵌套项目也对
+    _abs=$(cd -- "$(dirname -- "$_dir")" 2>/dev/null && pwd)/$(basename -- "$_dir") 2>/dev/null || _abs=$_dir
+    if [ -z "$_id" ]; then
+        _id=$(python3 -c '
+import os, sys
+p, root = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+rel = os.path.relpath(p, root)
+print(os.path.basename(p) if rel.startswith("..") else rel)
+' "$_abs" "$WTOOL_ROOT")
+    fi
+    case $_id in
+        /*|*..*) wt_die "项目 id 非法: $_id" ;;
+    esac
+
+    mkdir -p -- "$_dir"
+
+    if [ -f "$_dir/wtool.xml" ]; then
+        wt_warn "wtool.xml 已存在，不动它: $_dir/wtool.xml"
+    else
+        cat > "$_dir/wtool.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  $_id
+
+  写清楚这个项目是干什么的，以及装完之后用户能用到什么。
+  wtool 只认下面这些元素，别的不认识的会直接报错（自定义的请用 x- 前缀）。
+-->
+<wtool schema="1" id="$_id" priority="$_prio">
+
+  <!-- 被 shell source 的部分。加载器已经导出
+       WTOOL_PROJECT_ID / WTOOL_PROJECT_DIR / WTOOL_PROJECT_ROOT -->
+  <env src="env.zsh" shells="zsh,bash"/>
+
+  <!-- src 相对本文件所在目录，dest 相对 \$HOME -->
+  <!-- <link src="foo.conf" dest=".config/foo/foo.conf"/> -->
+
+  <!-- 需要 apt / 编译 / 跑脚本的，用 provision（不可逆，和 install 分开） -->
+  <!-- <provision src="provision/packages.yaml" marker="$_id-deps"/> -->
+
 </wtool>
 EOF
-    [ -f "$_dir/env.zsh" ] || cat > "$_dir/env.zsh" <<'EOF'
-# 被 ~/.zshrc 的 wtool 块 source。
-# 加载器已导出：WTOOL_PROJECT_ID / WTOOL_PROJECT_DIR / WTOOL_PROJECT_ROOT
+        wt_step "生成 wtool.xml"
+    fi
+
+    if [ ! -f "$_dir/env.zsh" ]; then
+        cat > "$_dir/env.zsh" <<'EOF'
+# 被 shell 的 wtool 托管块 source。
+# 加载器已经导出：WTOOL_PROJECT_ID / WTOOL_PROJECT_DIR / WTOOL_PROJECT_ROOT
+#
+# 这里放这个项目需要的环境变量，例如：
+#   export PATH="$WTOOL_PROJECT_DIR/bin:$PATH"
 EOF
-    _tpl="$here/templates/stub.sh"
-    [ -f "$_tpl" ] || wt_die "缺少模板: $_tpl"
-    for stub in install.sh uninstall.sh; do
-        [ -f "$_dir/$stub" ] && continue
-        cp -f -- "$_tpl" "$_dir/$stub"
-        chmod +x -- "$_dir/$stub"
-    done
-    wt_info "已生成脚手架: $_dir"
+        wt_step "生成 env.zsh"
+    fi
+
+    _tpl_dir="$here/templates"
+    _emit() {   # <脚本名> <说明>
+        [ -f "$_dir/$1" ] && { wt_warn "$1 已存在，不动它"; return 0; }
+        [ -f "$_tpl_dir/$1.tpl" ] || wt_die "缺少模板: $_tpl_dir/$1.tpl"
+        sed "s|@PROJECT_ID@|$_id|g" "$_tpl_dir/$1.tpl" > "$_dir/$1"
+        chmod +x -- "$_dir/$1"
+        wt_step "生成 $1  ($2)"
+    }
+    [ "$_with_build" = 1 ]   && _emit build.sh   "能构建"
+    [ "$_with_install" = 1 ] && _emit install.sh "能安装"
+    [ "$_with_publish" = 1 ] && _emit publish.sh "能发布"
+
+    wt_info "已生成项目: $_dir  (id=$_id priority=$_prio)"
+    wt_info "下一步：填 wtool.xml，然后 wtool validate $_dir"
 }
 
 # --------------------------------------------------------------------------
@@ -714,14 +915,15 @@ cmd_publish() {
 
     command -v gh >/dev/null 2>&1 || wt_die "publish 需要 gh（GitHub CLI）；装好再试"
 
-    # --out=DIR 时产物留在那里（先打出来看看再传），否则用临时目录
+    # --out=DIR 时产物最后拷到那里（先打出来看看再传）。
+    # 内部中间文件（sel.tsv 之类）始终放在临时目录里，绝不混进产物目录——
+    # 用户很可能直接 `gh release upload DIR/*`，把 sel.tsv 传上去就闹笑话了。
     if [ -n "$_outdir" ]; then
         mkdir -p -- "$_outdir" || wt_die "建不了目录: $_outdir"
-        _scratch=$(cd -- "$_outdir" && pwd)
-    else
-        _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-publish.XXXXXX")
-        trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+        _outdir=$(cd -- "$_outdir" && pwd)
     fi
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-publish.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
 
     # 1) 决定发布哪些项目
     : > "$_scratch/sel.tsv"
@@ -874,6 +1076,21 @@ EOF
     done
     exec 3<&-
 
+    # 产物交付给 --out（如果指定了）
+    if [ -n "${_outdir:-}" ] && ! wt_dry; then
+        _copied=0
+        for _d in "$_scratch"/out-*; do
+            [ -d "$_d" ] || continue
+            for _f in "$_d"/*; do
+                [ -f "$_f" ] || continue
+                cp -f -- "$_f" "$_outdir/" && _copied=$((_copied + 1))
+            done
+        done
+        [ "$_copied" -gt 0 ] && wt_info "产物已放到 $_outdir（$_copied 个文件）"
+    fi
+
+    wt_refresh_downloads
+
     if [ "$_done" = 0 ] && ! wt_dry; then
         wt_warn "没有发布任何项目"
     fi
@@ -882,6 +1099,70 @@ EOF
     else
         wt_info "publish 完成（$_done 个项目）"
     fi
+}
+
+# --------------------------------------------------------------------------
+# 刷新"没有 git clone 时怎么装"那一节的下载链接
+#
+# 这件事必须脚本做：手工维护的链接一定会过期，而过期的下载链接比没有链接
+# 更糟——照着做的人只会拿到 404。
+#
+# 哪些项目和仓由项目表决定，链接则一律以**GitHub 上真实存在的 release**
+# 为准（gh release view），不是拿本地记录猜——否则文档里会出现点不开的地址。
+# --------------------------------------------------------------------------
+wt_refresh_downloads() {
+    # 目标文档靠标记自己声明，不写死路径
+    _doc=$(grep -rl --include='*.md' -F '<!-- >>> wtool:downloads >>>' \
+               "$WTOOL_ROOT" 2>/dev/null | head -1)
+    if [ -z "$_doc" ]; then
+        wt_info "没有文档带 wtool:downloads 标记，跳过下载链接刷新"
+        return 0
+    fi
+    if wt_dry; then
+        wt_step "[dry-run] 刷新下载链接块: ${_doc#$WTOOL_ROOT/}"
+        return 0
+    fi
+    if ! command -v gh >/dev/null 2>&1; then
+        wt_warn "没有 gh，跳过下载链接刷新（${_doc#$WTOOL_ROOT/}）"
+        return 0
+    fi
+
+    _rows=$(mktemp "${TMPDIR:-/tmp}/wtool-dl.XXXXXX")
+    : > "$_rows"
+    while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
+        [ -n "${_pid:-}" ] || continue
+        [ "$_kind" = "none" ] && continue
+        if [ "$_to" != "-" ] && [ -n "$_to" ]; then
+            _repo=$_to
+        else
+            _repo=$(wt_publish_repo_of "$_path" 2>/dev/null) || continue
+        fi
+        _tag=$(wt_publish_tag "$_tpl")
+        # 以 GitHub 上的实际资产为准
+        gh release view "$_tag" --repo "$_repo" --json assets \
+            --jq '.assets[] | "\(.name)\t\(.url)\t\(.size)"' 2>/dev/null |
+        while IFS='	' read -r _name _url _size; do
+            [ -n "${_name:-}" ] || continue
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$_pid" "$_repo" "$_tag" "$_name" "$_url" "$_size" >> "$_rows"
+        done
+    done <<EOF
+$(python3 "$PY" publish-list --root "$WTOOL_ROOT")
+EOF
+
+    _n=$(awk 'END { print NR }' "$_rows" 2>/dev/null || echo 0)
+    _new=$(mktemp "${TMPDIR:-/tmp}/wtool-doc.XXXXXX")
+    if python3 "$PY" update-downloads --doc "$_doc" --rows "$_rows" > "$_new" 2>/dev/null; then
+        if cmp -s "$_doc" "$_new"; then
+            wt_info "下载链接块没有变化（$_n 个资产）"
+        else
+            cp -f -- "$_new" "$_doc"
+            wt_info "已刷新下载链接块: ${_doc#$WTOOL_ROOT/}（$_n 个资产）"
+        fi
+    else
+        wt_warn "刷新下载链接块失败: ${_doc#$WTOOL_ROOT/}"
+    fi
+    rm -f -- "$_rows" "$_new"
 }
 
 _publish_kind_cn() {
@@ -900,6 +1181,7 @@ _cmd=${1:-}
 [ $# -gt 0 ] && shift
 
 case $_cmd in
+    build)     cmd_build "$@" ;;
     install)   cmd_install "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     provision) cmd_provision "$@" ;;
@@ -910,7 +1192,8 @@ case $_cmd in
     status)    cmd_status "$@" ;;
     doctor)    cmd_doctor "$@" ;;
     env)       cmd_env "$@" ;;
-    scaffold)  cmd_scaffold "$@" ;;
+    init)      cmd_init "$@" ;;
+    scaffold)  wt_warn "scaffold 已改名为 init，请用 wtool init"; cmd_init "$@" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;
     -h|--help|help)

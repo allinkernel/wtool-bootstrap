@@ -53,11 +53,53 @@ untar() {
 cd "$T"
 
 echo "== 1. 源码发布：terminal/tmux =="
-PATH="$T/bin:$PATH" WTOOL_STATE="$T/state" \
+# ★ 用**临时工作区**，绝不能用真工作区：
+#   wt_refresh_downloads 会扫 $WTOOL_ROOT 找带标记的文档并改写它，
+#   跑真工作区的话一条测试就能把真的 README 洗掉（这个坑真踩过）。
+WS1="$T/ws1"
+mkdir -p "$WS1/terminal/tmux/bin"
+cat > "$WS1/terminal/tmux/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="terminal/tmux" priority="50">
+  <env src="env.zsh" shells="zsh"/>
+  <link src="tmux.conf" dest=".tmux.conf"/>
+</wtool>
+EOF
+echo 'set -g mouse on' > "$WS1/terminal/tmux/tmux.conf"
+echo 'export DEMO=1'  > "$WS1/terminal/tmux/env.zsh"
+cat > "$WS1/terminal/tmux/install.sh" <<'EOF'
+#!/bin/sh
+echo "install ran" >&2
+EOF
+# 一个相对符号链接：验证包里不会把它改成断链
+ln -sf tmux.conf "$WS1/terminal/tmux/tmux.conf.alias"
+git -C "$WS1/terminal/tmux" init -q
+git -C "$WS1/terminal/tmux" remote add origin ssh://git@github.com/allinkernel/wtool-tmux-config.git
+git -C "$WS1/terminal/tmux" add -A
+git -C "$WS1/terminal/tmux" -c user.name=t -c user.email=t@t commit -q -m init
+
+# 再放一个"伞项目 + 不发布的子项目"，第 4 节用它验第三方仓不被推。
+# 放在同一个临时工作区里，这样下载链接刷新也只看得到这里。
+mkdir -p "$WS1/editor/astronvim_v5/nvim"
+cat > "$WS1/editor/astronvim_v5/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="editor/astronvim_v5" priority="70">
+  <publish kind="script" script="publish.sh">
+    <sub path="nvim" kind="none"/>
+  </publish>
+</wtool>
+EOF
+git -C "$WS1/editor/astronvim_v5/nvim" init -q
+git -C "$WS1/editor/astronvim_v5/nvim" remote add origin ssh://git@github.com/neovim/neovim.git
+echo x > "$WS1/editor/astronvim_v5/nvim/x"
+git -C "$WS1/editor/astronvim_v5/nvim" add -A
+git -C "$WS1/editor/astronvim_v5/nvim" -c user.name=t -c user.email=t@t commit -q -m init
+
+PATH="$T/bin:$PATH" WTOOL_ROOT="$WS1" WTOOL_STATE="$T/state" \
     "$WT" publish terminal/tmux --out="$T/out" > "$T/log1" 2>&1 || {
     bad "publish 退出码非 0"; sed 's/^/     /' "$T/log1"; }
 
-PKG=$(ls "$T/out"/out-0/terminal-tmux-*.tar.* 2>/dev/null | head -1)
+PKG=$(ls "$T/out"/terminal-tmux-*.tar.* 2>/dev/null | head -1)
 if [ -f "$PKG" ]; then ok "产出了源码包 $(basename "$PKG")"; else bad "没产出源码包"; fi
 
 if [ -f "$PKG" ]; then
@@ -76,10 +118,10 @@ if [ -f "$PKG" ]; then
     fi
 
     # 2) 项目本身在正确位置
-    if printf '%s\n' "$LIST" | grep -q '^wtool/terminal/tmux/install.sh$'; then
-        ok "wtool/terminal/tmux/install.sh 在（解压后路径 == repo sync）"
+    if printf '%s\n' "$LIST" | grep -q '^wtool/terminal/tmux/tmux.conf$'; then
+        ok "wtool/terminal/tmux/tmux.conf 在（解压后路径 == repo sync）"
     else
-        bad "缺少 wtool/terminal/tmux/install.sh"
+        bad "缺少 wtool/terminal/tmux/tmux.conf"
     fi
 
     # 3) 不含 .git
@@ -94,7 +136,7 @@ if [ -f "$PKG" ]; then
     if [ -f "$MJ" ]; then
         ok "标记文件能解出来"
         chk "标记里 view=release" "$(py -c 'import json,sys;print(json.load(open(sys.argv[1]))["view"])' "$MJ")" "release"
-        REAL=$(git -C "$WS/terminal/tmux" rev-parse HEAD)
+        REAL=$(git -C "$WS1/terminal/tmux" rev-parse HEAD)
         chk "标记里的 commit 是项目 HEAD" "$(py -c 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$MJ")" "$REAL"
         chk "标记里 layout 指向 wtool/terminal/tmux" "$(py -c 'import json,sys;print(json.load(open(sys.argv[1]))["layout"])' "$MJ")" "wtool/terminal/tmux"
     else
@@ -118,11 +160,28 @@ else
     bad "没有 publish.tsv"
 fi
 
+echo "== 3b. ★测试没有碰真工作区的文档 =="
+# 这条断言是为了防住"测试改写真实文件"这类问题——它真的发生过一次。
+_real_doc="$WS/wtool-base/README.md"
+if [ -f "$_real_doc" ]; then
+    if grep -q 'wtool:downloads' "$_real_doc" \
+            && [ "$(grep -c '还没有发布过任何项目' "$_real_doc" || true)" = 0 ]; then
+        ok "真工作区的 README 没被动过（下载块里是真链接）"
+    else
+        bad "真工作区的 README 被测试改动了"
+    fi
+else
+    ok "真工作区没有 wtool-base（无所谓）"
+fi
+
 echo "== 4. kind=none 不发布（nvim 是第三方上游仓）=="
 : > "$T/gh.log"
-PATH="$T/bin:$PATH" WTOOL_STATE="$T/state" \
-    "$WT" publish nvim --out="$T/out" > "$T/log4" 2>&1 || true
-chk "对 nvim 没有任何 gh 调用" "$(grep -c . "$T/gh.log" || true)" "0"
+PATH="$T/bin:$PATH" WTOOL_ROOT="$WS1" WTOOL_STATE="$T/state" \
+    "$WT" publish nvim --out="$T/out4" > "$T/log4" 2>&1 || true
+# 断言要精确到"对 neovim 的写操作"，而不是"零 gh 调用"——
+# 下载链接刷新本来就会对每个有 remote 的项目查一次 release
+chk "对 neovim 没有任何写操作" \
+    "$(grep -cE 'neovim/neovim.*release (create|upload)|release (create|upload).*neovim/neovim' "$T/gh.log" || true)" "0"
 grep -q '声明为不发布' "$T/log4" && ok "明确说了不发布" || bad "没说清为什么不发"
 
 echo "== 5. kind=script：调项目内脚本，脚本产出啥传啥 =="
