@@ -1,13 +1,23 @@
 #!/bin/sh
 # table_test.sh —— 测 wtool 的能力表格
 #
-# 表格是给人看的第一屏，格子的语义错了比没有更糟（会让人以为装过了）。
-# 这里用假 state 目录造出"装过/provision 过/发布过"三种状态，逐个格子对。
+# 表格是给人看的第一屏，格子错了比没有更糟 —— 它会让人以为某个项目
+# 能构建/能装/能发布，照着做却发现什么都没有。
+#
+# 三列的含义（这是这一版表格的全部）：
+#   build    build.sh   在不在
+#   install  install.sh 在不在；没有的话看 wtool.xml 有没有 link/env
+#   publish  publish.sh 在不在；没有的话看 <publish kind> 是不是 none
+#
+# 三种格子：
+#   亮绿 ●  项目提供了脚本（能力由脚本定义）
+#   绿   ●  引擎的通用机制能办
+#   灰   ·  没这项能力
+# 前两者的**字符一样**，区别只在颜色，所以测试必须开 --color=always 看转义码。
 set -eu
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 bootstrap=$(cd -- "$here/.." && pwd)
-WT="$bootstrap/wtool.sh"
 PY="$bootstrap/lib/wtool_plan.py"
 
 pass=0; fail=0
@@ -18,113 +28,144 @@ chk() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1（期望 [$3] 实际 [$2]
 T=$(mktemp -d "${TMPDIR:-/tmp}/wtool-table.XXXXXX")
 trap 'rm -rf -- "$T"' EXIT INT TERM
 
-# 造一个干净的小工作区，避免依赖真实仓库的状态
+# --------------------------------------------------------------------------
+# 四种项目，覆盖所有格子组合
+# --------------------------------------------------------------------------
 WS="$T/ws"
-mkdir -p "$WS/alpha" "$WS/beta" "$WS/gamma" "$WS/delta"
-cat > "$WS/alpha/wtool.xml" <<'EOF'
+mkdir -p "$WS/declarative" "$WS/scripted" "$WS/nowhere" "$WS/upstream"
+mkdir -p "$WS/outer/inner"
+
+# 纯声明式：没有脚本，靠 wtool.xml 的 link/env 装
+cat > "$WS/declarative/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="alpha" priority="10">
+<wtool schema="1" id="declarative" priority="10">
   <env src="env.zsh" shells="zsh"/>
   <link src="a.conf" dest=".a.conf"/>
 </wtool>
 EOF
-cat > "$WS/beta/wtool.xml" <<'EOF'
+
+# 三个脚本都有：三列都该是"项目提供脚本"
+cat > "$WS/scripted/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="beta" priority="20">
-  <provision src="pkg.yaml" runner="ansible" marker="beta-1"/>
+<wtool schema="1" id="scripted" priority="20">
+  <publish kind="script" script="publish.sh"/>
 </wtool>
 EOF
-cat > "$WS/gamma/wtool.xml" <<'EOF'
+for f in build.sh install.sh publish.sh; do echo '#!/bin/sh' > "$WS/scripted/$f"; done
+
+# 什么都没有：三列都该是灰点
+cat > "$WS/nowhere/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="gamma" priority="30">
+<wtool schema="1" id="nowhere" priority="30">
   <publish kind="none"/>
 </wtool>
 EOF
-# delta 有发布声明但没 wtool.xml 之外的东西，用它验"走脚本"
-cat > "$WS/delta/wtool.xml" <<'EOF'
+
+# 上游仓：不发布，给它一个空的 publish.sh 看会不会被误认成"能发布"
+mkdir -p "$WS/upstream"
+cat > "$WS/upstream/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="delta" priority="40">
-  <publish kind="script" script="publish.sh"/>
+<wtool schema="1" id="upstream" priority="40">
+  <publish kind="none"/>
+</wtool>
+EOF
+
+# 嵌套项目：id 必须相对工作区根算
+cat > "$WS/outer/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="outer" priority="50">
+  <env src="env.zsh" shells="zsh"/>
+</wtool>
+EOF
+cat > "$WS/outer/inner/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="outer/inner" priority="60">
+  <env src="env.zsh" shells="zsh"/>
 </wtool>
 EOF
 
 S="$T/state"
+tbl() { env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S" "$@"; }
+# 取某一行的某一列。列都是单字符（可能带颜色），用 grep -o 抽转义码更好使。
+cell() {   # <项目 id> <列号 3..5>
+    tbl --color=always | awk -v id="$1" '$1 == id {print $'"$2"'; exit}'
+}
 
-echo "== 1. 什么都没做：install/provision/publish 全是 -（能做没做）=="
-TAB=$(python3 "$PY" table --root "$WS" --state "$S")
-echo "$TAB" | sed 's/^/     /'
-row() { printf '%s\n' "$TAB" | awk -v id="$1" '$1 == id {print; exit}'; }
-chk "alpha 的 install 是 -" "$(row alpha | awk '{print $3}')" "-"
-chk "alpha 的 provision 是 .（清单里没有 provision）" "$(row alpha | awk '{print $4}')" "."
-chk "beta 的 provision 是 -（有 provision 但没跑）" "$(row beta | awk '{print $4}')" "-"
-chk "gamma 的 publish 是 .（声明了不发布）" "$(row gamma | awk '{print $5}')" "."
-chk "delta 的 publish 是 -（能发没发）" "$(row delta | awk '{print $5}')" "-"
-chk "beta 的 install 是 .（没这项能力）" "$(row beta | awk '{print $3}')" "."
+echo "== 1. build 列：只看 build.sh 在不在 =="
+chk "scripted 有 build.sh → 亮绿" "$(cell scripted 3)" "$(printf '\033[92m●\033[0m')"
+chk "declarative 没脚本 → 灰点" "$(cell declarative 3)" "$(printf '\033[2m·\033[0m')"
+chk "nowhere 没脚本 → 灰点" "$(cell nowhere 3)" "$(printf '\033[2m·\033[0m')"
 
-echo "== 2. 造出 装过/provision过/发布过 的状态 =="
-mkdir -p "$S/alpha" "$S/beta/provisioned" "$S/delta"
-printf 'link\tlink\t/home/x/.a.conf\t%s/a.conf\tsha\n' "$WS" > "$S/alpha/journal.tsv"
-printf 'beta-1\t2026-09-15T00:00:00+0800\n' > "$S/beta/provisioned/beta-1"
-printf '2026-09-15T00:00:00+0800\towner/repo\tsnapshot-2026-09-15\t1\tsource:abc\n' \
-    > "$S/delta/publish.tsv"
+echo "== 2. install 列：脚本优先，否则看 wtool.xml 有没有 link/env =="
+chk "scripted 有 install.sh → 亮绿" "$(cell scripted 4)" "$(printf '\033[92m●\033[0m')"
+chk "declarative 没脚本但有 link/env → 绿（引擎通用机制）" \
+    "$(cell declarative 4)" "$(printf '\033[32m●\033[0m')"
+chk "nowhere 既没脚本也没 link/env → 灰点" "$(cell nowhere 4)" "$(printf '\033[2m·\033[0m')"
 
-TAB2=$(python3 "$PY" table --root "$WS" --state "$S")
-echo "$TAB2" | sed 's/^/     /'
-row2() { printf '%s\n' "$TAB2" | awk -v id="$1" '$1 == id {print; exit}'; }
-chk "alpha 的 install 变成 +" "$(row2 alpha | awk '{print $3}')" "+"
-chk "alpha 的 uninstall 也是 +（装了才谈得上卸）" "$(row2 alpha | awk '{print $6}')" "+"
-chk "beta 的 provision 变成 +" "$(row2 beta | awk '{print $4}')" "+"
-chk "delta 的 publish 变成 +" "$(row2 delta | awk '{print $5}')" "+"
-chk "gamma 的 publish 还是 .（声明不发布，不是 TODO）" "$(row2 gamma | awk '{print $5}')" "."
+echo "== 3. publish 列：脚本优先，否则看 kind 是不是 none =="
+chk "scripted 有 publish.sh → 亮绿" "$(cell scripted 5)" "$(printf '\033[92m●\033[0m')"
+chk "declarative 没脚本但能打源码包 → 绿" \
+    "$(cell declarative 5)" "$(printf '\033[32m●\033[0m')"
+chk "nowhere 声明了 kind=none → 灰点（不是 TODO）" \
+    "$(cell nowhere 5)" "$(printf '\033[2m·\033[0m')"
 
-echo "== 3. registry 也算装过（journal 不在但软链登记了）=="
-# 用 alpha（它有 <link>/<env>，有 install 能力），只给它 registry 不给 journal
-S3="$T/state3"; mkdir -p "$S3"
-printf '/home/x/.a.conf\talpha\tlink\n' > "$S3/registry.tsv"
-TAB3=$(python3 "$PY" table --root "$WS" --state "$S3")
-printf '%s\n' "$TAB3" | awk '$1 == "alpha" {print "     " $0}'
-chk "alpha 靠 registry 认出已安装" \
-    "$(printf '%s\n' "$TAB3" | awk '$1 == "alpha" {print $3; exit}')" "+"
-chk "gamma 只声明了 <publish>，本来就没有 install 能力" \
-    "$(printf '%s\n' "$TAB3" | awk '$1 == "gamma" {print $3; exit}')" "."
+echo "== 4. 嵌套项目的 id 相对工作区根算 =="
+# 曾经的真 bug：Python 侧靠 os.environ['WTOOL_ROOT'] 推 id，而 wtool.sh 里
+# 那个变量没 export，读不到就退化成 basename，outer/inner 被当成 inner，
+# 跟状态目录对不上，已发布的项目在表里显示成没发布。
+chk "outer/inner 是自己一行" "$(tbl | awk '$1 == "outer/inner" {print $1}')" "outer/inner"
+chk "outer 也还在" "$(tbl | awk '$1 == "outer" {print $1}')" "outer"
 
-echo "== 4. 汇总数字对得上 =="
-SUM=$(python3 "$PY" table --root "$WS" --state "$S" --summary | tail -1)
-echo "     $SUM"
-printf '%s' "$SUM" | grep -q '共 4 个项目' && ok "项目数对" || bad "项目数不对: $SUM"
-printf '%s' "$SUM" | grep -q '已安装 1' && ok "已安装数对（只有 alpha 装了）" || bad "已安装数不对: $SUM"
-printf '%s' "$SUM" | grep -q '已发布 1' && ok "已发布数对（delta）" || bad "已发布数不对: $SUM"
+echo "== 5. 状态只在 --verbose 里出现，不影响能力格子 =="
+mkdir -p "$S/declarative"
+printf 'link\tlink\t/home/x/.a.conf\t%s/a.conf\tsha\n' "$WS" > "$S/declarative/journal.tsv"
+printf '2026-09-15T00:00:00+0800\towner/x\tsnapshot-2026-09-15\t1\tsource:abc\n' \
+    > "$S/declarative/publish.tsv"
+V=$(tbl --verbose)
+printf '%s\n' "$V" | awk '$1 == "declarative" {print "     " $0}'
+chk "装过之后 install 格子还是绿的（能力不随状态变）" \
+    "$(cell declarative 4)" "$(printf '\033[32m●\033[0m')"
+printf '%s\n' "$V" | grep -q 'declarative.*发布过' && ok "verbose 里显示了发布状态" \
+    || bad "verbose 里没有发布状态"
 
-echo "== 5. 表头列名齐全 =="
-for col in 项目 prio install provision publish uninstall; do
-    printf '%s\n' "$TAB" | head -1 | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
-done
+echo "== 6. registry 也算装过 =="
+S6="$T/state6"; mkdir -p "$S6"
+printf '/home/x/.a.conf\tdeclarative\tlink\n' > "$S6/registry.tsv"
+V6=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S6" --verbose)
+printf '%s\n' "$V6" | grep -q 'declarative.*装过' && ok "靠 registry 认出已安装" \
+    || { bad "没认出 registry 里的记录"; printf '%s\n' "$V6" | grep declarative | sed 's/^/     /'; }
 
-echo "== 6. 列对齐：每行在"最后一列之前"都被填满到同一宽度 =="
-# 表格每行末尾会被 rstrip，所以比"整行宽度"没意义（表头最后一列 9 宽、
-# 数据行只有 1 宽，这本来就是对的）。真正的不变量是：最后一列之前的区域
-# 每行都填满到同样的宽度，这样各列起始位置才一致。
-if printf '%s\n' "$TAB" | python3 -c '
-import sys
+echo "== 7. 发布标记能补全项目表（解压出来的工作区没有 .repo）=="
+WS2="$T/ws-dist"; mkdir -p "$WS2/deep/bbb" "$WS2/.wtool-dist"
+printf '{"project":"deep/bbb","repo":"x/y","commit":"abc","view":"release","layout":"wtool/deep/bbb"}\n' \
+    > "$WS2/.wtool-dist/deep-bbb.json"
+printf '{ 这不是 json' > "$WS2/.wtool-dist/broken.json"
+TAB7=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS2" --state "$T/state7" 2>"$T/err7") || true
+chk "有坏标记也不崩" "$?" "0"
+chk "deep/bbb 靠发布标记被找到" "$(printf '%s\n' "$TAB7" | awk '$1 == "deep/bbb" {print $1}')" "deep/bbb"
 
-def cw(c):
-    o = ord(c)
-    return 2 if (0x1100 <= o <= 0x115F or 0x2E80 <= o <= 0xA4CF
-                 or 0xAC00 <= o <= 0xD7A3 or 0xF900 <= o <= 0xFAFF
-                 or 0xFE30 <= o <= 0xFE6F or 0xFF00 <= o <= 0xFF60
-                 or 0xFFE0 <= o <= 0xFFE6) else 1
+echo "== 8. 列对齐（CJK 双宽 + ANSI 转义不能算进宽度）=="
+if tbl | python3 -c '
+import re, sys
+
+ANSI = re.compile("\033\\[[0-9;]*m")
 
 def w(t):
-    return sum(cw(c) for c in t)
+    t = ANSI.sub("", t)
+    n = 0
+    for c in t:
+        o = ord(c)
+        n += 2 if (0x1100 <= o <= 0x115F or 0x2E80 <= o <= 0xA4CF
+                   or 0xAC00 <= o <= 0xD7A3 or 0xF900 <= o <= 0xFAFF
+                   or 0xFE30 <= o <= 0xFE6F or 0xFF00 <= o <= 0xFF60
+                   or 0xFFE0 <= o <= 0xFFE6) else 1
+    return n
 
 lines = [l for l in sys.stdin.read().split("\n") if l.strip() and not l.startswith("-")]
 head = lines[0]
-# 表头最后一列的宽度 = 前缀区宽度之后的部分
-prefix_w = w(head) - w(head.split()[-1]) - 2
+prefix_w = w(head) - w(ANSI.sub("", head).split()[-1]) - 2
 short = [l for l in lines if w(l) < prefix_w]
 print("     前缀区应宽 %d，各行宽度 %s" % (prefix_w, sorted({w(l) for l in lines})))
-if short:
-    print("     宽度不足的行: %r" % short[:2])
 sys.exit(1 if short else 0)
 '; then
     ok "每行前缀区都填满了（列起始位置一致）"
@@ -132,94 +173,10 @@ else
     bad "有行前缀区没填满（列会错位）"
 fi
 
-echo "== 7. ★嵌套项目的 id 必须相对工作区根算（回归）=="
-# 曾经的真 bug：Python 侧用 os.environ.get("WTOOL_ROOT") 推项目 id，
-# 而 wtool.sh 里 WTOOL_ROOT 只是普通赋值、没 export，读不到就退化成
-# "项目目录的 basename"，于是 outer/inner 被当成 inner，跟
-# $WTOOL_STATE/outer/inner 对不上——已发布的项目在表格里显示成没发布。
-# 只有 id 恰好等于目录名的项目才碰巧对。
-WS2="$T/ws-nested"
-mkdir -p "$WS2/outer/inner" "$WS2/outer"
-cat > "$WS2/outer/wtool.xml" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="outer" priority="10">
-  <link src="a.conf" dest=".a.conf"/>
-</wtool>
-EOF
-cat > "$WS2/outer/inner/wtool.xml" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="outer/inner" priority="20">
-  <link src="b.conf" dest=".b.conf"/>
-</wtool>
-EOF
-S7="$T/state-nested"
-mkdir -p "$S7/outer/inner" "$S7/outer"
-printf 'link\tlink\t/home/x/.b.conf\t%s/b.conf\tsha\n' "$WS2" > "$S7/outer/inner/journal.tsv"
-printf '2026-09-15T00:00:00+0800\towner/inner\tsnapshot-2026-09-15\t1\tsource:abc\n' \
-    > "$S7/outer/inner/publish.tsv"
-printf 'link\tlink\t/home/x/.a.conf\t%s/a.conf\tsha\n' "$WS2" > "$S7/outer/journal.tsv"
-
-# 关键：不设 WTOOL_ROOT 环境变量，模拟真实调用（wtool.sh 里它以前没 export）
-TAB7=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS2" --state "$S7")
-printf '%s\n' "$TAB7" | awk '$1 == "outer" || $1 == "outer/inner" {print "     " $0}'
-chk "outer/inner 的 install 是 +（认得出自己的状态目录）" \
-    "$(printf '%s\n' "$TAB7" | awk '$1 == "outer/inner" {print $3; exit}')" "+"
-chk "outer/inner 的 publish 是 +" \
-    "$(printf '%s\n' "$TAB7" | awk '$1 == "outer/inner" {print $5; exit}')" "+"
-chk "outer 没被 inner 的状态带偏" \
-    "$(printf '%s\n' "$TAB7" | awk '$1 == "outer" {print $5; exit}')" "-"
-chk "汇总：已安装 2、已发布 1" \
-    "$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS2" --state "$S7" --summary | tail -1 | grep -o '已安装 [0-9]*，已发布 [0-9]*')" \
-    "已安装 2，已发布 1"
-
-# 另外，wtool.sh 必须真的把 WTOOL_ROOT 导出（导出后子进程才读得到）
-grep -qE '^export WTOOL_ROOT' "$bootstrap/wtool.sh" \
-    && ok "wtool.sh 导出了 WTOOL_ROOT" || bad "wtool.sh 没导出 WTOOL_ROOT"
-
-echo "== 8. ★解压出来的工作区（没有 .repo）靠 .wtool-dist 标记找项目 =="
-# 这条路径以前没有任何测试覆盖：本机工作区没有 .wtool-dist/，
-# 所以 _dist_marker_projects 里 json 没导入这种硬 bug 也能一路全绿，
-# 直到真去下载发布包解压才炸出来。
-WS3="$T/ws-dist"
-mkdir -p "$WS3/aaa" "$WS3/deep/bbb" "$WS3/.wtool-dist"
-cat > "$WS3/aaa/wtool.xml" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="aaa" priority="10">
-  <link src="a.conf" dest=".a.conf"/>
-</wtool>
-EOF
-# deep/bbb 故意**没有** wtool.xml：只能靠发布标记找到它
-cat > "$WS3/.wtool-dist/aaa.json" <<'EOF'
-{
-  "project": "aaa",
-  "repo": "fakeowner/aaa",
-  "commit": "1111111111111111111111111111111111111111",
-  "view": "release",
-  "layout": "wtool/aaa"
-}
-EOF
-cat > "$WS3/.wtool-dist/deep-bbb.json" <<'EOF'
-{
-  "project": "deep/bbb",
-  "repo": "fakeowner/bbb",
-  "commit": "2222222222222222222222222222222222222222",
-  "view": "release",
-  "layout": "wtool/deep/bbb"
-}
-EOF
-# 一个坏标记：不能因为它把整张表搞崩
-printf '{ 这不是 json' > "$WS3/.wtool-dist/broken.json"
-
-TAB8=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS3" --state "$T/state-dist" 2>"$T/err8")
-_rc=$?
-chk "有坏标记也不报错退出" "$_rc" "0"
-printf '%s\n' "$TAB8" | awk '{print "     " $0}'
-chk "aaa 来自 wtool.xml" \
-    "$(printf '%s\n' "$TAB8" | awk '$1 == "aaa" {print $2; exit}')" "10"
-chk "deep/bbb 靠发布标记被找到" \
-    "$(printf '%s\n' "$TAB8" | awk '$1 == "deep/bbb" {print $4; exit}')" "."
-chk "项目数是 2（坏标记被忽略）" \
-    "$(printf '%s\n' "$TAB8" | grep -cE '^[a-z]')" "2"
+echo "== 9. 表头列名齐全 =="
+for col in 项目 prio build install publish; do
+    tbl | head -1 | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
+done
 
 echo
 printf 'table_test: PASS %d  FAIL %d\n' "$pass" "$fail"

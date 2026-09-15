@@ -681,6 +681,7 @@ cmd_table() {
         case $_a in
             --verbose|-v) _args="$_args --verbose" ;;
             --summary|-s) _args="$_args --summary" ;;
+            --color=*)    _args="$_args --color=${_a#--color=}" ;;
             -*) wt_die "未知参数: $_a（可用 --verbose --summary）" ;;
             *)  wt_die "table 不接受位置参数: $_a" ;;
         esac

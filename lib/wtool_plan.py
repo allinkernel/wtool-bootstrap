@@ -1567,6 +1567,9 @@ def build_parser():
     tb.add_argument("--root", required=True)
     tb.add_argument("--state", required=True)
     tb.add_argument("--verbose", action="store_true")
+    # 颜色默认按是不是终端自动判断；给个开关是为了能测——
+    # "项目提供了脚本"和"引擎通用机制能办"的区别只在颜色上
+    tb.add_argument("--color", choices=("auto", "always", "never"), default="auto")
     tb.add_argument("--summary", action="store_true")
     return p
 
@@ -1609,8 +1612,14 @@ def main(argv):
             update_downloads(args.doc, args.rows)
             return 0
         elif args.cmd == "table":
+            if args.color == "always":
+                _color = True
+            elif args.color == "never":
+                _color = False
+            else:
+                _color = None
             lines, projects = render_table(args.root, args.state,
-                                           verbose=args.verbose)
+                                           verbose=args.verbose, color=_color)
             for line in lines:
                 print(line)
             if args.summary:
