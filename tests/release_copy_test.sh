@@ -97,11 +97,13 @@ echo "== 3. 项目表靠发布标记找全（harness 没有 wtool.xml）=="
 TAB=$(env HOME="$H" WTOOL_ROOT="$WS" WTOOL_STATE="$T/state" \
       python3 "$bootstrap/lib/wtool_plan.py" table --root "$WS" --state "$T/state")
 printf '%s\n' "$TAB" | awk '$2=="harness"{print "     " $0}'
-# 表格现在带边框，项目 id 是 awk 的 $2
-chk "harness 出现在表里" \
-    "$(printf '%s\n' "$TAB" | awk '$2 == "harness" {print $2}' | head -1)" "harness"
-chk "terminal/tmux 也在" \
+# 表格现在带边框，项目 id 是 awk 的 $2。
+# 项目表只认 wtool.xml —— 没有清单的纯数据仓库（harness）不该出现在表里，
+# 但它确实在磁盘上、也确实被发布了，所以只断言有清单的那个。
+chk "有 wtool.xml 的 terminal/tmux 在表里" \
     "$(printf '%s\n' "$TAB" | awk '$2 == "terminal/tmux" {print $2}' | head -1)" "terminal/tmux"
+chk "没有 wtool.xml 的 harness 不出现在表里" \
+    "$(printf '%s\n' "$TAB" | awk '$2 == "harness" {print $2}' | head -1)" ""
 
 echo "== 4. 工作区入口：没有 repo 客户端也要有根目录软链 =="
 # bootstrap/install.sh 自己会补这几条（repo 的 linkfile 只能覆盖 repo 客户端）

@@ -164,14 +164,19 @@ V6=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S6" --verbose)
 printf '%s\n' "$V6" | grep -q 'declarative.*装过' && ok "靠 registry 认出已安装" \
     || { bad "没认出 registry 里的记录"; printf '%s\n' "$V6" | grep declarative | sed 's/^/     /'; }
 
-echo "== 7. 发布标记能补全项目表（解压出来的工作区没有 .repo）=="
+echo "== 7. 项目表只认 wtool.xml —— 发布标记和 repo manifest 都不补行 =="
+# 这两个来源曾经会把"没有 wtool.xml 的仓库"（上游源码、伞项目管的子仓）
+# 变成独立一行。界面上该看到的只有真正的 wtool 项目。
 WS2="$T/ws-dist"; mkdir -p "$WS2/deep/bbb" "$WS2/.wtool-dist"
 printf '{"project":"deep/bbb","repo":"x/y","commit":"abc","view":"release","layout":"wtool/deep/bbb"}\n' \
     > "$WS2/.wtool-dist/deep-bbb.json"
 printf '{ 这不是 json' > "$WS2/.wtool-dist/broken.json"
 TAB7=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS2" --state "$T/state7" 2>"$T/err7") || true
 chk "有坏标记也不崩" "$?" "0"
-chk "deep/bbb 靠发布标记被找到" "$(printf '%s\n' "$TAB7" | awk '$2 == "deep/bbb" {print $2}')" "deep/bbb"
+chk "只有发布标记、没有 wtool.xml → 不出现在表里" \
+    "$(printf '%s\n' "$TAB7" | awk '$2 == "deep/bbb" {print $2}')" ""
+chk "publish-list 也一样（两边判据必须一致）" \
+    "$(env -u WTOOL_ROOT python3 "$PY" publish-list --root "$WS2" | awk -F'\t' '$2 == "deep/bbb" {print $2}')" ""
 
 echo "== 8. 列对齐（CJK 双宽 + ANSI 转义不能算进宽度）=="
 if tbl | python3 -c '
@@ -208,6 +213,55 @@ echo "== 9. 表头列名齐全 =="
 for col in 项目 prio build download install publish; do
     tbl | sed -n 2p | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
 done
+
+echo "== 10. ★--summary 必须真的能跑（回归）=="
+# 崩溃过一次：把 project_caps 换成 pipeline_states 时只改了 render_table，
+# table_summary 还在读已经不存在的 p["caps"]，KeyError。
+# 而 wtool doctor 走的正是 --summary 这条路 —— 用户一敲就炸。
+# 旧的断言只是 grep 了一行文本，python 崩了它也可能匹配到别的东西，所以没抓住。
+_rc=0
+_SUM=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S" --verbose --summary 2>"$T/sum.err") || _rc=$?
+chk "--summary 退出码为 0" "$_rc" "0"
+[ -s "$T/sum.err" ] && bad "stderr 有输出（疑似崩溃）: $(head -1 "$T/sum.err")" \
+    || ok "stderr 干净"
+printf '%s\n' "$_SUM" | grep -q '共 [0-9]* 个项目' \
+    && ok "打印了汇总行" || bad "没有汇总行"
+# 汇总里的数字得和表格对得上
+printf '%s\n' "$_SUM" | grep -q '待构建' && ok "汇总里有待构建计数" || bad "汇总缺待构建计数"
+
+echo "== 11. ★表格只显示有 wtool.xml 的项目（回归）=="
+# 曾经从 repo manifest 补全项目表之后忘了收回界面层，于是上游仓库
+# （neovim/neovim）和伞项目管的子仓库都变成了独立一行。
+WS4="$T/ws-onlymanifest"
+mkdir -p "$WS4/real" "$WS4/.wtool-dist" "$WS4/umbrella/assets"
+cat > "$WS4/real/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="real" priority="10">
+  <env src="env.zsh" shells="zsh"/>
+</wtool>
+EOF
+# 伞项目：自己管着一个没有 wtool.xml 的子仓库
+cat > "$WS4/umbrella/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="umbrella" priority="20">
+  <publish kind="script" script="publish.sh">
+    <sub path="assets" kind="source"/>
+  </publish>
+</wtool>
+EOF
+printf '{"project":"ghost","repo":"x/y","commit":"a","view":"release","layout":"wtool/ghost"}\n' \
+    > "$WS4/.wtool-dist/ghost.json"
+mkdir -p "$WS4/ghost"
+TAB11=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS4" --state "$T/state11" 2>&1)
+printf '%s\n' "$TAB11" | awk '{print "     " $0}'
+chk "有 wtool.xml 的项目在表里" \
+    "$(printf '%s\n' "$TAB11" | awk '$2 == "real" {print $2}')" "real"
+chk "伞项目在表里" \
+    "$(printf '%s\n' "$TAB11" | awk '$2 == "umbrella" {print $2}')" "umbrella"
+chk "伞项目管的子仓库**不**单独成行" \
+    "$(printf '%s\n' "$TAB11" | awk '$2 == "umbrella/assets" {print $2}')" ""
+chk "发布标记补全出来的项目也不成行" \
+    "$(printf '%s\n' "$TAB11" | awk '$2 == "ghost" {print $2}')" ""
 
 echo
 printf 'table_test: PASS %d  FAIL %d\n' "$pass" "$fail"

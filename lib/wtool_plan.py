@@ -1198,7 +1198,7 @@ def render_table(root, state_dir, verbose=False, color=None):
         color = sys.stdout.isatty()
 
     projects = []
-    for prio, pid, path, pub in scan_projects(root):
+    for prio, pid, path, pub in scan_projects(root, manifests_only=True):
         st = project_state(path, state_dir, root=root)
         st["id"] = pid
         st["prio"] = prio
@@ -1290,10 +1290,11 @@ def table_summary(projects):
     pub = sum(1 for p in projects if p["published"])
     todo_pub = sum(1 for p in projects
                    if p["pub"]["kind"] != "none" and not p["published"])
-    todo_build = sum(1 for p in projects
-                     if p["caps"]["build"] == "script" and "build" not in p["actions"])
-    todo_inst = sum(1 for p in projects
-                    if p["caps"]["install"] != "none" and not p["installed"])
+    # 注意用 cells（pipeline_states 的结果），不是已经不存在的 caps。
+    # 这里崩过一次：换数据结构时只改了 render_table，忘了这里，
+    # 而 wtool doctor 走的正是 --summary 这条路。
+    todo_build = sum(1 for p in projects if p["cells"]["build"] == LBL_CAN)
+    todo_inst = sum(1 for p in projects if p["cells"]["install"] == LBL_CAN)
     return ("共 %d 个项目：已安装 %d（待装 %d），已发布 %d（待发 %d），待构建 %d"
             % (n, installed, todo_inst, pub, todo_pub, todo_build))
 
@@ -1636,8 +1637,16 @@ def _dist_marker_projects(root):
     return out
 
 
-def scan_projects(root):
+def scan_projects(root, manifests_only=False):
     """工作区里的全部项目，返回 [(priority, id, abspath, publish_info)]。
+
+    manifests_only=True 时只返回**有 wtool.xml 的项目**。
+    这是"这是不是一个 wtool 项目"的唯一判据 —— 一个仓库只有声明了 wtool.xml，
+    才谈得上可安装、可构建、可发布。没有它的仓库（上游源码、别人维护的主题）
+    不是 wtool 项目，要么归某个伞项目的 wtool.xml 管，要么就不该出现在界面上。
+
+    默认 False 会额外从 repo manifest 和 .wtool-dist 标记里补全项目，
+    那是给"解压出来的工作区"用的（没有 .repo，只能靠标记认人）。
 
     项目表来自两处，按优先级合并：
       1. 有 wtool.xml 的目录 —— 它自己声明怎么发布
@@ -1675,7 +1684,7 @@ def scan_projects(root):
         # （比如从发布包解压出来的）就只能靠这次遍历。
 
     # repo manifest 补全：没有 wtool.xml 的项目
-    for rel in sorted(_repo_manifest_projects(root)):
+    for rel in (() if manifests_only else sorted(_repo_manifest_projects(root))):
         abs_p = os.path.normpath(os.path.join(root, rel))
         if abs_p in known or not os.path.isdir(abs_p):
             continue
@@ -1688,7 +1697,8 @@ def scan_projects(root):
 
     # 发布标记补全：解压出来的工作区没有 .repo，靠 .wtool-dist/ 里的标记
     # 才知道哪些项目被发布过（harness、themes/... 这些没有 wtool.xml 的只能这样找）
-    for pid, j in sorted(_dist_marker_projects(root).items()):
+    _dist_items = () if manifests_only else sorted(_dist_marker_projects(root).items())
+    for pid, j in _dist_items:
         abs_p = os.path.normpath(os.path.join(root, pid))
         if abs_p in known or not os.path.isdir(abs_p):
             continue
@@ -1709,6 +1719,11 @@ def scan_projects(root):
                         old.get("kind") == "source" and old.get("_from") == "manifest":
                     found[i] = (prio, pid, path, pub)
             continue
+        # manifests_only 时不把子仓库单独列成一行 ——
+        # 它们是**伞项目管的**（astronvim_v5 管着它自己的 config 仓和上游 nvim），
+        # 不是一个独立的 wtool 项目。界面上该看到的只有伞项目那一行。
+        if manifests_only:
+            continue
         rel = os.path.relpath(sub_abs, root)
         found.append((DEFAULT_PRIORITY, rel, sub_abs, pub))
         known.add(os.path.abspath(sub_abs))
@@ -1726,15 +1741,13 @@ def list_projects(root):
     表格和 publish 要的是"全部项目"，那走 publish-list（它基于
     scan_projects，会从 repo manifest 和发布标记里补全）。
     """
-    for prio, pid, path, _pub in scan_projects(root):
-        if not os.path.isfile(os.path.join(path, "wtool.xml")):
-            continue
+    for prio, pid, path, _pub in scan_projects(root, manifests_only=True):
         print("%d\t%s\t%s" % (prio, pid, path))
 
 
 def publish_list(root):
-    """列出所有项目的发布方式：prio id path kind script tag to"""
-    for prio, pid, path, pub in scan_projects(root):
+    """列出所有 wtool 项目的发布方式：prio id path kind script tag to"""
+    for prio, pid, path, pub in scan_projects(root, manifests_only=True):
         print("\t".join([str(prio), pid, path, pub["kind"],
                          pub.get("script") or "-", pub.get("tag") or "",
                          pub.get("to") or "-"]))

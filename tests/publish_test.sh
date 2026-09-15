@@ -174,15 +174,19 @@ else
     ok "真工作区没有 wtool-base（无所谓）"
 fi
 
-echo "== 4. kind=none 不发布（nvim 是第三方上游仓）=="
+echo "== 4. 不是 wtool 项目的仓库，publish 根本不该认它 =="
+# 以前用 <sub kind="none"> 替上游仓（neovim/neovim）声明"不发布"。
+# 现在判据改成"有没有 wtool.xml"之后，上游仓压根不是 wtool 项目，
+# 也就不需要谁替它表态了 —— 这条断言守的是这个边界。
 : > "$T/gh.log"
+_rc=0
 PATH="$T/bin:$PATH" WTOOL_ROOT="$WS1" WTOOL_STATE="$T/state" \
-    "$WT" publish nvim --out="$T/out4" > "$T/log4" 2>&1 || true
-# 断言要精确到"对 neovim 的写操作"，而不是"零 gh 调用"——
-# 下载链接刷新本来就会对每个有 remote 的项目查一次 release
+    "$WT" publish nvim --out="$T/out4" > "$T/log4" 2>&1 || _rc=$?
+chk "publish nvim 直接报找不到（退出码非 0）" "$([ "$_rc" != 0 ] && echo yes || echo no)" "yes"
+grep -q '找不到项目' "$T/log4" && ok "说清了是找不到这个项目" \
+    || { bad "错误信息不对"; sed 's/^/     /' "$T/log4"; }
 chk "对 neovim 没有任何写操作" \
     "$(grep -cE 'neovim/neovim.*release (create|upload)|release (create|upload).*neovim/neovim' "$T/gh.log" || true)" "0"
-grep -q '声明为不发布' "$T/log4" && ok "明确说了不发布" || bad "没说清为什么不发"
 
 echo "== 5. kind=script：调项目内脚本，脚本产出啥传啥 =="
 # 造一个孤立的工作区，里面一个 script 型项目。
