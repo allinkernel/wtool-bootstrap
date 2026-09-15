@@ -1195,6 +1195,34 @@ def _repo_manifest_projects(root):
     return {p: n for p, n in paths.items() if n not in removed}
 
 
+def _dist_marker_projects(root):
+    """从 .wtool-dist/*.json 里读出项目表。
+
+    每个源码包都会在 wtool/.wtool-dist/ 下带一个标记，记着 project / repo /
+    commit。解压出来一个工作区之后，这些标记合起来就是一份完整的项目清单——
+    而这时既没有 .repo（没有 manifest 可查），没有 wtool.xml 的项目
+    （harness、themes/...）也扫不出来。标记正好补上这一环。
+    """
+    d = os.path.join(root, ".wtool-dist")
+    out = {}
+    if not os.path.isdir(d):
+        return out
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as fh:
+                j = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        pid = (j.get("project") or "").strip()
+        if not pid and j.get("layout"):
+            pid = j["layout"].split("/", 1)[-1]     # 形如 wtool/terminal/tmux
+        if pid and is_safe_rel(pid):
+            out[pid] = j
+    return out
+
+
 def scan_projects(root):
     """工作区里的全部项目，返回 [(priority, id, abspath, publish_info)]。
 
@@ -1243,6 +1271,18 @@ def scan_projects(root):
         pub = {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
                "to": "", "asset": "", "subs": [], "targets": [], "_from": "manifest"}
         found.append((DEFAULT_PRIORITY, rel, abs_p, pub))
+        known.add(abs_p)
+
+    # 发布标记补全：解压出来的工作区没有 .repo，靠 .wtool-dist/ 里的标记
+    # 才知道哪些项目被发布过（harness、themes/... 这些没有 wtool.xml 的只能这样找）
+    for pid, j in sorted(_dist_marker_projects(root).items()):
+        abs_p = os.path.normpath(os.path.join(root, pid))
+        if abs_p in known or not os.path.isdir(abs_p):
+            continue
+        found.append((DEFAULT_PRIORITY, pid, abs_p,
+                      {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
+                       "to": "", "asset": "", "subs": [], "targets": [],
+                       "_from": "dist", "_commit": j.get("commit") or ""}))
         known.add(abs_p)
 
     # <sub> 覆盖 manifest 的默认值
