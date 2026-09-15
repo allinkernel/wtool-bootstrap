@@ -845,9 +845,33 @@ cmd_bootstrap() {
         wt_die "在 $WTOOL_ROOT 下没找到任何 wtool.xml"
     fi
 
+    # 第一遍：能直接装的装掉；需要先产出东西的留到后面。
+    # bootstrap 只做"不需要用户决策"的那部分 ——
+    # build 是小时级的，download 要联网取包，都不该由它替用户决定。
+    _pending=$(mktemp "${TMPDIR:-/tmp}/wtool-pending.XXXXXX")
+    : > "$_pending"
+
     while IFS='	' read -r _prio _pid _path; do
         [ -z "${_pid:-}" ] && continue
-        printf '\n=== [%s] %s (%s) ===\n' "$_prio" "$_pid" "$_path"
+        printf '\n=== [%s] %s ===\n' "$_prio" "$_pid"
+
+        _needs=""
+        wt_project_script "$_path" build.sh >/dev/null 2>&1 && _needs="build"
+        wt_project_script "$_path" download.sh >/dev/null 2>&1 \
+            && _needs="${_needs:+$_needs/}download"
+        _ready=0
+        if [ -n "$_needs" ]; then
+            wt_has_action "$_pid" build && _ready=1
+            wt_has_action "$_pid" download && _ready=1
+            [ -f "$_path/scripts/release.json" ] && _ready=1
+        fi
+
+        if [ -n "$_needs" ] && [ "$_ready" = 0 ]; then
+            wt_info "跳过：需要先 $_needs（bootstrap 不替你做这个决定）"
+            printf '%s\t%s\n' "$_pid" "$_needs" >> "$_pending"
+            continue
+        fi
+
         _common=""
         [ "$WTOOL_FORCE" = 1 ] && _common="$_common --force"
         [ "$WTOOL_DRY_RUN" = 1 ] && _common="$_common --dry-run"
@@ -859,18 +883,44 @@ cmd_bootstrap() {
             # shellcheck disable=SC2086
             cmd_provision "$_path" $_prov || wt_die "provision 失败: $_pid"
         fi
-        # 构建在安装之前：install.sh 负责"登记和收尾"，
-        # 它需要的东西得先由 build.sh 生产出来。没有 build.sh 就跳过。
-        if [ "$_install_only" = 0 ] && [ "$WTOOL_DRY_RUN" != 1 ] \
-                && wt_project_script "$_path" build.sh >/dev/null; then
-            # shellcheck disable=SC2086
-            cmd_build "$_path" $_common || wt_die "build 失败: $_pid"
-        fi
         # shellcheck disable=SC2086
         cmd_install "$_path" $_common || wt_die "install 失败: $_pid"
     done < "$_list"
     rm -f "$_list"
-    wt_info "bootstrap 完成"
+
+    # 第二遍：把"还剩什么、为什么剩"摆出来，决定权交回用户
+    printf '\n'
+    wt_info "=============================================="
+    if [ -s "$_pending" ]; then
+        _n=$(awk 'END {print NR}' "$_pending")
+        wt_info "还有 $_n 个项目没装 —— 它们要先产出东西："
+        printf '\n'
+        while IFS='	' read -r _pid _needs; do
+            printf '  %-40s 需要先 %s\n' "$_pid" "$_needs"
+        done < "$_pending"
+        printf '\n'
+        wt_info "build 是小时级的，download 要联网取包 —— 这两种都不该由"
+        wt_info "bootstrap 替你决定。看完上面的表，你自己选着跑："
+        printf '\n'
+        while IFS='	' read -r _pid _needs; do
+            case $_needs in
+                *download*) printf '    wtool download %s\n' "$_pid" ;;
+            esac
+            case $_needs in
+                *build*)    printf '    wtool build    %s\n' "$_pid" ;;
+            esac
+            printf '    wtool install  %s\n' "$_pid"
+        done < "$_pending"
+        printf '\n'
+        wt_info "跑完上面的命令，再 wtool install 一次就装上了。"
+    else
+        wt_info "全部项目都装好了。"
+    fi
+    wt_info "=============================================="
+    rm -f "$_pending"
+
+    printf '\n'
+    cmd_table --verbose
 }
 
 # --------------------------------------------------------------------------

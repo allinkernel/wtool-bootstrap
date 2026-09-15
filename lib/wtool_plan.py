@@ -1720,8 +1720,15 @@ def list_projects(root):
     """扫描工作区里所有 wtool.xml，按 (priority, id) 排序输出。
 
     列数固定为 3（prio/id/path），调用方按列读，不要加列。
+
+    只列**有 wtool.xml 的项目** —— bootstrap 和 uninstall 拿这份列表去
+    逐个动作，而纯数据项目（harness、主题之类）没有清单、没有可执行的东西。
+    表格和 publish 要的是"全部项目"，那走 publish-list（它基于
+    scan_projects，会从 repo manifest 和发布标记里补全）。
     """
     for prio, pid, path, _pub in scan_projects(root):
+        if not os.path.isfile(os.path.join(path, "wtool.xml")):
+            continue
         print("%d\t%s\t%s" % (prio, pid, path))
 
 
