@@ -737,7 +737,10 @@ cmd_publish() {
     fi
 
     _done=0
-    while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
+    # 清单走 fd 3，不走 stdin。脚本自己（或它调用的 docker/gh）读 stdin 是常事，
+    # 从 stdin 读清单会被它们偷走行，表现是后面的项目被静默跳过。
+    exec 3< "$_scratch/sel.tsv"
+    while IFS='	' read -r _prio _pid _path _kind _script _tpl _to <&3; do
         [ -n "${_pid:-}" ] || continue
         _date=$(date +%Y-%m-%d)
         if [ -n "$_tag_override" ]; then _tag=$_tag_override; else _tag=$(wt_publish_tag "$_tpl"); fi
@@ -859,7 +862,8 @@ EOF
         wt_publish_gh_upload "$_repo" "$_tag" "$_out/$_asset"
         wt_publish_record "$_pid" "$_repo" "$_tag" 1 "source:$_commit"
         _done=$((_done + 1))
-    done < "$_scratch/sel.tsv"
+    done
+    exec 3<&-
 
     if [ "$_done" = 0 ] && ! wt_dry; then
         wt_warn "没有发布任何项目"

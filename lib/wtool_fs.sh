@@ -624,11 +624,21 @@ wt_publish_gh_upload() {
 }
 
 # 记录本地发布历史（表格里的 publish 列离线也看得到）
+#
+# 记账失败绝不能影响发布：release 已经传上去了，丢一条本地历史是小事；
+# 因为状态目录写不进去就报"发布失败"才是大事（用户会以为没发出去）。
 wt_publish_record() {
     _wtpub_id=$1; _wtpub_repo=$2; _wtpub_tag=$3; _wtpub_n=$4; _wtpub_detail=$5
     [ -n "$_wtpub_id" ] || return 0
     wt_dry && return 0
-    wt_ensure_dir "$WTOOL_STATE/$_wtpub_id"
+    # 直接 mkdir 而不是 wt_ensure_dir：这是记账数据，不该进 journal
+    if ! mkdir -p -- "$WTOOL_STATE/$_wtpub_id" 2>/dev/null; then
+        wt_warn "记不了本地发布历史（$WTOOL_STATE 写不进去）：$_wtpub_repo $_wtpub_tag"
+        wt_warn "发布本身已经完成，只是表格里的 publish 列看不到这一条"
+        return 0
+    fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" \
-        "$_wtpub_repo" "$_wtpub_tag" "$_wtpub_n" "$_wtpub_detail" >> "$WTOOL_STATE/$_wtpub_id/publish.tsv"
+        "$_wtpub_repo" "$_wtpub_tag" "$_wtpub_n" "$_wtpub_detail" \
+        >> "$WTOOL_STATE/$_wtpub_id/publish.tsv" 2>/dev/null \
+        || wt_warn "写 publish.tsv 失败（不影响发布）"
 }

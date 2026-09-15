@@ -160,6 +160,52 @@ grep -q "repo=scripted" "$T/log5" && bad "目标仓没解析出来（应报无 r
 grep -q "project=scripted" "$T/log5" && ok "脚本拿到了 WTOOL_PUBLISH_PROJECT" || true
 grep -q "root=$FS/scripted" "$T/log5" && ok "脚本拿到了 WTOOL_PUBLISH_ROOT" || true
 
+echo "== 6. 回归：脚本读 stdin 不能吃掉后面的项目 =="
+# 曾经的真 bug：publish.sh 里的交互式 read 会从引擎的 while 循环里偷走一行，
+# 表现是清单里下一个项目被静默跳过（实测吞掉了 astronvim_v5_config）。
+# 修法：清单走 fd 3，脚本 stdin 给 /dev/null。
+FS2="$T/ws2"
+mkdir -p "$FS2/aaa-script" "$FS2/zzz-after"
+cat > "$FS2/aaa-script/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="aaa-script" priority="10">
+  <publish kind="script" script="publish.sh" to="fakeowner/aaa"/>
+</wtool>
+EOF
+cat > "$FS2/aaa-script/publish.sh" <<'EOF'
+set -eu
+# 模拟"问用户一个问题"的脚本：没有 /dev/null 的话这里会把引擎的清单读走
+printf '选择: '
+read -r answer || answer=""
+echo "拿到 [$answer]" > "$WTOOL_PUBLISH_OUT/answer.txt"
+EOF
+cat > "$FS2/zzz-after/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="zzz-after" priority="20">
+  <publish kind="source" to="fakeowner/zzz"/>
+</wtool>
+EOF
+# 得把 wtool.xml 也提交掉：工作区有未提交改动时源码发布会拒绝，
+# 那样就分不清"被 stdin 偷走了"和"被脏检查挡下了"
+git -C "$FS2/zzz-after" init -q 2>/dev/null || true
+git -C "$FS2/zzz-after" add -A 2>/dev/null || true
+git -C "$FS2/zzz-after" -c user.name=t -c user.email=t@t commit -q -m init 2>/dev/null || true
+
+: > "$T/gh.log"
+PATH="$T/bin:$PATH" WTOOL_ROOT="$FS2" WTOOL_STATE="$T/state6" \
+    "$WT" publish --out="$T/out6" > "$T/log6" 2>&1 || true
+_scripted=$(grep -c '^wtool: ── aaa-script ' "$T/log6" || true)
+_after=$(grep -c '^wtool: ── zzz-after ' "$T/log6" || true)
+chk "脚本型项目被处理了" "$_scripted" "1"
+chk "★它后面的项目没有被吞掉" "$_after" "1"
+if grep -q 'zzz-after' "$T/gh.log"; then
+    ok "后面的项目确实发布了（gh 收到了它的仓）"
+else
+    bad "后面的项目没发布——stdin 又被偷了"
+fi
+chk "脚本拿到的是空输入（不是清单行）" \
+    "$(cat "$T/out6/out-0/answer.txt" 2>/dev/null | sed 's/拿到 \[//;s/\]//')" ""
+
 echo
 printf 'publish_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]
