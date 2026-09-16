@@ -1389,7 +1389,14 @@ cmd_publish() {
                 export WTOOL_PUBLISH_DATE="$_date"
                 cd -- "$_path" || exit 1
                 sh "$_script_path"
-            ) || { wt_warn "  $_script 失败，跳过上传"; continue; }
+            ) || {
+                # 这里以前只 warn 就 continue。结果构建脚本失败了、
+                # 一条产物都没上传，publish 却仍然退出 0 ——
+                # 我自己的后台任务就被这个骗过一次，看到的"成功"是假的。
+                wt_warn "  $_script 失败，跳过上传"
+                _failed=$((_failed + 1))
+                continue
+            }
 
             _files=$(find "$_out" -maxdepth 1 -type f | sort)
             _n=$(printf '%s' "$_files" | grep -c . || true)
