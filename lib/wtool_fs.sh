@@ -673,9 +673,34 @@ wt_publish_gh_upload() {
         wt_step "[dry-run] gh release upload $_wtpub_tag --repo $_wtpub_repo <$# 个文件>"
         return 0
     fi
-    gh release upload "$_wtpub_tag" --repo "$_wtpub_repo" --clobber "$@" \
-        || wt_die "上传失败: $_wtpub_repo $_wtpub_tag"
-    wt_step "上传 $# 个文件 → $_wtpub_repo $_wtpub_tag"
+    # 这里**不能 die**。上传失败是可恢复的（代理抖一下就会 EOF），
+    # 而一旦 die，cmd_publish 的 trap 会把刚花半小时构建出来的产物一起删掉，
+    # 想重试就得从头再编。改成返回非零，让调用者决定：留住产物、报清楚、
+    # 继续发下一个项目。
+    # 实测：576M 的分卷传到一半 "Post ...: EOF"，整批产物被 trap 清空。
+    if gh release upload "$_wtpub_tag" --repo "$_wtpub_repo" --clobber "$@"; then
+        wt_step "上传 $# 个文件 → $_wtpub_repo $_wtpub_tag"
+        return 0
+    fi
+
+    # 退一步：绕开代理再来一次。
+    # 实测这台机器上代理对 GitHub 反而是坏的 ——
+    # 直连 api.github.com 200（0.65s），走 127.0.0.1:7897 直接
+    # SSL_ERROR_SYSCALL；大文件 POST 更是传到一半 EOF。
+    # 但也不能一律不用代理（有的网络只有代理能出去），
+    # 所以顺序是"先按现状试，失败了再绕开"，两条路都试过才算失败。
+    if [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]; then
+        wt_warn "上传失败，绕开代理重试一次（不走 ${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-$http_proxy}}}）"
+        if env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy \
+               gh release upload "$_wtpub_tag" --repo "$_wtpub_repo" --clobber "$@"; then
+            wt_step "上传 $# 个文件 → $_wtpub_repo $_wtpub_tag（直连）"
+            return 0
+        fi
+    fi
+
+    wt_warn "上传失败: $_wtpub_repo $_wtpub_tag（$# 个文件）"
+    wt_warn "  多半是网络/代理断了。产物已保留，可直接补传，不必重新构建。"
+    return 1
 }
 
 # 记录本地发布历史（表格里的 publish 列离线也看得到）

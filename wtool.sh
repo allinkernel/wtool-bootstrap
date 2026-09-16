@@ -1274,7 +1274,22 @@ cmd_publish() {
         _outdir=$(cd -- "$_outdir" && pwd)
     fi
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-publish.XXXXXX")
-    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    # 失败时别把产物一起删掉。
+    # 踩过：构建跑满 30 分钟、产物 576M，上传到一半代理断线（EOF），
+    # 然后 trap 把临时目录连产物一起清了 —— 想重试就得从头再编一遍。
+    # 现在改成：只要这一轮有产物没送出去，就留着，并告诉人怎么补传。
+    _keep_scratch=0
+    _cleanup_scratch() {
+        if [ "$_keep_scratch" = 1 ]; then
+            wt_warn "产物保留在: $_scratch"
+            wt_warn "  补传（不用重新构建）:"
+            wt_warn "    gh release upload <tag> --repo <owner/repo> --clobber $_scratch/out-*/*"
+            wt_warn "  不需要了就删: rm -rf $_scratch"
+        else
+            rm -rf -- "$_scratch"
+        fi
+    }
+    trap '_cleanup_scratch' EXIT INT TERM
 
     # 1) 决定发布哪些项目
     : > "$_scratch/sel.tsv"
@@ -1294,6 +1309,7 @@ cmd_publish() {
     fi
 
     _done=0
+    _failed=0
     # 清单走 fd 3，不走 stdin。脚本自己（或它调用的 docker/gh）读 stdin 是常事，
     # 从 stdin 读清单会被它们偷走行，表现是后面的项目被静默跳过。
     exec 3< "$_scratch/sel.tsv"
@@ -1384,7 +1400,11 @@ cmd_publish() {
             wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
                 "由 wtool publish 生成。目标系统与内容见 dist.json。"
             # shellcheck disable=SC2086
-            wt_publish_gh_upload "$_repo" "$_tag" $_files
+            if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
+                _keep_scratch=1          # 产物留着，别让人重编一遍
+                _failed=$((_failed + 1))
+                continue
+            fi
             wt_publish_record "$_pid" "$_repo" "$_tag" "$_n" "script:$_script"
             _done=$((_done + 1))
             continue
@@ -1435,7 +1455,11 @@ EOF
         wt_info "  资产   : $_asset  (commit $(printf '%s' "$_commit" | cut -c1-7), dirty=$_dirty)"
         wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
             "由 wtool publish 生成。解压到工作区上一层即可（包内第一层是 wtool/）。"
-        wt_publish_gh_upload "$_repo" "$_tag" "$_out/$_asset"
+        if ! wt_publish_gh_upload "$_repo" "$_tag" "$_out/$_asset"; then
+            _keep_scratch=1              # 同上：产物别删
+            _failed=$((_failed + 1))
+            continue
+        fi
         wt_publish_record "$_pid" "$_repo" "$_tag" 1 "source:$_commit"
         _done=$((_done + 1))
     done
@@ -1466,6 +1490,14 @@ EOF
         wt_info "publish 计划完成（$_done 个项目）"
     else
         wt_info "publish 完成（$_done 个项目）"
+    fi
+
+    # 有项目没发出去就**必须**以非零退出。
+    # 原来不管发没发成功都退出 0：明明上传失败了，调用方（脚本、CI、
+    # 包括我自己看后台任务的退出码）看到的却是"成功"。
+    if [ "$_failed" -gt 0 ]; then
+        wt_warn "$_failed 个项目没发出去"
+        return 1
     fi
 }
 
