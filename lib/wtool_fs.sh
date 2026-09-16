@@ -629,7 +629,7 @@ wt_publish_gh_release() {
         wt_step "[dry-run] gh release create $_wtpub_tag --repo $_wtpub_repo"
         return 0
     fi
-    if gh release view "$_wtpub_tag" --repo "$_wtpub_repo" >/dev/null 2>&1; then
+    if wt_gh release view "$_wtpub_tag" --repo "$_wtpub_repo" >/dev/null 2>&1; then
         wt_step "release $_wtpub_tag 已存在，复用"
         return 0
     fi
@@ -638,7 +638,7 @@ wt_publish_gh_release() {
     # 报错。所以 create 失败之后要再判断一次，否则一个早就建好的 release
     # 会让整个 publish 硬失败（实测在 shell/zsh 上撞过 422 already exists）。
     _wtpub_err=$(mktemp "${TMPDIR:-/tmp}/wtool-gh.XXXXXX")
-    if gh release create "$_wtpub_tag" --repo "$_wtpub_repo" \
+    if wt_gh release create "$_wtpub_tag" --repo "$_wtpub_repo" \
             --title "$_wtpub_title" --notes "$_wtpub_notes" 2>"$_wtpub_err"; then
         wt_step "创建 release $_wtpub_tag @ $_wtpub_repo"
         rm -f -- "$_wtpub_err"
@@ -654,7 +654,7 @@ wt_publish_gh_release() {
         rm -f -- "$_wtpub_err"
         return 0
     fi
-    if gh release view "$_wtpub_tag" --repo "$_wtpub_repo" >/dev/null 2>&1; then
+    if wt_gh release view "$_wtpub_tag" --repo "$_wtpub_repo" >/dev/null 2>&1; then
         wt_step "release $_wtpub_tag 已经存在（view 现在能看到了），复用"
         rm -f -- "$_wtpub_err"
         return 0
@@ -666,6 +666,44 @@ wt_publish_gh_release() {
 }
 
 # 上传资产（可重复执行，--clobber 覆盖同名）
+# 选一条能通的到 GitHub 的路，整个发布都用它。
+#
+# 为什么要"选"而不是"试"：
+# 代理坏掉时的表现不是立刻报错，而是**慢慢磨**。314M 的分卷
+# 走坏代理传了七分钟还没失败，而它失败之后我们才去试直连 ——
+# 白等的这七分钟纯属浪费，而且每次发每个文件都要重来一遍。
+# 一次探测只要一两秒，探测完就不用再赌了。
+#
+# 探测用 gh api /rate_limit：它极轻（几百字节），又能真正验证
+# 认证 + 连通性，比 ping 一个域名有意义。
+wt_gh_route() {
+    # 已经探过就直接复用（一次发布里会调很多次）
+    if [ -n "${_WTOOL_GH_ROUTE:-}" ]; then
+        printf '%s' "$_WTOOL_GH_ROUTE"; return 0
+    fi
+    _WTOOL_GH_ROUTE=current
+    if [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]; then
+        if ! timeout 20 gh api /rate_limit >/dev/null 2>&1; then
+            if timeout 20 env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY \
+                    -u http_proxy -u ALL_PROXY -u all_proxy \
+                    gh api /rate_limit >/dev/null 2>&1; then
+                wt_warn "代理连不上 GitHub，这次发布改用直连"
+                _WTOOL_GH_ROUTE=direct
+            fi
+        fi
+    fi
+    printf '%s' "$_WTOOL_GH_ROUTE"
+}
+
+# 按选定的路执行 gh。$WTOOL_GH_ROUTE 为空/current 时用当前环境。
+wt_gh() {
+    case $(wt_gh_route) in
+        direct) env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY \
+                    -u http_proxy -u ALL_PROXY -u all_proxy gh "$@" ;;
+        *)      gh "$@" ;;
+    esac
+}
+
 wt_publish_gh_upload() {
     _wtpub_repo=$1; _wtpub_tag=$2; shift 2
     [ "$#" -gt 0 ] || return 0
@@ -678,21 +716,17 @@ wt_publish_gh_upload() {
     # 想重试就得从头再编。改成返回非零，让调用者决定：留住产物、报清楚、
     # 继续发下一个项目。
     # 实测：576M 的分卷传到一半 "Post ...: EOF"，整批产物被 trap 清空。
-    if gh release upload "$_wtpub_tag" --repo "$_wtpub_repo" --clobber "$@"; then
+    if wt_gh release upload "$_wtpub_tag" --repo "$_wtpub_repo" --clobber "$@"; then
         wt_step "上传 $# 个文件 → $_wtpub_repo $_wtpub_tag"
         return 0
     fi
 
-    # 退一步：绕开代理再来一次。
-    # 实测这台机器上代理对 GitHub 反而是坏的 ——
-    # 直连 api.github.com 200（0.65s），走 127.0.0.1:7897 直接
-    # SSL_ERROR_SYSCALL；大文件 POST 更是传到一半 EOF。
-    # 但也不能一律不用代理（有的网络只有代理能出去），
-    # 所以顺序是"先按现状试，失败了再绕开"，两条路都试过才算失败。
-    if [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]; then
-        wt_warn "上传失败，绕开代理重试一次（不走 ${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-$http_proxy}}}）"
-        if env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy \
-               gh release upload "$_wtpub_tag" --repo "$_wtpub_repo" --clobber "$@"; then
+    # 走到这里说明探测选的路也不行了（网络中途变了）。换另一条再试一次。
+    if [ "$(wt_gh_route)" = "current" ] \
+       && [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]; then
+        wt_warn "上传失败，绕开代理重试一次"
+        _WTOOL_GH_ROUTE=direct
+        if wt_gh release upload "$_wtpub_tag" --repo "$_wtpub_repo" --clobber "$@"; then
             wt_step "上传 $# 个文件 → $_wtpub_repo $_wtpub_tag（直连）"
             return 0
         fi
