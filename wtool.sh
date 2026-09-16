@@ -1454,11 +1454,14 @@ EOF
         [ "$_copied" -gt 0 ] && wt_info "产物已放到 $_outdir（$_copied 个文件）"
     fi
 
-    wt_refresh_downloads
-
-    if [ "$_done" = 0 ] && ! wt_dry; then
-        wt_warn "没有发布任何项目"
+    # 只有这一轮真的推上去了东西，才去改文档。
+    # 一个都没发出去还去刷新，等于拿"什么都没发生"去覆盖现状。
+    if [ "$_done" -gt 0 ]; then
+        wt_refresh_downloads
+    elif ! wt_dry; then
+        wt_warn "没有发布任何项目，下载链接未改动"
     fi
+
     if wt_dry; then
         wt_info "publish 计划完成（$_done 个项目）"
     else
@@ -1519,6 +1522,20 @@ $(python3 "$PY" publish-list --root "$WTOOL_ROOT")
 EOF
 
     _n=$(awk 'END { print NR }' "$_rows" 2>/dev/null || echo 0)
+
+    # 「查到 0 个资产」不等于「没有项目可发布」。
+    # gh 没登录、网络断了、release 被删，都会走到这里。
+    # 这两件事必须分开：前者绝不能动文档。
+    # 踩过：gh 查询失败 + 空表覆盖了 30 条真实下载链接。
+    if [ "$_n" = 0 ] && [ "${WTOOL_FORCE:-0}" != 1 ] \
+       && grep -qE '^\|[^|]+\|' "$_doc" 2>/dev/null; then
+        wt_warn "查到 0 个资产，但 ${_doc#$WTOOL_ROOT/} 里已有下载表 —— 拒绝用空表覆盖"
+        wt_warn "  可能原因：gh 未登录 / 网络不通 / release 被删"
+        wt_warn "  确认确实要清空，加 --force 再来"
+        rm -f -- "$_rows"
+        return 0
+    fi
+
     _new=$(mktemp "${TMPDIR:-/tmp}/wtool-doc.XXXXXX")
     if python3 "$PY" update-downloads --doc "$_doc" --rows "$_rows" > "$_new" 2>/dev/null; then
         if cmp -s "$_doc" "$_new"; then
@@ -1561,6 +1578,9 @@ case $_cmd in
     status)    cmd_status "$@" ;;
     doctor)    cmd_doctor "$@" ;;
     env)       cmd_env "$@" ;;
+    docs)      shift; [ "${1:-}" = "refresh" ] && shift
+               wt_refresh_downloads ;;
+    refresh-downloads) wt_refresh_downloads ;;
     init)      cmd_init "$@" ;;
     scaffold)  wt_warn "scaffold 已改名为 init，请用 wtool init"; cmd_init "$@" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;

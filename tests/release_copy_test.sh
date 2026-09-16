@@ -148,6 +148,30 @@ echo 'this is mine' > "$WS2/README.md"          # 真实文件，不是软链
 env HOME="$H" "$WS2/bootstrap/install.sh" >/dev/null 2>&1 || true
 chk "用户的真实 README.md 没被覆盖" "$(cat "$WS2/README.md")" "this is mine"
 
+# --------------------------------------------------------------------------
+# 6. 查不到资产 ≠ 没有项目可发布 —— 绝不能拿空表覆盖现有下载表
+#
+# 真出过事：一次 publish 什么都没推上去、gh 那边也查不到资产，
+# 刷新逻辑就把 wtool-base/README.md 里 30 条真实链接刷成了
+# "还没有发布过任何项目"。外部查询失败被当成了"事实就是空的"。
+echo "== 6. 下载表不会被空结果洗掉 =="
+WS3="$T/ws3"; mkdir -p "$WS3/bootstrap" "$WS3/wtool-base"
+cp -f "$WT" "$WS3/bootstrap/wtool.sh"
+mkdir -p "$WS3/bootstrap/lib"; cp -f "$bootstrap"/lib/*.py "$bootstrap"/lib/*.sh "$WS3/bootstrap/lib/" 2>/dev/null || true
+cat > "$WS3/wtool-base/README.md" <<'EOF'
+# 下载
+
+<!-- >>> wtool:downloads >>> -->
+| 项目 | 资产 | 大小 |
+|---|---|---|
+| wtool-base | wtool-base-2026-09-15.tar.zst | 12.3 MB |
+<!-- <<< wtool:downloads <<< -->
+EOF
+_before=$(cat "$WS3/wtool-base/README.md")
+env HOME="$H" WTOOL_ROOT="$WS3" WTOOL_STATE="$T/state3" \
+    "$WT" refresh-downloads >/dev/null 2>&1 || true
+chk "空结果没有洗掉下载表" "$(cat "$WS3/wtool-base/README.md")" "$_before"
+
 echo
 printf 'release_copy_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]
