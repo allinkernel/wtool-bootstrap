@@ -42,15 +42,50 @@ say "1/4 准备依赖（先 HTTP 国内镜像装 ca-certificates，再换 HTTPS�
 if [ "${WTOOL_SKIP_DEPS:-0}" = 1 ]; then
     say "    (WTOOL_SKIP_DEPS=1，跳过)"
 else
+    # 代号不能写死。这个脚本原来是给 24.04 写的，Suites 固定 noble，
+    # 拿到 20.04 上就会去拉 noble 的索引 —— 装出来的是一堆 24.04 的包。
+    . /etc/os-release 2>/dev/null || true
+    CODENAME=${VERSION_CODENAME:-}
+    [ -n "$CODENAME" ] || { warn "读不出 VERSION_CODENAME，/etc/os-release 不对？"; exit 1; }
+    printf '    系统: %s %s（%s）\n' "${ID:-?}" "${VERSION_ID:-?}" "$CODENAME"
+    printf '    apt: %s\n' "$(apt-get --version 2>/dev/null | head -1 | awk '{print $2}')"
+
+    # 统一写 deb822 的 ubuntu.sources，而且**只写这一个文件**。
+    #
+    # 我在这里绕过一次弯路，记下来免得再走：
+    # 我原本以为"20.04 的 apt 2.0 不认 deb822"，于是给老系统加了个
+    # 一行式 .list 的回退。**这个判断是错的** —— 实测 focal 的 apt 2.0.10
+    # 完全读得懂 deb822（deb822 支持在 apt 1.1 就有了，2.4 变的只是默认值）。
+    #
+    # 真正的问题是：os/ubuntu 那份 system-file 也是写 ubuntu.sources 的（deb822），
+    # 我的回退又多写了一个 wtool-mirror.list。两个文件指向**同一个 URI**
+    # 却一个带 Signed-By、一个不带，apt 直接拒绝读取整份源列表：
+    #   E: Conflicting values set for option Signed-By regarding source
+    #      https://mirrors.ustc.edu.cn/ubuntu/ focal: ... !=
+    # 表现为 apt 彻底瘫痪 —— apt-get update 一行输出都没有，
+    # apt-cache 什么都查不到，连"包不存在"都报不出来。
+    #
+    # 所以：**同一个 URI 只能有一份配置文件**。这里始终用 ubuntu.sources，
+    # 并且把其它源文件清干净，让 os/ubuntu 之后在同一路径上替换它。
     write_src() {
         mkdir -p /etc/apt/sources.list.d
         cat > /etc/apt/sources.list.d/ubuntu.sources <<EOF
 Types: deb
 URIs: $1/ubuntu/
-Suites: noble noble-updates noble-backports noble-security
+Suites: $CODENAME $CODENAME-updates $CODENAME-backports $CODENAME-security
 Components: main universe restricted multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
+        # 镜像自带的那份必须删掉。20.04 的镜像是 sources.list（一行式），
+        # 24.04 的是 sources.list.d/ubuntu.sources —— 两种都要清，
+        # 否则它还指着 archive.ubuntu.com，镜像探测就白做了。
+        rm -f /etc/apt/sources.list 2>/dev/null || true
+        for _f in /etc/apt/sources.list.d/*; do
+            case $_f in
+                */ubuntu.sources) ;;
+                *) rm -f -- "$_f" 2>/dev/null || true ;;
+            esac
+        done
     }
     # 让 apt 快速失败，别在国内直连官方源时干等
     mkdir -p /etc/apt/apt.conf.d
@@ -78,11 +113,28 @@ EOF
     apt-get update -qq >/dev/null 2>&1 && printf '    已切到 HTTPS 镜像 ✓\n' || warn "HTTPS 源暂时不可用（不影响后续）"
 
     # 全套安装才需要 ansible（os/ubuntu 用它装基础软件包）
+    #
+    # 包名在版本之间变过，不能只试一个：
+    #   22.04+ 叫 ansible-core
+    #   20.04  只有 ansible（2.9），**没有 ansible-core** ——
+    #          只写 ansible-core 的话在 focal 上直接"Unable to locate package"，
+    #          然后 os/ubuntu 的 provision 会在缺 ansible-playbook 时失败。
     case " $WTOOL_ARGS " in
         *--install-only*) : ;;
-        *) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-               ansible-core >/dev/null 2>&1 \
-               && printf '    ansible-core ✓\n' || warn "ansible-core 装不上，os/ubuntu 的装包步骤会失败" ;;
+        *)
+            _ans=""
+            for _p in ansible-core ansible; do
+                if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                       --no-install-recommends "$_p" >/dev/null 2>&1 \
+                   && command -v ansible-playbook >/dev/null 2>&1; then
+                    _ans=$_p; break
+                fi
+            done
+            if [ -n "$_ans" ]; then
+                printf '    ansible ✓（包名 %s）\n' "$_ans"
+            else
+                warn "ansible 装不上（试过 ansible-core / ansible），os/ubuntu 的装包步骤会失败"
+            fi ;;
     esac
 fi
 
@@ -121,14 +173,19 @@ fi
 
 # ─────────────────────────────────────────────────────────────
 say "4/4 完成，进入 zsh"
-BADGE=$(grep -c '>>> wtool:' "$HOME/.zshrc" 2>/dev/null || echo 0)
+# 标记是 `# >>> wtool >>>`（空格 + 尖括号），不是 `>>> wtool:`。
+# 原来 grep 的是带冒号的那个，永远查不到，于是一律显示 0 个块 ——
+# 明明装好了却报"0 个 wtool 块"，只会让人以为 rc 注入失败了。
+# 另外 `grep -c ... || echo 0` 在查不到时会输出两行（0 和 0），
+# 所以用 awk 数，不用 grep -c。
+BADGE=$(awk '/>>> wtool >>>/{n++} END{print n+0}' "$HOME/.zshrc" 2>/dev/null)
 printf '    ~/.zshrc 里 %s 个 wtool 块\n' "$BADGE"
 if [ -n "${WTOOL_HEAVY:-}" ]; then
     printf '    重型工具链(clang/llvm/emacs): 已要求安装\n'
 else
     printf '    重型工具链(clang/llvm/emacs): 未装（要装就加 -e WTOOL_HEAVY=1）\n'
 fi
-printf '    %s\n' "$(grep -o 'wtool:[a-z/-]*' "$HOME/.zshrc" 2>/dev/null | sort -u | tr '\n' ' ')"
+printf '    各项目贡献的块: %s\n' "$(grep -o 'wtool:[a-z/-]*' "$HOME/.wtool/.zshrc" 2>/dev/null | sort -u | tr '\n' ' ')"
 cat <<'TIP'
 
   进来之后可以试：
