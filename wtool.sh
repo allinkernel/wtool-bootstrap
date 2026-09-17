@@ -6,8 +6,8 @@
 #                      用发布页上现成的包代替自己编；产物落在和 build 相同的位置
 #   wtool.sh install   <项目目录> [--dry-run] [--force] [--no-script]
 #                      wtool.xml 的 link/rc 铺完之后，再跑项目自己的 install.sh
-#   wtool.sh uninstall <项目目录> [--dry-run] [--force]
-#   wtool.sh uninstall --id <项目id> [--dry-run] [--force]
+#   wtool.sh uninstall <项目目录> [--dry-run] [--force] [--no-script]
+#   wtool.sh uninstall --id <项目id> [--dry-run] [--force] [--no-script]
 #   wtool.sh provision <项目目录> [--dry-run] [--force] [--with-system]
 #   wtool.sh publish   [<项目>...] [--tag=TAG] [--dry-run] [--force]
 #                      源码包发布到项目自己的 release；kind="script" 的项目
@@ -600,6 +600,7 @@ cmd_uninstall() {
         case $1 in
             --dry-run) WTOOL_DRY_RUN=1 ;;
             --force)   WTOOL_FORCE=1 ;;
+            --no-script) WTOOL_NO_SCRIPT=1 ;;   # 跳过项目自己的 install.sh --uninstall
             --id)      shift; _id=${1:-} ;;
             -*)        wt_die "未知参数: $1" ;;
             *)         _project=$1 ;;

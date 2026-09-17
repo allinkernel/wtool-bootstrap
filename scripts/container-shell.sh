@@ -15,7 +15,7 @@
 #                  不设就只装基础包（zsh/tmux/vim/ripgrep/构建基础），快很多
 #   WTOOL_DIR      挂载点，默认 /wtool
 #
-# 设计约束（都是踩出来的，见 harness/doc/06-排错.md）：
+# 设计约束（都是踩出来的，见 harness/notes/03-hazards.md）：
 #   · 必须先装 ca-certificates 再换 HTTPS 源，否则证书验证失败
 #   · ubuntu 镜像里没有 python3 / git / zsh，全都要装
 #   · 容器里是 root 而挂载的仓库属主是宿主用户 → git 需要 safe.directory
