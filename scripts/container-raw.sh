@@ -53,6 +53,18 @@ printf '    GIT_OPTIONAL_LOCKS=0 ✓（只读挂载也能跑 git 命令）\n'
 printf '    safe.directory 没设 —— 它得等 git 装好之后，见下面第 0 步\n'
 
 # ─────────────────────────────────────────────────────────────
+# 代理：`docker run` **不会**把宿主 shell 里的环境变量带进容器，除非显式 -e。
+# 所以容器里默认是"裸网" —— 宿主 curl 什么都通，容器里却全失败，
+# 而人很容易把它归因成"网络坏了"，去查错方向。
+# 这里探一次：已有变量就用（-e 传进来的），没有就试宿主代理
+# （要求 --network=host，此时容器里的 127.0.0.1 就是宿主自己）。
+# ─────────────────────────────────────────────────────────────
+if [ -f "$(dirname -- "$0")/container-proxy.sh" ]; then
+    . "$(dirname -- "$0")/container-proxy.sh"
+    container_proxy_setup
+fi
+
+# ─────────────────────────────────────────────────────────────
 say "环境现状（这是重点：下面这些都还没做）"
 for c in python3 git curl ansible-playbook zsh tmux rg nvim wtool; do
     if command -v "$c" >/dev/null 2>&1; then
@@ -103,9 +115,11 @@ cat <<'TIP'
       publish.sh  extract.sh
   它们各自干什么，见 wtool-base/README.md 的"脚本做什么"那一节。
 
-  代理（如果这台机器需要）：宿主是 http://127.0.0.1:7897。
-  容器里 127.0.0.1 是容器自己，所以要 --network=host 才能用。
-  这个脚本**不替你设代理** —— 你自己决定要不要 export。
+  代理：`docker run` 不会把宿主的 HTTP_PROXY 带进容器（除非 -e），
+  所以容器里默认是"裸网"。上面已经探测并自动接上了宿主的代理 ——
+  不想要就 WTOOL_NO_PROXY=1；宿主的代理不在默认端口就用
+  -e WTOOL_HOST_PROXY=http://127.0.0.1:端口。
+  （这依赖 --network=host：那时容器里的 127.0.0.1 才是宿主自己。）
 
   想一步到位得到一个装好的环境，用另一个脚本
   （它会把上面第 0、1 步和 wtool bootstrap 一次做完）：

@@ -38,6 +38,11 @@ warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 [ "$(id -u)" = 0 ] || warn "当前不是 root；下面需要 root 权限的步骤可能失败"
 
 # ─────────────────────────────────────────────────────────────
+if [ -f "$(dirname -- "$0")/container-proxy.sh" ]; then
+    . "$(dirname -- "$0")/container-proxy.sh"
+    container_proxy_setup
+fi
+
 say "1/4 准备依赖（先 HTTP 国内镜像装 ca-certificates，再换 HTTPS）"
 if [ "${WTOOL_SKIP_DEPS:-0}" = 1 ]; then
     say "    (WTOOL_SKIP_DEPS=1，跳过)"
