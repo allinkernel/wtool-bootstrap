@@ -62,13 +62,29 @@ PY="$here/lib/wtool_plan.py"
 
 # 前置依赖硬检查：缺了就给一条能直接复制的命令
 # （最小化系统/docker 镜像里 python3 和 git 都可能没有，见 docs/spec.md §12）
+#
+# `sudo` 不能无脑写：最小化的 docker 镜像里**根本没有 sudo**，
+# 而以 root 跑的时候也不需要它。写了 sudo 的后果是用户照着复制，
+# 得到一句 "sudo: command not found" —— 我们明明是想帮他，结果又给他添了一个错。
+wt_priv() {
+    # 输出"需要提权"时该加的前缀：root 下是空，非 root 且有 sudo 才是 sudo
+    if [ "$(id -u 2>/dev/null || echo 0)" = 0 ]; then
+        printf ''
+    elif command -v sudo >/dev/null 2>&1; then
+        printf 'sudo '
+    else
+        printf ''
+    fi
+}
+
 _wt_missing=""
 command -v python3 >/dev/null 2>&1 || _wt_missing="$_wt_missing python3"
 command -v git >/dev/null 2>&1 || _wt_missing="$_wt_missing git"
 if [ -n "$_wt_missing" ]; then
+    _wt_p=$(wt_priv)
     wt_die "缺少依赖:$_wt_missing
 请先执行（用系统自带源，不需要证书）：
-  sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates git python3"
+  ${_wt_p}apt-get update && ${_wt_p}apt-get install -y --no-install-recommends ca-certificates git python3"
 fi
 
 # --------------------------------------------------------------------------

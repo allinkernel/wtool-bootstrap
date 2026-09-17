@@ -462,8 +462,27 @@ wt_task_run() {
         cd "$_cwd" || exit 1
         case $_runner in
             ansible)
+                if ! command -v ansible-playbook >/dev/null 2>&1; then
+                    # 包名逐版本试，**不写死**。
+                    # ansible-core 是 22.04 才有的包名；20.04 上只有 ansible，
+                    # 写死 ansible-core 会让 focal 的用户拿到一句
+                    # "Unable to locate package"，然后自己猜该装什么 ——
+                    # 而这时候源已经配好了，我们自己试一遍就行。
+                    # （`./install.sh` 里也做了同样的事，这里是没走 install.sh
+                    #   直接跑 wtool bootstrap 时的兜底。）
+                    _priv=$(wt_priv)
+                    for _p in ansible-core ansible; do
+                        DEBIAN_FRONTEND=noninteractive \
+                            ${_priv}apt-get install -y -qq --no-install-recommends "$_p" \
+                            >/dev/null 2>&1 || true
+                        command -v ansible-playbook >/dev/null 2>&1 && break
+                    done
+                fi
                 command -v ansible-playbook >/dev/null 2>&1 \
-                    || wt_die "缺少 ansible-playbook（sudo apt-get install -y --no-install-recommends ansible-core）"
+                    || wt_die "缺少 ansible-playbook，自动装也没成功。
+请手动执行（包名逐版本不同，22.04+ 是 ansible-core，20.04 是 ansible）：
+  $(wt_priv)apt-get install -y --no-install-recommends ansible-core
+  $(wt_priv)apt-get install -y --no-install-recommends ansible"
                 ansible-playbook -i localhost, -c local "$_src"
                 ;;
             *)

@@ -24,7 +24,6 @@
 set -eu
 
 WTOOL_DIR=${WTOOL_DIR:-/wtool}
-GIT_OPTIONAL_LOCKS=0
 export GIT_OPTIONAL_LOCKS
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -44,12 +43,14 @@ printf '    系统   : %s\n' "$(. /etc/os-release 2>/dev/null && printf '%s %s' 
 printf '    项目数 : %s\n' "$(ls -d "$WTOOL_DIR"/*/ 2>/dev/null | grep -v '^\.' | wc -l | tr -d ' ')"
 
 # ─────────────────────────────────────────────────────────────
-# 唯一做的一件事：让 git 认这个挂载进来的仓库。
-# 容器里是 root，仓库属主是宿主用户 —— 不配这个，git 会以
-# "dubious ownership" 拒绝工作，而你会在完全无关的地方找原因。
-say "让 git 接受挂载进来的仓库（唯一的一步预设）"
-git config --global --add safe.directory '*' 2>/dev/null || true
-printf '    safe.directory=* ✓   GIT_OPTIONAL_LOCKS=0 ✓（只读挂载也能跑 git 命令）\n'
+# 只设 GIT_OPTIONAL_LOCKS，**不设 safe.directory**。
+#
+# 曾经在这里设过 safe.directory —— 但那一刻 git 还没装（这个容器什么都不装），
+# 命令静默失败，用户后面还是撞上 "dubious ownership"。
+# 现在把它放进下面的第 0 步命令里，跟着 git 一起装完再设，顺序才对。
+GIT_OPTIONAL_LOCKS=0
+printf '    GIT_OPTIONAL_LOCKS=0 ✓（只读挂载也能跑 git 命令）\n'
+printf '    safe.directory 没设 —— 它得等 git 装好之后，见下面第 0 步\n'
 
 # ─────────────────────────────────────────────────────────────
 say "环境现状（这是重点：下面这些都还没做）"
@@ -70,7 +71,11 @@ cat <<'TIP'
   装它们（用系统自带源，不需要证书）：
 
       apt-get update && apt-get install -y --no-install-recommends \
-          ca-certificates git python3
+          ca-certificates git python3 curl
+      git config --global --add safe.directory '*'
+
+  最后那条**不能省**：容器里是 root、仓库属主是宿主用户，
+  git 会以 "dubious ownership" 拒绝工作 —— 不设的话你会在完全无关的地方找原因。
 
   第 1 步：装引擎（自举到 ~/.wtool/bootstrap，并建工作区入口软链）：
 
