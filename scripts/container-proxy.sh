@@ -24,11 +24,21 @@ set -eu
 # 用户可以用 WTOOL_HOST_PROXY 指定，或者 WTOOL_NO_PROXY=1 关掉自动探测
 _CP_PROXY=${WTOOL_HOST_PROXY:-http://127.0.0.1:7897}
 
+# 探测某个 host:port 通不通。
+#
+# **必须在一个独立的子进程里做，不能在当前 shell 里开 fd。**
+# 踩过：原来写的是 `(exec 3<>"/dev/tcp/$1/$2")` 加 `exec 3<&-`，
+# 结果这个脚本跑完之后交接给交互 shell（`exec bash -i`）**不给提示符**了 ——
+# 光标停在那里，看起来和卡死一模一样。
+# 而"卡住"和"在等你输入"分不清，正是这个脚本最该避免的事。
+# 排查了很久才定位到是这段 fd 操作的影响。
+# 现在的写法：fd 只存在于 `timeout bash -c` 那个子进程里，
+# 父 shell 一个 fd 都不碰。
 _cp_can_connect() {
-    # 用 /dev/tcp 探测（bash 特性）；dash 没有，退回 nc/timeout
-    if (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; then
-        exec 3<&- 2>/dev/null || true
-        return 0
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" >/dev/null 2>&1 && return 0
+    else
+        bash -c "exec 3<>/dev/tcp/$1/$2" >/dev/null 2>&1 && return 0
     fi
     command -v nc >/dev/null 2>&1 && nc -z "$1" "$2" >/dev/null 2>&1 && return 0
     return 1

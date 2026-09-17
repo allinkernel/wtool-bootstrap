@@ -128,8 +128,33 @@ cat <<'TIP'
 
 TIP
 
+# 交接给交互 shell。
+#
+# 两个细节都是为了让"进来了在等你输入"和"卡住了"能区分开 ——
+# 用户看到一屏说明之后光标不动，第一反应是"卡住了"，这很合理。
+# 所以：
+#   · 明说一句"已经进来了，下面就是提示符"
+#   · `bash -i` 强制交互：bash 靠"stdin 是不是终端"自己判断，
+#     而我们是用 `bash <脚本>` 启动的，某些组合下它可能把自己当成非交互的，
+#     于是**不给提示符、静静等 stdin** —— 看起来和卡死一模一样。
+cat <<'ENTRY'
+
+  ────────────────────────────────────────────────────────────
+  已经进到容器里了，下面这个提示符就是在等你输入。
+
+  先把环境铺好（复制这两行）：
+
+      apt-get update && apt-get install -y --no-install-recommends \
+          ca-certificates git python3 curl
+      git config --global --add safe.directory '*'
+
+  然后：cd /wtool && ./install.sh
+  ────────────────────────────────────────────────────────────
+
+ENTRY
+
 if command -v bash >/dev/null 2>&1; then
-    exec bash
+    exec bash -i
 else
-    exec sh
+    exec sh -i
 fi
