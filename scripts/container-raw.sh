@@ -77,81 +77,18 @@ done
 cat <<'TIP'
 
   ────────────────────────────────────────────────────────────
-  可以做什么（每一步都是你自己决定要不要跑）
+  这个容器里什么都没装 —— 等价于"刚 repo sync 完"。
+  接下来三条命令，和你在真机上做的一模一样：
 
-  第 0 步：这个镜像里连 python3 和 git 都没有，wtool 一条都跑不了。
-  装它们（用系统自带源，不需要证书）：
+      cd /wtool && ./install.sh     # 准备环境 + 装 wtool 自己
+      exec $SHELL                   # 让当前 shell 认识 wtool
+      wtool bootstrap               # 装不需要你决策的项目
 
-      apt-get update && apt-get install -y --no-install-recommends \
-          ca-certificates git python3 curl
-      git config --global --add safe.directory '*'
-
-  最后那条**不能省**：容器里是 root、仓库属主是宿主用户，
-  git 会以 "dubious ownership" 拒绝工作 —— 不设的话你会在完全无关的地方找原因。
-
-  第 1 步：装引擎（自举到 ~/.wtool/bootstrap，并建工作区入口软链）：
-
-      cd /wtool && ./install.sh --force
-
-  它会检查依赖，缺什么会直接告诉你该装什么 —— 不用猜。
-
-  装完 wtool 之后（也可以不装引擎，直接调 /wtool/bootstrap/wtool.sh）：
-
-      wtool table                 看项目表：每个项目支持哪些动作、做到哪一步了
-      wtool doctor                看环境和状态目录对不对
-      wtool bootstrap             装"不需要决策"的那些（不 build、不 download）
-      wtool bootstrap --install-only   只做软链和 rc 注入，不跑 apt（最快）
-
-      wtool build    <项目>       自己编（小时级）
-      wtool download <项目>       从发布页拿现成的包
-      wtool install  <项目>       登记 + 软链 + shell 集成
-      wtool uninstall --id <项目> 撤掉
-      wtool publish  <项目>       发到项目自己的 release
-
-  wtool bootstrap 会跑 apt 装系统包；不想动系统就加 --no-system。
-
-  项目自己的脚本住在 <项目>/scripts/ 下，可以直接看、直接跑：
-      build.sh  download.sh  install.sh  uninstall（install.sh --uninstall）
-      publish.sh  extract.sh
-  它们各自干什么，见 wtool-base/README.md 的"脚本做什么"那一节。
-
-  代理：`docker run` 不会把宿主的 HTTP_PROXY 带进容器（除非 -e），
-  所以容器里默认是"裸网"。上面已经探测并自动接上了宿主的代理 ——
-  不想要就 WTOOL_NO_PROXY=1；宿主的代理不在默认端口就用
-  -e WTOOL_HOST_PROXY=http://127.0.0.1:端口。
-  （这依赖 --network=host：那时容器里的 127.0.0.1 才是宿主自己。）
-
-  想一步到位得到一个装好的环境，用另一个脚本
-  （它会把上面第 0、1 步和 wtool bootstrap 一次做完）：
-      bash /wtool/bootstrap/scripts/container-shell.sh
+  第一条会自动认系统、认缺什么包、认要不要接代理 —— 不用你操心。
+  想看它到底干了什么：./install.sh --dry-run
   ────────────────────────────────────────────────────────────
 
 TIP
-
-# 交接给交互 shell。
-#
-# 两个细节都是为了让"进来了在等你输入"和"卡住了"能区分开 ——
-# 用户看到一屏说明之后光标不动，第一反应是"卡住了"，这很合理。
-# 所以：
-#   · 明说一句"已经进来了，下面就是提示符"
-#   · `bash -i` 强制交互：bash 靠"stdin 是不是终端"自己判断，
-#     而我们是用 `bash <脚本>` 启动的，某些组合下它可能把自己当成非交互的，
-#     于是**不给提示符、静静等 stdin** —— 看起来和卡死一模一样。
-cat <<'ENTRY'
-
-  ────────────────────────────────────────────────────────────
-  已经进到容器里了，下面这个提示符就是在等你输入。
-
-  先把环境铺好（复制这两行）：
-
-      apt-get update && apt-get install -y --no-install-recommends \
-          ca-certificates git python3 curl
-      git config --global --add safe.directory '*'
-
-  然后：cd /wtool && ./install.sh
-  ────────────────────────────────────────────────────────────
-
-ENTRY
 
 if command -v bash >/dev/null 2>&1; then
     exec bash -i

@@ -79,14 +79,38 @@ env_apt_ready() {
         return 0
     fi
     _m=${ENV_MIRROR:-mirrors.ustc.edu.cn}
-    env_warn "  系统自带的源不可用，换 $m"
+    env_warn "  系统自带的源不可用，换 $_m"
     ENV_MIRROR=$_m
+    # 关键：换源之后**不要让 apt 再走代理**。
+    # 容器里 HTTP_PROXY 是设着的（container-proxy.sh 接的宿主代理），
+    # apt 默认对所有 http 都走它 —— 于是"换国内镜像"只是换了个域名，
+    # 路还是同一条，照样 502。国内镜像直连最快，绕代理纯属自找。
+    env_apt_bypass_proxy "$_m"
     env_use_mirror
     apt-get update -qq >/dev/null 2>&1 || {
         env_warn "  换源后还是不行 —— 网络问题，下面的装包大概率会失败"
         return 0
     }
     env_say "  换源后可用"
+}
+
+# 让 apt 访问某个主机时**不走代理**。
+#
+# env 里的 no_proxy 各版本 apt 处理不一致，所以除了环境变量，
+# 再写一条 apt 自己的配置（双保险）。
+env_apt_bypass_proxy() {
+    _h=$1
+    [ -n "$_h" ] || return 0
+    for _v in no_proxy NO_PROXY; do
+        eval "_cur=\${$_v:-}"
+        case ",$_cur," in
+            *",$_h,"*) ;;
+            *) export "$_v=${_cur:+$_cur,}$_h" ;;
+        esac
+    done
+    mkdir -p /etc/apt/apt.conf.d 2>/dev/null || return 0
+    printf 'Acquire::http::Proxy::%s "DIRECT";\n' "$_h" \
+        > /etc/apt/apt.conf.d/99wtool-noproxy 2>/dev/null || true
 }
 
 # 装一个包，**按候选名依次试**。

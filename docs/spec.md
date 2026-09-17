@@ -435,40 +435,46 @@ wtool publish tmux --out=/tmp/pkg          # 产物留在那里，先看看再�
 
 ## 14. 能力表格
 
-`wtool`（不带参数）和 `wtool doctor` 的末尾都会打印：
+`wtool`（不带参数）和 `wtool table` 都会打印：
 
 ```
-项目                                     prio  install  provision  publish  uninstall
--------------------------------------------------------------------------------------
-bootstrap                                5     -        .          -        -
-os/ubuntu                                5     .        -          -        .
-editor/astronvim_v5                      70    .        .          -        .
-editor/astronvim_v5/nvim                 100   .        .          .        .
+┌──────────────────────┬──────┬────────────┬────────────┬────────────┬────────────┐
+│ 项目                 │ prio │ build      │ download   │ install    │ publish    │
+├──────────────────────┼──────┼────────────┼────────────┼────────────┼────────────┤
+│ bootstrap            │ 5    │ 不支持     │ 不支持     │ 已完成     │ 可执行     │
+│ editor/astronvim_v5  │ 70   │ 可执行     │ 可执行     │ 待构建下载 │ 待构建下载 │
+└──────────────────────┴──────┴────────────┴────────────┴────────────┴────────────┘
 ```
 
-格子语义（三个符号，用 ASCII 是因为终端里算不准字宽的字符会让整张表错位）：
+**格子语义：四种状态，各带一个颜色。** 用的是方框字符而不是 ASCII ——
+表格由 `render_table()` 按 CJK 双宽对齐算列宽，终端里不会错位。
 
-| 符号 | 含义 |
-|---|---|
-| `+` | 已经做了 |
-| `-` | 能做但还没做（TODO） |
-| `.` | 这个项目没这项能力 |
-
-判定依据（只读文件，不写）：
-
-| 列 | `+` 的条件 | 数据来源 |
+| 状态 | 颜色 | 含义 |
 |---|---|---|
-| `install` / `uninstall` | journal 里有非注释行，或 registry 里登记了它的软链 | `$WTOOL_STATE/<id>/journal.tsv`、`registry.tsv` |
-| `provision` | marker 目录非空，或写系统文件的记录存在 | `$WTOOL_STATE/<id>/provisioned/`、`system/` |
-| `publish` | 本地有发布记录 | `$WTOOL_STATE/<id>/publish.tsv` |
+| `不支持` | 红 | 这个项目没有这项能力 |
+| `可执行` | 黄 | 有能力，现在就能跑 |
+| `待构建下载` | 蓝 | 有能力，但要先 `build` 或 `download` |
+| `已完成` | 绿 | 跑过了 |
 
-"有没有这项能力"来自清单本身：`install` 看有没有 `<link>`/`<env>`，
-`provision` 看有没有 `<system-file>`/`<source>`/`<provision>`，`publish` 看
-`<publish kind>` 是不是 `none`。所以一个只声明了 `<publish>` 的项目，
-`install` 列是 `.` 而不是 `-`——它不是"没装"，是根本没有可装的东西。
+> 这四种是**文字**不是符号，而且颜色只是辅助 —— 管道里（`--color=never`）
+> 或色盲用户看到的仍然是可读的。早先版本用的是 `+ - .` 三种 ASCII 符号，
+> 已经废弃：符号要靠图例才看得懂，而"不支持"和"还没做"这两件事
+> 用一个 `.` 表示会混。
 
-`--verbose` 加逐项目细节，`--summary` 加一行汇总。表格用的是 CJK 双宽对齐，
-`tests/table_test.sh`（23 条）会验证格子语义和列起始位置。
+### 判定依据（只读文件，不写）
 
-`build` 和 `update` 目前没有独立列：构建是 `publish.sh` / `install.sh` 内部的事
-（见 `editor/astronvim_v5/`），等它们变成引擎能力再加进来。
+| 列 | 判定 |
+|---|---|
+| **能力有无** | 项目里有没有对应的东西：<br>`build`/`download` ← `scripts/build.sh` / `scripts/download.sh` 存在<br>`install` ← 有 `<link>`/`<env>`，或 `scripts/install.sh` 存在<br>`publish` ← `<publish kind>` 不是 `none` |
+| **做没做过** | `$WTOOL_STATE/<id>/actions.tsv`（时间线，记 build/download）<br>`journal.tsv` / `registry.tsv`（install）<br>`provisioned/` + `system/`（provision）<br>`publish.tsv`（publish） |
+
+**"文件存在即能力声明"**：新建一个空的 `scripts/build.sh` 会让那一列
+立刻从「不支持」变成「可执行」。这是有意的 —— 能力由项目自己声明，
+引擎不去猜。
+
+**这两者要分开记：** 能力有无是**静态的**（看项目文件，不随运行变化），
+做没做过是**动态的**（看状态目录）。填格子时先看能力，没有能力就是
+「不支持」，有能力再看状态决定是「可执行」还是「已完成」。
+
+`--verbose` 加逐项目细节，`--summary` 只打汇总行。
+`--color=auto|always|never` 控制颜色，管道里自动关。
