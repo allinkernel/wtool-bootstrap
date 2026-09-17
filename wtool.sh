@@ -609,6 +609,28 @@ cmd_uninstall() {
     wt_load_project "$_scratch"
     wt_info "project: $WTOOL_PROJECT_ID"
 
+    # 0) 先让项目自己撤。
+    #
+    # 这一步原来是**缺的**：install 会跑项目自己的 install.sh，
+    # uninstall 却只逆放引擎自己的 journal —— 而项目脚本装的东西
+    # （编译产物、下载的包、铺到 $HOME 的配置）不在那本 journal 里。
+    # 结果 `wtool uninstall` 跑得"成功"，东西一个没少。
+    # 实测 astronvim_v5：plan 出来 actions: 0。
+    #
+    # 必须**先于** journal 逆放：项目脚本删的是实体（大件），
+    # 引擎删的是软链和状态。反过来软链先没了，项目脚本可能就找不到自己装的东西。
+    if [ "${WTOOL_NO_SCRIPT:-0}" != 1 ] \
+       && wt_project_script "$WTOOL_PROJECT_ROOT" install.sh >/dev/null 2>&1; then
+        wt_info "项目脚本: install.sh --uninstall"
+        if ! wt_run_project_script "$WTOOL_PROJECT_ROOT" install.sh --uninstall; then
+            if [ "${WTOOL_FORCE:-0}" = 1 ]; then
+                wt_warn "  install.sh --uninstall 失败（--force 继续）"
+            else
+                wt_die "install.sh --uninstall 失败；加 --force 强行继续"
+            fi
+        fi
+    fi
+
     # 1) rc 回退（内容由 py 算好，sh 只负责落盘）
     while IFS='	' read -r _action _kind _dest _source _sha _extra; do
         [ "${_action:-}" = "rc" ] || continue
