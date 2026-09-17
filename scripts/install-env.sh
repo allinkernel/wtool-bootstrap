@@ -74,6 +74,19 @@ EOF
 # 挑一个能用的 apt 源。先试系统自带的，实在不行再换国内镜像。
 env_apt_ready() {
     env_say "检查 apt 源"
+
+    # **先试系统自带的源，能用就不动它。**
+    #
+    # 我一度改成"检测到代理就直接换国内镜像"，理由是 apt 走代理又慢又容易 502。
+    # 那次改动**引入了新的失败模式**：换源之后的 apt-get update 直接卡死
+    # （500 秒没动静），而原来"先试系统源"的路子实测 153 秒就能跑完。
+    #
+    # 教训：**能跑通的路径不要为了"可能更快"去动它。**
+    # 慢是缺点，卡死是故障，两者不是一个量级。真想优化也得先有测量，
+    # 而不是拿一个没验证过的改动去替换一个验证过的。
+    #
+    # 代理相关的正确做法在下面那条分支里：**只在系统源真的失败时**，
+    # 换国内镜像并给它开 DIRECT（`env_apt_bypass_proxy`）。
     if apt-get update -qq >/dev/null 2>&1; then
         env_say "  系统自带的源可用"
         return 0
@@ -122,11 +135,16 @@ env_apt_bypass_proxy() {
 # 然后用户得自己去猜该装什么 —— 而这时候源已经配好了，我们完全有能力自己试出来。
 env_install_first() {
     _desc=$1; shift
-    for _p in "$@"; do
+    # 循环变量**必须用这个名字**，不能叫 _p ——
+    # 调用方的 env_prepare 里 _p 存着"提权前缀"（空或 "sudo "），
+    # 被这里覆盖之后，后面那句提示就成了
+    #     "请手动装：ansibleapt-get install -y git"
+    # 这种"看着像乱码"的输出，根源都是变量被别的函数偷了。
+    for _cand in "$@"; do
         # shellcheck disable=SC2086
         if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-               --no-install-recommends $_p >/dev/null 2>&1; then
-            env_say "  $_desc ✓（包名 $_p）"
+               --no-install-recommends $_cand >/dev/null 2>&1; then
+            env_say "  $_desc ✓（包名 $_cand）"
             return 0
         fi
     done
@@ -135,8 +153,26 @@ env_install_first() {
 }
 
 # ── 主流程 ──
+# 让 apt 快速失败。
+#
+# **apt 默认没有下载超时**：连接一停滞，它就永远等下去，
+# 表现是"脚本卡住了"，而人第一反应是去查网络 —— 查不出所以然。
+# 在 astronvim 的 build.sh 里踩过一次（卡了 20 分钟、partial/ 一个字节都没有），
+# 这里是同一个坑的另一个入口。
+#
+# 加上超时之后，"停滞"会变成"失败"，重试/换源才有机会生效。
+env_apt_fastfail() {
+    mkdir -p /etc/apt/apt.conf.d 2>/dev/null || return 0
+    cat > /etc/apt/apt.conf.d/99wtool-timeout <<'EOF'
+Acquire::http::Timeout "20";
+Acquire::https::Timeout "20";
+Acquire::Retries "3";
+EOF
+}
+
 env_prepare() {
     env_say "系统：$ENV_NAME"
+    env_apt_fastfail
     env_need_root || true
     _p=$(env_priv)
 
@@ -147,11 +183,21 @@ env_prepare() {
 
     # 基础四件套：缺任何一个 wtool 都跑不起来或跑不全
     env_say "装 wtool 需要的运行环境"
-    # shellcheck disable=SC2086
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        ca-certificates git python3 curl ${ENV_EXTRA_PKGS:-} >/dev/null 2>&1 \
-        && env_say "  ca-certificates git python3 curl ✓" \
-        || env_warn "  基础包没全装上，看下面缺什么"
+    # 装两遍：网络抖一下整批失败是常事（代理后面尤其），
+    # 而少一个 git 后面就全废。第二遍只补缺的，代价很小。
+    _try=0
+    while [ "$_try" -lt 2 ]; do
+        _try=$((_try + 1))
+        # shellcheck disable=SC2086
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+               --no-install-recommends \
+               ca-certificates git python3 curl ${ENV_EXTRA_PKGS:-} >/dev/null 2>&1; then
+            env_say "  ca-certificates git python3 curl ✓"
+            break
+        fi
+        [ "$_try" -ge 2 ] && env_warn "  基础包装了两遍还是没全装上，看下面缺什么"
+        sleep 3
+    done
 
     # ansible 是可选的：只有 os/ubuntu 的 provision 用它。
     # 装不上不影响 wtool 本体，所以失败只警告。
