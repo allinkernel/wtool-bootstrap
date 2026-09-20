@@ -38,6 +38,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 | `lib/wtool_plan.py` | 规划器：解析 `wtool.xml`、校验、计算 rc 新内容（只写 scratch） |
 | `lib/wtool_fs.sh` | 执行器：软链、原子写、journal、registry（唯一写 `$HOME` 的地方） |
 | `templates/stub.sh` | 项目存根模板（`install.sh`/`uninstall.sh` 都是它的副本） |
+| `scripts/gerrit/` | **本工作区自己的检视闸门**：docker 里跑一台 Gerrit（PolyGerrit），改动先推 `refs/for/main`、人 +2 之后才进 main。见 `scripts/gerrit/README.md` |
 | `tests/pairing_test.sh` | 7 组场景 / 17 条断言，全在临时 `$HOME` 里跑 |
 | `docs/spec.md` | **接口契约**（改代码前先看） |
 | `docs/manifest-schema.md` | `wtool.xml` 完整字段表 |
