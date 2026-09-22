@@ -570,7 +570,7 @@ cmd_install() {
 
     # 项目自己的 install.sh 在这之后跑：
     #   1) wtool.xml 的 link/rc 是通用机制，先铺好，脚本才能依赖
-    #      ~/.wtool/links/<id> 这个稳定地址；
+    #      ~/.wtool/wtool-work-dir/links/<id> 这个稳定地址；
     #   2) 项目特有的安装步骤（编好的东西怎么摆、shell 集成怎么加）
     #      只有项目自己知道，交给脚本。
     #
@@ -710,11 +710,13 @@ cmd_uninstall() {
     fi
 
     # 4) 清理引擎自己的空目录
-    #    多个项目共享 ~/.wtool/links 这类父目录，各自 journal 清不干净，
-    #    这里统一做一次"只删空目录"的收尾（只动 .wtool/links，不碰 .wtool/usr）。
+    #    多个项目共享 wtool-work-dir/links 这类父目录，各自 journal 清不干净，
+    #    这里统一做一次"只删空目录"的收尾。
+    #    ⚠️ 只动 wtool-work-dir（引擎自用那一格），绝不碰 .wtool/usr 和影子 $HOME 的其它行。
     if ! wt_dry; then
-        if [ -d "$WTOOL_HOME/.wtool/links" ]; then
-            find "$WTOOL_HOME/.wtool/links" -depth -type d -empty -delete 2>/dev/null || true
+        _work="$WTOOL_HOME/.wtool/wtool-work-dir"
+        if [ -d "$_work" ]; then
+            find "$_work" -depth -type d -empty -delete 2>/dev/null || true
         fi
         rmdir -- "$WTOOL_HOME/.wtool" 2>/dev/null || true
     fi

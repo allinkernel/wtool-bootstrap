@@ -64,7 +64,7 @@ after_install=$(snap "$h/home")
 
 [ -L "$h/home/.wtool-test-terminal/tmux.conf" ] \
     && ok "软链已创建" || bad "软链已创建"
-[ -d "$h/home/.wtool/links/terminal/tmux" ] \
+[ -d "$h/home/.wtool/wtool-work-dir/links/terminal/tmux" ] \
     && ok "中转链接已创建" || bad "中转链接已创建"
 # 用户 rc 里只有**一个** loader 块；项目的块收在 ~/.wtool/.zshrc 里
 grep -q '^# >>> wtool >>>$' "$h/home/.zshrc" \
@@ -203,7 +203,7 @@ proj="$h/proj"; mkrepo "$proj" "terminal/tmux" 50
 if command -v zsh >/dev/null 2>&1; then
     got=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1; printf "%s|%s|%s" \
         "$WTOOL_TEST_terminal_tmux" "$WTOOL_PROJECT_DIR" "$WTOOL_PROJECT_ROOT"')
-    check "env 里的变量被导出" "1|$h/home/.wtool/links/terminal/tmux|$proj" "$got"
+    check "env 里的变量被导出" "1|$h/home/.wtool/wtool-work-dir/links/terminal/tmux|$proj" "$got"
 
     # 仓库搬家：只重建中转链接，rc 块一个字都不用改
     moved="$h/moved-proj"
@@ -234,7 +234,7 @@ rm -rf "$bcopy/.git" "$bcopy/lib/__pycache__"
 
 "$bcopy/wtool.sh" install "$bcopy" > "$h/boot.log" 2>&1 || {
     bad "install bootstrap" "$(cat "$h/boot.log")"; }
-[ -d "$h/home/.wtool/links/bootstrap" ] \
+[ -d "$h/home/.wtool/wtool-work-dir/links/bootstrap" ] \
     && ok "bootstrap 中转链接已创建" || bad "bootstrap 中转链接已创建"
 grep -q '# >>> wtool:bootstrap' "$h/home/.wtool/.zshrc" \
     && ok "bootstrap 的块写进了汇总文件" || bad "bootstrap 的块没写进去"
@@ -246,7 +246,7 @@ if command -v zsh >/dev/null 2>&1; then
     check "新 shell 里能拿到 PREFIX/OS_ID/ARCH 且 PATH 已含前缀" \
           "$h/home/.wtool/usr|ubuntu|x86_64|in-path" "$got"
     got2=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1; command -v wtool')
-    check "wtool 命令在 PATH 上" "$h/home/.wtool/links/bootstrap/bin/wtool" "$got2"
+    check "wtool 命令在 PATH 上" "$h/home/.wtool/wtool-work-dir/links/bootstrap/bin/wtool" "$got2"
 else
     printf 'SKIP  zsh 不可用，跳过场景 9\n'
 fi

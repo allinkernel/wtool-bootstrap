@@ -13,7 +13,7 @@
 | **完全配对** | install 之后 uninstall，`$HOME` 必须字节级回到 install 之前 |
 | **幂等** | 连续多次 install，结果与一次 install 完全相同（包括 rc 文件内容） |
 | **顺序无关** | 多个项目以任意顺序安装，`~/.zshrc` 的最终内容一致 |
-| **可迁移** | 仓库搬到任意路径，rc 块一个字都不用改（靠 `~/.wtool/links/<id>` 中转） |
+| **可迁移** | 仓库搬到任意路径，rc 块一个字都不用改（靠 `~/.wtool/wtool-work-dir/links/<id>` 中转） |
 | **可撤销且可审计** | 撤销依据是 journal（"我做过什么"），不是"重新推导" |
 
 四条不变量：
@@ -30,14 +30,14 @@
 | 角色 | 谁创建 | 在清单里声明吗 | 用途 | 例子 |
 |---|---|---|---|---|
 | **声明链接** | `<link>` | ✅ | "应用去这个位置找配置" | `~/.tmux.conf` |
-| **稳定地址** | 引擎 install 时自动 | ❌ | "整个项目的稳定、防搬家路径"，供**配置内部互相引用** | `~/.wtool/links/<id>`（指向项目根） |
+| **稳定地址** | 引擎 install 时自动 | ❌ | "整个项目的稳定、防搬家路径"，供**配置内部互相引用** | `~/.wtool/wtool-work-dir/links/<id>`（指向项目根） |
 
 **规则**：
 - 清单只声明"应用去找的"链接；
-- 配置文件**内部**要引用本项目其它文件时，写 `$HOME/.wtool/links/<id>/...`（稳定地址），不要写仓库真实路径，也不要用 `$HOME` 之外的 env 变量（见下）。
-- 为什么不能只靠 env 变量（如 `WTOOL_TMUX_DIR`）：tmux 的 `#()` 命令在**渲染时**用 `sh -c` 执行，`$HOME` 必然存在；而自定义 env 变量只有"启动 tmux server 的那个 shell 里 source 过它"才在。**`$HOME/.wtool/links/<id>` 是唯一两者兼得的选择**（实测 tmux 3.4 验证）。
+- 配置文件**内部**要引用本项目其它文件时，写 `$HOME/.wtool/wtool-work-dir/links/<id>/...`（稳定地址），不要写仓库真实路径，也不要用 `$HOME` 之外的 env 变量（见下）。
+- 为什么不能只靠 env 变量（如 `WTOOL_TMUX_DIR`）：tmux 的 `#()` 命令在**渲染时**用 `sh -c` 执行，`$HOME` 必然存在；而自定义 env 变量只有"启动 tmux server 的那个 shell 里 source 过它"才在。**`$HOME/.wtool/wtool-work-dir/links/<id>` 是唯一两者兼得的选择**（实测 tmux 3.4 验证）。
 
-> 代价：`id` 因此成了**对外契约**，会同时出现在 `~/.wtool/links/<id>`、rc 块、和配置文件的引用里。改 id = 改三处 + 重装。已写进本规范与 `terminal/tmux/wtool.xml` 的注释。
+> 代价：`id` 因此成了**对外契约**，会同时出现在 `~/.wtool/wtool-work-dir/links/<id>`、rc 块、和配置文件的引用里。改 id = 改三处 + 重装。已写进本规范与 `terminal/tmux/wtool.xml` 的注释。
 
 ---
 
@@ -112,7 +112,7 @@ install <项目>
    - `dest` 已存在于 registry 且属于别的项目 → 拒绝（`--force` 降级为警告）
    - `dest` 存在且不是软链 → 拒绝（`--force` 备份为 `*.wtool-bak.<时间戳>` 后接管）
    - `dest` 是软链但指向别处 → 拒绝（同上）
-3. **执行**：建 `~/.wtool/links/<id>` 中转链接 → 建项目内软链 → 写 rc 块。
+3. **执行**：建 `~/.wtool/wtool-work-dir/links/<id>` 中转链接 → 建项目内软链 → 写 rc 块。
 4. **落账**：写 `meta.tsv`、更新 `registry.tsv`、追加 journal（按 `(action,dest)` 去重）。
 
 重复 install = **restow**（等价于 GNU Stow 的 `stow -R`）：已正确的软链不重建，rc 块原地更新，plan 为空时打印"没有需要变更的内容"。
@@ -136,7 +136,7 @@ install <项目>
 ```sh
 # >>> wtool:<id> schema=1 engine=1.0.0 prio=50 head=<commit> manifest=<sha12> >>>
 WTOOL_PROJECT_ID='<id>'
-WTOOL_PROJECT_DIR="$HOME/.wtool/links/<id>"
+WTOOL_PROJECT_DIR="$HOME/.wtool/wtool-work-dir/links/<id>"
 export WTOOL_PROJECT_ID WTOOL_PROJECT_DIR
 WTOOL_PROJECT_ROOT=$(readlink -f -- "$WTOOL_PROJECT_DIR" 2>/dev/null || printf '%s' "$WTOOL_PROJECT_DIR")
 export WTOOL_PROJECT_ROOT

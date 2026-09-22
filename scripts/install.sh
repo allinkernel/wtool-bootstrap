@@ -187,7 +187,7 @@ _ln guide.md     wtool-base/guide.md
 # 光有引擎文件还不够 —— `wtool` 要出现在 PATH 里，靠的是 bootstrap 项目
 # （也就是引擎自己）的环境变量块。所以这里**只装这一个项目**：
 #
-#   wtool install bootstrap   → 建 ~/.wtool/links/bootstrap、写 env 块、
+#   wtool install bootstrap   → 建 ~/.wtool/wtool-work-dir/links/bootstrap、写 env 块、
 #                               在用户 rc 里放那一段 loader
 #
 # 装完这一步，`wtool` 就是一条真命令了。**到此为止**，不再往下装项目。

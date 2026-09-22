@@ -34,6 +34,27 @@ ENGINE_VERSION = "1.0.0"
 SCHEMA_SUPPORTED = (1,)
 DEFAULT_PRIORITY = 100
 
+# ---------------------------------------------------------------------------
+# 引擎自用目录：~/.wtool/wtool-work-dir/
+#
+# ~/.wtool/ 是影子 $HOME：里面只允许出现"真 $HOME 里也会有的路径"
+# （~/.tmux.conf ↔ ~/.wtool/.tmux.conf，~/usr ↔ ~/.wtool/usr）。
+# 而"中转软链 <id> -> 项目目录"是**引擎自己造的东西**，$HOME 里没有对应物，
+# 所以它不能直接躺在 ~/.wtool/links/<id>（用户 2026-09-23 拍板）。
+# 引擎自用的一切都关进这一格 —— 它是影子 $HOME 下唯一一个故意不像 $HOME 的目录。
+WORK_DIR_NAME = "wtool-work-dir"
+
+
+def links_dir_for(home, project_id):
+    """中转软链在磁盘上的真实路径。"""
+    return os.path.join(home, ".wtool", WORK_DIR_NAME, "links", project_id)
+
+
+def links_dir_shell(project_id):
+    """写进 env 块的写法：$HOME 留到 source 时再展开（仓库搬家不用改块）。"""
+    return '"$HOME/.wtool/%s/links/%s"' % (WORK_DIR_NAME, project_id)
+
+
 # publish 的默认行为：没有 <publish> 声明的项目按源码打包推送
 DEFAULT_PUBLISH_TAG = "snapshot-%Y-%m-%d"
 PUBLISH_KINDS = ("source", "script", "none")
@@ -538,7 +559,7 @@ def render_block(project_id, schema, prio, head, manifest_sha, env_rel):
     begin = ("# >>> wtool:%s schema=%d engine=%s prio=%d head=%s manifest=%s >>>"
              % (project_id, schema, ENGINE_VERSION, prio, head or "-",
                 (manifest_sha or "-")[:12]))
-    link_dir = '"$HOME/.wtool/links/%s"' % project_id
+    link_dir = links_dir_shell(project_id)
     body = [
         # 这三个变量只在 source 期间有效；env 文件应把它们拷进自己的变量
         "WTOOL_PROJECT_ID='%s'" % project_id,
@@ -666,7 +687,7 @@ def plan_install(args, scratch):
             errors.extend(conflicts)
 
     # 磁盘冲突检测
-    link_dir = os.path.join(home, ".wtool", "links", project_id)
+    link_dir = links_dir_for(home, project_id)
     for entry in entries:
         if entry.kind != "link" or getattr(entry, "skip", False):
             continue
@@ -695,7 +716,7 @@ def plan_install(args, scratch):
             return
         rows.append(("link", kind, dest, target, "", ""))
 
-    # 1) 稳定中转链接 ~/.wtool/links/<id> -> <project_root>
+    # 1) 稳定中转链接 ~/.wtool/wtool-work-dir/links/<id> -> <project_root>
     add_link("dir", link_dir, project_root)
 
     # 2) 项目内的软链，全部经由中转链接，保证仓库可搬家

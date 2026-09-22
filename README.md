@@ -71,7 +71,7 @@ bootstrap 项目（自举）提供的**长期变量**，重启 shell 后依然�
 `bootstrap` 本身也是一个 wtool 项目：
 
 ```sh
-cd bootstrap && ./install.sh     # 建 ~/.wtool/links/bootstrap + 写 rc 块
+cd bootstrap && ./install.sh     # 建 ~/.wtool/wtool-work-dir/links/bootstrap + 写 rc 块
 exec zsh                          # 之后 wtool / WTOOL_PREFIX / OS 变量就位
 wtool doctor
 ```

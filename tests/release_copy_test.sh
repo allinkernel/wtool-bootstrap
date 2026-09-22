@@ -76,7 +76,7 @@ env HOME="$H" WTOOL_ROOT="$WS" WTOOL_STATE="$T/state" \
     bad "install 失败"; sed 's/^/     /' "$T/log1"; }
 grep -q '发布副本' "$T/log1" && ok "认出了这是发布副本" || bad "没认出发布副本"
 grep -q 'd0a872a12345' "$T/log1" && ok "版本取自标记里的 commit" || bad "没取到 commit"
-has "软链接建好了" "$H/.wtool/links/terminal/tmux"
+has "软链接建好了" "$H/.wtool/wtool-work-dir/links/terminal/tmux"
 has "用户 rc 里写了 loader 块" "$H/.zshrc"
 has "环境变量汇总文件也写了" "$H/.wtool/.zshrc"
 grep -q '^# >>> wtool >>>$' "$H/.zshrc" \

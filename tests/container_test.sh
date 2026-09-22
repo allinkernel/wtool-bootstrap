@@ -189,15 +189,15 @@ zout=$(ZSH_DISABLE_COMPFIX=true zsh -i -c '
       "$(( $+aliases[gs] ))" \
       "$(command -v fzf)"
 ' 2>/dev/null | grep -o 'WTCHK:.*' || true)
-zsh_dir="$HOME/.wtool/links/shell/oh-my-zsh"
+zsh_dir="$HOME/.wtool/wtool-work-dir/links/shell/oh-my-zsh"
 check "oh-my-zsh 的 ZSH 指向中转链接" \
-      "WTCHK:$zsh_dir|1|1|1|$HOME/.wtool/links/terminal/fzf/bin/fzf" "$zout"
+      "WTCHK:$zsh_dir|1|1|1|$HOME/.wtool/wtool-work-dir/links/terminal/fzf/bin/fzf" "$zout"
 
 printf '\n  --- bash 里 fzf ---\n'
 # 必须用 -i：Ubuntu 默认 ~/.bashrc 开头有"非交互就直接 return"的守卫，
 # 非交互 bash 根本不会执行我们追加在末尾的块（这在真实机器上也是同样行为）
 bout=$(bash -i -c 'command -v fzf' 2>/dev/null | grep -o '/[^ ]*fzf' | tail -1 || true)
-check "bash 下 fzf 在 PATH" "$HOME/.wtool/links/terminal/fzf/bin/fzf" "$bout"
+check "bash 下 fzf 在 PATH" "$HOME/.wtool/wtool-work-dir/links/terminal/fzf/bin/fzf" "$bout"
 
 printf '\n  --- wtool doctor ---\n'
 wtool doctor | sed 's/^/    /'

@@ -19,7 +19,7 @@
 | 属性 | 必填 | 默认 | 说明 |
 |---|---|---|---|
 | `schema` | ✅ | — | 清单格式版本。当前只支持 `1`；未知值会被拒绝 |
-| `id` | 否 | 项目目录名 | 项目身份。出现在 `~/.wtool/links/<id>`、`$WTOOL_STATE/<id>/` 和 rc 块标记里，**改了必须重新 install** |
+| `id` | 否 | 项目目录名 | 项目身份。出现在 `~/.wtool/wtool-work-dir/links/<id>`、`$WTOOL_STATE/<id>/` 和 rc 块标记里，**改了必须重新 install** |
 | `priority` | 否 | `100` | 未显式声明 `priority` 的 `<env>` 继承它 |
 
 `id` 允许带 `/`（例如 `terminal/tmux`），会形成嵌套目录，不要用 `..` 或绝对路径。
@@ -52,7 +52,7 @@
 | 变量 | 值 |
 |---|---|
 | `WTOOL_PROJECT_ID` | 例如 `terminal/tmux` |
-| `WTOOL_PROJECT_DIR` | `$HOME/.wtool/links/<id>`（稳定中转链接） |
+| `WTOOL_PROJECT_DIR` | `$HOME/.wtool/wtool-work-dir/links/<id>`（稳定中转链接） |
 | `WTOOL_PROJECT_ROOT` | 仓库的真实路径 |
 
 约束：env 文件**只做导出/定义**，不要有副作用（不写文件、不启动进程、不打印）。它可能被 source 多次。
@@ -71,7 +71,7 @@
 链接的最终形态是两级：
 
 ```
-$HOME/.tmux.conf  ->  $HOME/.wtool/links/terminal/tmux/tmux.conf  ->  仓库真实文件
+$HOME/.tmux.conf  ->  $HOME/.wtool/wtool-work-dir/links/terminal/tmux/tmux.conf  ->  仓库真实文件
                        └── 稳定中转链接，指向仓库根
 ```
 
@@ -80,12 +80,12 @@ $HOME/.tmux.conf  ->  $HOME/.wtool/links/terminal/tmux/tmux.conf  ->  仓库真�
 ### 声明链接 vs 稳定地址
 
 `<link>` 只声明"应用去找的"链接（如 `~/.tmux.conf`）。
-`~/.wtool/links/<id>` 是引擎 install 时**自动创建**、指向整个项目根的"稳定地址"，**不要**在清单里声明。
+`~/.wtool/wtool-work-dir/links/<id>` 是引擎 install 时**自动创建**、指向整个项目根的"稳定地址"，**不要**在清单里声明。
 
 **项目内部文件互相引用时用稳定地址**，例如 `tmux.conf` 里引用 `bin/` 脚本：
 
 ```
-#($HOME/.wtool/links/terminal/tmux/bin/mem.sh)
+#($HOME/.wtool/wtool-work-dir/links/terminal/tmux/bin/mem.sh)
 ```
 
 不要用自定义 env 变量（如 `$WTOOL_TMUX_DIR`）——tmux 的 `#()` 执行时 `$HOME` 必然存在，
