@@ -2321,7 +2321,7 @@ case $_cmd in
                wt_refresh_downloads ;;
     refresh-downloads) wt_refresh_downloads ;;
     init)      cmd_init "$@" ;;
-    scaffold)  wt_warn "scaffold 已改名为 init，请用 wtool init"; cmd_init "$@" ;;
+    scaffold)  wt_die "scaffold 已删除（不是改名，是删掉）。新建项目用: wtool init <目录>" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;
     table)     wt_die "table 已经删掉：裸跑 wtool 就是项目表
