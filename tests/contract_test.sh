@@ -1,0 +1,394 @@
+#!/bin/sh
+# contract_test.sh —— 新契约的端到端验证
+#
+# 这一组守的是"改了会静默出事"的那几条：
+#   1. wtool.xml 新标签：<zshrc>/<bashrc>、三段 <link>、<sudo-install>
+#   2. 旧标签仍然认（过渡期），但要**警告**，不能静默
+#   3. <link> 是两跳：<项目>/x → ~/.wtool/x → ~/x（仓库搬家不断链）
+#   4. 执行顺序：install.sh（release/ → ~/.wtool）在前，XML 软链（影子 → $HOME）在后
+#   5. 有 build.sh/download.sh 就必须先有 release/（install 不替你编）
+#   6. ~/usr → ~/.wtool/usr 这条全局软链：有项目就活着，一个不剩就收走
+#   7. uninstall 拆软链前先问"还有别人要用吗"（判据是磁盘上的 wtool.xml）
+#   8. check / repair：只报不改 / 只重建不删除
+#   9. kill-self-forever：要逐字确认；删 wtool 的、不删别人的
+set -eu
+
+here=$(cd -- "$(dirname -- "$0")" && pwd)
+boot=$(dirname -- "$here")
+WT="$boot/wtool.sh"
+
+pass=0
+fail=0
+ok()   { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
+# 注意最后要 return 0：不然"只带一个参数的 bad"会让函数返回非 0，
+# 在 set -e 的脚本里直接终止整组测试（踩过）。
+bad()  { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"
+         if [ $# -gt 1 ]; then printf '      %s\n' "$2"; fi; return 0; }
+check() { [ "$2" = "$3" ] && ok "$1" || bad "$1" "期望 [$2]  实际 [$3]"; }
+chk()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "期望 [$3]  实际 [$2]"; }
+
+T=$(mktemp -d "${TMPDIR:-/tmp}/wtool-contract.XXXXXX")
+trap 'rm -rf -- "$T"' EXIT INT TERM
+
+newhome() {
+    H=$(mktemp -d "$T/home.XXXXXX")
+    mkdir -p "$H"
+    printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\n' > "$H/.zshrc"
+    # state 每个场景一份：共用一份的话，前面场景留下的 state 会让
+    # "还有没有项目装着"算错（~/usr 的生命周期那一场就是这么被坑的）
+    export WTOOL_HOME="$H" WTOOL_STATE="$H.state"
+    export WTOOL_ROOT="$T/ws"
+}
+mkproj() {   # <相对路径> <id>
+    d="$T/ws/$1"; mkdir -p "$d"
+    git -C "$d" init -q
+    echo "$d"
+}
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 1：新标签全用上（zshrc/bashrc + 三段 link + produced-by）==\n'
+newhome
+mkdir -p "$WTOOL_ROOT"
+P=$(mkproj "terminal/tmux" "terminal/tmux")
+printf 'set -g mouse on\n' > "$P/tmux.conf"
+printf 'export TMUX_MARK=1\n' > "$P/env.zsh"
+printf 'export TMUX_MARK=1\n' > "$P/env.bash"
+mkdir -p "$P/release" "$P/scripts"
+printf 'payload\n' > "$P/release/foo.conf"
+cat > "$P/scripts/install.sh" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--uninstall" ]; then
+    # 卸载时要**先**拆完 $HOME 软链才轮到脚本（§4.2 的 ②' → ①'）
+    if [ -e "$WTOOL_HOME/.tmux.conf" ] || [ -e "$WTOOL_HOME/.config/foo/foo.conf" ]; then
+        echo "links-still-there" > "$WTOOL_PROJECT_DIR/order-uninstall.txt"
+    else
+        echo "links-gone" > "$WTOOL_PROJECT_DIR/order-uninstall.txt"
+    fi
+    exit 0
+fi
+# 项目脚本按契约把 release/ 铺到影子 HOME（~/.wtool）
+mkdir -p "$WTOOL_HOME/.wtool/.config/foo"
+cp "$WTOOL_PROJECT_DIR/release/foo.conf" "$WTOOL_HOME/.wtool/.config/foo/foo.conf"
+# 顺手记一笔：这一刻 $HOME 里那条链**应该还不存在**（执行顺序见 §4.2）
+if [ -e "$WTOOL_HOME/.config/foo/foo.conf" ]; then
+    echo "link-existed-too-early" > "$WTOOL_PROJECT_DIR/order.txt"
+else
+    echo "link-not-yet" > "$WTOOL_PROJECT_DIR/order.txt"
+fi
+EOF
+cat > "$P/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="terminal/tmux" priority="50">
+  <zshrc  src="env.zsh"/>
+  <bashrc src="env.bash"/>
+  <link home="~/.tmux.conf" wtool="~/.wtool/.tmux.conf" subproject="tmux.conf"/>
+  <link home="~/.config/foo/foo.conf" wtool="~/.wtool/.config/foo/foo.conf"
+        produced-by="install.sh"/>
+</wtool>
+EOF
+git -C "$P" add -A && git -C "$P" -c user.name=t -c user.email=t@t commit -qm init
+
+_rc=0
+"$WT" validate "$P" > "$T/v1.log" 2>&1 || _rc=$?
+chk "新标签的清单 validate 通过" "$_rc" "0"
+"$WT" install "$P" > "$T/i1.log" 2>&1 || bad "install 执行" "$(cat "$T/i1.log")"
+
+# 两跳：项目文件 → ~/.wtool/.tmux.conf → ~/.tmux.conf
+check "中间那一跳指向项目文件" \
+    "$WTOOL_HOME/.wtool/wtool-work-dir/links/terminal/tmux/tmux.conf" \
+    "$(readlink "$WTOOL_HOME/.wtool/.tmux.conf" 2>/dev/null)"
+check "最后一跳指向影子 HOME" "$WTOOL_HOME/.wtool/.tmux.conf" \
+    "$(readlink "$WTOOL_HOME/.tmux.conf" 2>/dev/null)"
+[ -r "$WTOOL_HOME/.tmux.conf" ] && ok "两跳之后文件打得开（不是断链）" \
+    || bad "两跳之后是断链"
+check "顺着链读到内容" "set -g mouse on" "$(cat "$WTOOL_HOME/.tmux.conf" 2>/dev/null)"
+
+# produced-by：实体由 install.sh 铺，链由引擎铺，且**不悬空**
+check "produced-by 的链指向影子 HOME" \
+    "$WTOOL_HOME/.wtool/.config/foo/foo.conf" \
+    "$(readlink "$WTOOL_HOME/.config/foo/foo.conf" 2>/dev/null)"
+[ -r "$WTOOL_HOME/.config/foo/foo.conf" ] && ok "produced-by 的链不悬空（顺序对）" \
+    || bad "produced-by 的链悬空 —— 执行顺序反了"
+check "install.sh 跑的时候 \$HOME 里还没有那条链" "link-not-yet" \
+    "$(cat "$P/order.txt" 2>/dev/null)"
+
+# ~/usr 这条全局软链
+[ -L "$WTOOL_HOME/usr" ] && ok "~/usr 建出来了" || bad "~/usr 没建出来"
+check "~/usr 指向 ~/.wtool/usr" "$WTOOL_HOME/.wtool/usr" \
+    "$(readlink "$WTOOL_HOME/usr" 2>/dev/null)"
+
+# 新标签的路径也要幂等（两跳 + env.bash，重复 install 不该有任何变化）
+_snap1=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
+_rc1=$(cat "$WTOOL_HOME/.zshrc")
+"$WT" install "$P" > "$T/i1b.log" 2>&1 || bad "第二次 install 执行"
+_snap2=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
+check "第二次 install 不改变文件树" "$_snap1" "$_snap2"
+check "第二次 install 不改变 rc 内容" "$_rc1" "$(cat "$WTOOL_HOME/.zshrc")"
+grep -q '没有需要变更的内容' "$T/i1b.log" && ok "第二次 install 报无变更" \
+    || bad "第二次 install 没报无变更" "$(cat "$T/i1b.log")"
+
+# env 两份都进了汇总：汇总文件里放的是**块**（运行时 source 项目的 env 文件），
+# 不是把内容抄进去 —— 所以查的是块和它 source 的那一行
+grep -q 'wtool:terminal/tmux' "$WTOOL_HOME/.wtool/.zshrc" \
+    && ok "zshrc 的块进了汇总" || bad "zshrc 的块没进汇总"
+grep -q 'env.zsh' "$WTOOL_HOME/.wtool/.zshrc" \
+    && ok "zshrc 的块 source 的是 env.zsh" || bad "zshrc 的块 source 错了"
+grep -q 'env.bash' "$WTOOL_HOME/.wtool/.bashrc" \
+    && ok "bashrc 的块 source 的是 env.bash" || bad "bashrc 的块没进汇总"
+# 真 source 一遍：变量真的出来了才算数
+_got=$(env -i HOME="$WTOOL_HOME" sh -c '. "$HOME/.wtool/.zshrc"; printf "%s" "${TMUX_MARK:-}"')
+check "source 汇总文件后变量真的在" "1" "$_got"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 2：check / repair（只报不改 / 只重建不删除）==\n'
+_rc=0
+_out=$("$WT" check 2>&1) || _rc=$?
+chk "装完 check 干净（退出码 0）" "$_rc" "0"
+rm -f "$WTOOL_HOME/.tmux.conf"
+_rc=0
+_out=$("$WT" check 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "软链被删后 check 报出来（退出码非 0）" || bad "check 没报出来"
+case $_out in
+    *"不见了"*) ok "说清了是哪条不见了" ;;
+    *) bad "没说清" "$_out" ;;
+esac
+"$WT" repair > "$T/repair.log" 2>&1 || bad "repair 执行" "$(cat "$T/repair.log")"
+[ -L "$WTOOL_HOME/.tmux.conf" ] && ok "repair 把软链补回来了" || bad "repair 没补回来"
+check "补回来的链指向对" "$WTOOL_HOME/.wtool/.tmux.conf" \
+    "$(readlink "$WTOOL_HOME/.tmux.conf" 2>/dev/null)"
+# repair 不删除：往 $HOME 放一个自己的文件，repair 之后它还得在
+printf 'mine\n' > "$WTOOL_HOME/my-own-file"
+"$WT" repair > /dev/null 2>&1
+[ -f "$WTOOL_HOME/my-own-file" ] && ok "repair 不删用户的东西" || bad "repair 删了用户的东西"
+_rc=0
+"$WT" check > /dev/null 2>&1 || _rc=$?
+chk "repair 之后 check 又干净了" "$_rc" "0"
+
+# 场景 2b：卸载时**先拆 $HOME 软链，再跑 install.sh --uninstall**
+_rc=0
+"$WT" uninstall "$P" > "$T/u2b.log" 2>&1 || _rc=$?
+chk "uninstall 执行成功" "$_rc" "0"
+check "install.sh --uninstall 跑的时候 \$HOME 软链已经拆了" "links-gone" \
+    "$(cat "$P/order-uninstall.txt" 2>/dev/null)"
+[ -e "$WTOOL_HOME/.tmux.conf" ] && bad "卸载后链还在" || ok "卸载后链没了"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 3：有 build.sh 就必须先有 release/ ==\n'
+newhome
+mkdir -p "$WTOOL_ROOT"
+P2=$(mkproj "editor/buildme" "editor/buildme")
+mkdir -p "$P2/scripts"
+printf '#!/bin/sh\ntrue\n' > "$P2/scripts/build.sh"
+printf 'x\n' > "$P2/x.conf"
+cat > "$P2/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="editor/buildme" priority="50">
+  <link home="~/.x.conf" wtool="~/.wtool/.x.conf" subproject="x.conf"/>
+</wtool>
+EOF
+git -C "$P2" add -A && git -C "$P2" -c user.name=t -c user.email=t@t commit -qm init
+
+_rc=0
+"$WT" install "$P2" > "$T/i3.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "没有 release/ 时 install 拒绝" || bad "没有 release/ 居然装上了"
+grep -q 'release/ 是空的' "$T/i3.log" && ok "说清了要先 build/download" \
+    || bad "没说清原因" "$(cat "$T/i3.log")"
+grep -q 'wtool download' "$T/i3.log" && ok "给了可复制的命令" || bad "没给命令"
+mkdir -p "$P2/release"
+printf 'built\n' > "$P2/release/out.bin"
+"$WT" install "$P2" > "$T/i3b.log" 2>&1 || bad "有 release/ 之后 install 执行" "$(cat "$T/i3b.log")"
+[ -L "$WTOOL_HOME/.x.conf" ] && ok "有 release/ 之后就装上了" || bad "有 release/ 也没装上"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 4：uninstall 先问"还有别人要用吗" ==\n'
+newhome
+mkdir -p "$WTOOL_ROOT"
+A=$(mkproj "a/one" "a/one"); B=$(mkproj "b/two" "b/two")
+printf 'a\n' > "$A/shared.conf"; printf 'a\n' > "$A/only-a.conf"
+printf 'b\n' > "$B/shared.conf"
+cat > "$A/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="a/one" priority="50">
+  <link home="~/.shared.conf" wtool="~/.wtool/.shared.conf" subproject="shared.conf"/>
+  <link home="~/.only-a.conf" wtool="~/.wtool/.only-a.conf" subproject="only-a.conf"/>
+</wtool>
+EOF
+cat > "$B/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="b/two" priority="60">
+  <link home="~/.shared.conf" wtool="~/.wtool/.shared.conf" subproject="shared.conf"/>
+</wtool>
+EOF
+git -C "$A" add -A && git -C "$A" -c user.name=t -c user.email=t@t commit -qm init
+git -C "$B" add -A && git -C "$B" -c user.name=t -c user.email=t@t commit -qm init
+
+"$WT" install "$A" > /dev/null 2>&1 || bad "装 A"
+[ -L "$WTOOL_HOME/.shared.conf" ] && [ -L "$WTOOL_HOME/.only-a.conf" ] \
+    && ok "A 的两条链都在" || bad "A 的链没建全"
+
+# B 只在磁盘上声明（没装）—— 判据就是"磁盘上所有 wtool.xml"
+"$WT" uninstall "$A" > "$T/u4.log" 2>&1 || bad "卸 A" "$(cat "$T/u4.log")"
+[ -L "$WTOOL_HOME/.shared.conf" ] && ok "别人还要用的链被留下" \
+    || bad "把别人还要用的链删了"
+[ -e "$WTOOL_HOME/.only-a.conf" ] && bad "没人要的链没删掉" || ok "没人要的链被删掉"
+grep -q '保留' "$T/u4.log" && ok "说清了为什么保留" || bad "没说清保留原因"
+# 留下之后登记表也该改到 B 名下
+if [ -f "$WTOOL_STATE/registry.tsv" ]; then
+    check "登记改到 b/two 名下" "b/two" \
+        "$(awk -F'\t' -v d="$WTOOL_HOME/.shared.conf" '$1==d{print $2}' "$WTOOL_STATE/registry.tsv")"
+fi
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 5：~/usr 的生命周期（最后一个项目走了才收）==\n'
+newhome
+mkdir -p "$WTOOL_ROOT"
+C=$(mkproj "c/one" "c/one"); D=$(mkproj "d/two" "d/two")
+printf 'x\n' > "$C/C.conf"; printf 'y\n' > "$D/D.conf"
+for spec in "c/one C" "d/two D"; do
+    set -- $spec
+    cat > "$T/ws/$1/wtool.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="$1" priority="50">
+  <link home="~/.$2.conf" wtool="~/.wtool/.$2.conf" subproject="$2.conf"/>
+</wtool>
+EOF
+    git -C "$T/ws/$1" add -A && git -C "$T/ws/$1" -c user.name=t -c user.email=t@t commit -qm init
+done
+# 先放一个"编译产物"在影子 HOME 里：~/usr 收走时**只该删软链**
+mkdir -p "$WTOOL_HOME/.wtool/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/.wtool/usr/bin/x"
+"$WT" install "$C" > /dev/null 2>&1
+"$WT" install "$D" > /dev/null 2>&1
+[ -L "$WTOOL_HOME/usr" ] && ok "两个项目时 ~/usr 在" || bad "~/usr 不在"
+"$WT" uninstall "$C" > /dev/null 2>&1
+[ -L "$WTOOL_HOME/usr" ] && ok "还剩一个项目时 ~/usr 留着" || bad "提前把 ~/usr 收走了"
+"$WT" uninstall "$D" > /dev/null 2>&1
+[ -e "$WTOOL_HOME/usr" ] && bad "一个项目都不剩了 ~/usr 还在" || ok "最后一个项目走了 ~/usr 也收走"
+[ -d "$WTOOL_HOME/.wtool/usr" ] && ok "只删软链，影子 HOME 里的实体不动" \
+    || bad "把 ~/.wtool/usr 实体也删了"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 5b：uninstall all（按 state 的账，不按项目表）==\n'
+newhome
+mkdir -p "$WTOOL_ROOT"
+G=$(mkproj "g/one" "g/one"); Hh=$(mkproj "h/two" "h/two")
+printf 'g\n' > "$G/G.conf"; printf 'h\n' > "$Hh/H.conf"
+cat > "$G/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="g/one" priority="50">
+  <link home="~/.G.conf" wtool="~/.wtool/.G.conf" subproject="G.conf"/>
+</wtool>
+EOF
+cat > "$Hh/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="h/two" priority="60">
+  <link home="~/.H.conf" wtool="~/.wtool/.H.conf" subproject="H.conf"/>
+</wtool>
+EOF
+git -C "$G" add -A && git -C "$G" -c user.name=t -c user.email=t@t commit -qm init
+git -C "$Hh" add -A && git -C "$Hh" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" install "$G" > /dev/null 2>&1
+"$WT" install "$Hh" > /dev/null 2>&1
+# 项目目录先"消失"（模拟仓库被删）：all 照样要能卸掉
+mv "$Hh" "$Hh.gone"
+"$WT" uninstall all > "$T/ua.log" 2>&1 || bad "uninstall all 执行" "$(cat "$T/ua.log")"
+[ -e "$WTOOL_HOME/.G.conf" ] && bad "all 没卸掉 g/one" || ok "uninstall all 卸掉了 g/one"
+[ -e "$WTOOL_HOME/.H.conf" ] && bad "all 没卸掉 h/two（项目目录已不在）" \
+    || ok "项目目录不在也能卸（靠 state 的账）"
+[ -e "$WTOOL_HOME/usr" ] && bad "all 之后 ~/usr 还在" || ok "all 之后 ~/usr 收走了"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 6：kill-self-forever（要逐字确认；删 wtool 的、不删别人的）==\n'
+newhome
+mkdir -p "$WTOOL_ROOT"
+E=$(mkproj "e/one" "e/one")
+printf 'e\n' > "$E/e.conf"
+cat > "$E/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="e/one" priority="50">
+  <zshrc src="env.zsh"/>
+  <link home="~/.e.conf" wtool="~/.wtool/.e.conf" subproject="e.conf"/>
+</wtool>
+EOF
+printf 'export E=1\n' > "$E/env.zsh"
+git -C "$E" add -A && git -C "$E" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" install "$E" > /dev/null 2>&1
+mkdir -p "$WTOOL_HOME/.wtool/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/.wtool/usr/bin/e"
+printf '不是 wtool 的东西\n' > "$WTOOL_HOME/keepme"
+
+# 确认词不对 → 什么都不做
+_rc=0
+printf 'yes\n' | "$WT" kill-self-forever > "$T/kill1.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "确认词不对 → 拒绝执行" || bad "确认词不对还执行了"
+[ -L "$WTOOL_HOME/.e.conf" ] && ok "拒绝之后什么都没删" || bad "拒绝之后东西没了"
+grep -q 'KILL-SELF-FOREVER' "$T/kill1.log" && ok "提示了要输入什么" || bad "没提示确认词"
+grep -q '不删' "$T/kill1.log" && ok "列清了不删什么（sudo 装的、别人的）" || bad "没说清不删什么"
+
+_rc=0
+"$WT" kill-self-forever --yes > "$T/kill2.log" 2>&1 || _rc=$?
+chk "--yes 执行成功" "$_rc" "0"
+[ -e "$WTOOL_HOME/.wtool" ] && bad "~/.wtool 还在" || ok "~/.wtool 删干净了"
+[ -e "$WTOOL_HOME/.e.conf" ] && bad "软链还在" || ok "$HOME 里的软链删干净了"
+[ -e "$WTOOL_STATE" ] && bad "state 还在" || ok "state 也删了"
+grep -q 'wtool' "$WTOOL_HOME/.zshrc" && bad "rc 里的 loader 块还在" || ok "rc 里的 loader 块剥掉了"
+check "rc 回到用户原来的内容" \
+    "$(printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1')" \
+    "$(cat "$WTOOL_HOME/.zshrc")"
+[ -f "$WTOOL_HOME/keepme" ] && ok "不是 wtool 的东西一个字节没动" || bad "删了不属于它的文件"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 7：旧标签仍然认，但要警告（过渡期）==\n'
+newhome
+mkdir -p "$WTOOL_ROOT"
+F=$(mkproj "f/legacy" "f/legacy")
+printf 'f\n' > "$F/f.conf"
+cat > "$F/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="f/legacy" priority="50">
+  <env src="env.zsh" shells="zsh"/>
+  <link src="f.conf" dest=".f.conf"/>
+</wtool>
+EOF
+printf 'export F=1\n' > "$F/env.zsh"
+git -C "$F" add -A && git -C "$F" -c user.name=t -c user.email=t@t commit -qm init
+
+_rc=0
+_v=$("$WT" validate "$F" 2>&1) || _rc=$?
+chk "旧标签仍能通过校验" "$_rc" "0"
+case $_v in
+    *"旧写法"*) ok "validate 提示了旧写法该改" ;;
+    *) bad "validate 没提示旧写法" "$_v" ;;
+esac
+"$WT" install "$F" > /dev/null 2>&1 || bad "旧标签的清单装不上"
+[ -L "$WTOOL_HOME/.f.conf" ] && ok "旧标签照样铺出软链" || bad "旧标签没铺出软链"
+[ -L "$WTOOL_HOME/.wtool/.f.conf" ] && ok "旧标签也走两跳（中间那一跳在）" \
+    || bad "旧标签没走两跳"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 8：删掉的命令与改名的命令 ==\n'
+for _dead in env list table; do
+    _m=$("$WT" $_dead 2>&1 || true)
+    case $_m in
+        *已经删掉*) ok "$_dead 提示已删掉" ;;
+        *) bad "$_dead 没提示已删掉" "$_m" ;;
+    esac
+done
+_m=$("$WT" provision "$F" 2>&1 || true)
+case $_m in
+    *sudo-install*) ok "provision 指向了 sudo-install" ;;
+    *) bad "provision 没指向新名字" "$_m" ;;
+esac
+_m=$("$WT" sudo-install "$F" --with-system 2>&1 || true)
+case $_m in
+    *已经删掉*) ok "sudo-install --with-system 提示已删掉" ;;
+    *) bad "--with-system 没提示" "$_m" ;;
+esac
+_m=$("$WT" bootstrap --with-system 2>&1 || true)
+case $_m in
+    *sudo-bootstrap*) ok "bootstrap --with-system 指向 sudo-bootstrap" ;;
+    *) bad "bootstrap --with-system 没指向新命令" "$_m" ;;
+esac
+
+# --------------------------------------------------------------------------
+printf '\n----------------------------------------\n'
+printf 'contract_test: PASS %d  FAIL %d\n' "$pass" "$fail"
+[ "$fail" -eq 0 ] || exit 1

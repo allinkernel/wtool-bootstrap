@@ -15,7 +15,10 @@
 -->
 <wtool schema="1" id="bootstrap" priority="5">
 
-  <env src="env.zsh"  shells="zsh"  priority="5"/>
-  <env src="env.bash" shells="bash" priority="5"/>
+  <!-- shell 集成：两个 shell 各一份，内容等价。
+       priority=5 也写在这儿（priority 越小越早加载），保证后面所有项目
+       都能用到这些变量。 -->
+  <zshrc  src="env.zsh"  priority="5"/>
+  <bashrc src="env.bash" priority="5"/>
 
 </wtool>

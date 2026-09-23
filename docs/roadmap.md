@@ -106,8 +106,8 @@ flock "$WTOOL_STATE/.lock" wtool.sh install ...
 把 `wtool.sh` 软链成 `~/.local/bin/wtool`，支持：
 
 ```sh
-wtool install <目录>      wtool list      wtool status
-wtool doctor              wtool scaffold
+wtool install <目录>      wtool status    wtool doctor
+wtool check               wtool repair    wtool init
 ```
 
 前提：`~/.local/bin` 在 PATH 里。可以由某个项目的 `env` 负责（而不是在 install 里改 PATH）。
@@ -116,7 +116,7 @@ wtool doctor              wtool scaffold
 
 ## 7. 多 shell
 
-`shells="zsh,bash"` 已经能用。若要支持 fish / nu：
+现在是 `<zshrc src=/>` + `<bashrc src=/>` 两个标签各一份。若要支持 fish / nu：
 
 | shell | 注入方式 |
 |---|---|

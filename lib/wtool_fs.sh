@@ -216,11 +216,24 @@ wt_plan_exec() {
         case $_action in
             reg)
                 # 只登记，不改文件系统（软链已存在且正确时走这里）
-                wt_registry_set "$_dest" "$WTOOL_PROJECT_ID" "$_kind"
+                wt_registry_set "$_dest" "${WTOOL_PROJECT_ID:--}" "$_kind"
                 ;;
             link)
                 wt_link_create "$_dest" "$_source"
-                wt_registry_set "$_dest" "$WTOOL_PROJECT_ID" "$_kind"
+                wt_registry_set "$_dest" "${WTOOL_PROJECT_ID:--}" "$_kind"
+                ;;
+            regdel)
+                # 只清登记，不动磁盘（引擎自己造的东西收尾时用，如 ~/usr）
+                wt_registry_del "$_dest"
+                ;;
+            unlink)
+                # 引擎自己造的全局软链的收尾（~/usr）：只删**还指向原位**的那条，
+                # 实体一个字节都不动
+                if [ -L "$_dest" ] && { [ "$_source" = "-" ] \
+                     || [ "$(readlink -- "$_dest")" = "$_source" ]; }; then
+                    wt_run rm -f -- "$_dest"
+                    wt_registry_del "$_dest"
+                fi
                 ;;
             rc)
                 # 老版本写在用户 rc 里的块。现在只用于迁移清理，
@@ -276,6 +289,34 @@ wt_as_root() {
     fi
 }
 
+# --------------------------------------------------------------------------
+# 状态目录里的项目清单（给 `uninstall all` / `sudo-uninstall all` 用）
+#
+# 判据是文件而不是 registry：registry 只记软链，一个"只有 env 块、没有软链"
+# 的项目在它里面是空的；而从发布包解压出来的工作区可能连项目目录都没有了，
+# 只能靠 state 里剩下的账认得出来。
+# --------------------------------------------------------------------------
+wt_installed_ids() {   # 装过的（有 meta.tsv 或 journal.tsv）
+    [ -d "$WTOOL_STATE" ] || return 0
+    find "$WTOOL_STATE" -type f \( -name meta.tsv -o -name journal.tsv \) \
+        2>/dev/null | while IFS= read -r _ii_f; do
+        _ii_d=$(dirname -- "$_ii_f")
+        printf '%s\n' "${_ii_d#"$WTOOL_STATE"/}"
+    done | LC_ALL=C sort -u
+}
+
+wt_sudo_ids() {   # 跑过系统层的（有 system.tsv / apt.tsv / provisioned/ / system/）
+    [ -d "$WTOOL_STATE" ] || return 0
+    find "$WTOOL_STATE" \( -name system.tsv -o -name apt.tsv -o -name provisioned \
+         -o -name system \) 2>/dev/null | while IFS= read -r _si_p; do
+        case $_si_p in
+            *.tsv) _si_d=$(dirname -- "$_si_p") ;;
+            *)     _si_d=$(dirname -- "$_si_p") ;;
+        esac
+        printf '%s\n' "${_si_d#"$WTOOL_STATE"/}"
+    done | LC_ALL=C sort -u
+}
+
 # 从目标路径向上找到最近的存在祖先，判断当前用户能否写
 wt_can_write() {
     _p=$1
@@ -305,11 +346,40 @@ wt_sysfile_slug() {
     printf '%s' "$1" | sed 's|^/||; s|/|_|g'
 }
 
-# 写系统文件：备份 → 写入 → 记 journal
+# /etc 的改动**备份三份**（§3.3，冗余防不同场景的丢失）：
+#   1 原文件旁边：/etc/apt/sources.list.d/ubuntu.sources.wtool-orig
+#   2 /var/backups/wtool/<原始路径>        ← 要 root，非 root 时跳过并说明
+#   3 $WTOOL_STATE/<id>/system/<slug>/original
+# 三份各记 sha256，读取按 1→2→3 取第一份**校验通过**的；不一致要报出来，
+# 不许默默挑一份用。
+wt_sysfile_backups() {   # <dest> → 三份备份路径，按读取优先级
+    printf '%s.wtool-orig\n' "$1"
+    printf '/var/backups/wtool%s\n' "$1"
+    printf '%s\n' "$WTOOL_STATE/${WTOOL_PROJECT_ID:-_}/system/$(wt_sysfile_slug "$1")/original"
+}
+
+# 系统层的账单独记一份（system.tsv），**不跟 install 的 journal 混**：
+#   `wtool uninstall` 只删 install 的账（meta/journal/env），系统层的账留着，
+#   `wtool sudo-uninstall` 才有依据还原（两层永不互相调用，见 §0）。
+# 格式: mode \t dest \t 原始 sha256 \t 我们写的 sha256 \t desc
+wt_sysfile_record_add() {   # <mode> <dest> <orig_sha> <new_sha> <desc>
+    wt_dry && return 0
+    [ -n "${WTOOL_PROJECT_ID:-}" ] || return 0
+    _sr_dir="$WTOOL_STATE/$WTOOL_PROJECT_ID"
+    mkdir -p -- "$_sr_dir" 2>/dev/null || return 0
+    _sr_f="$_sr_dir/system.tsv"
+    if [ -f "$_sr_f" ]; then
+        awk -F'\t' -v d="$2" '$2 != d' "$_sr_f" > "$_sr_f.tmp.$$" \
+            && mv -f -- "$_sr_f.tmp.$$" "$_sr_f"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$_sr_f"
+}
+
+# 写系统文件：备份（三份）→ 写入 → 记账
 wt_sysfile_apply() {
     _mode=$1; _dest=$2; _content=$3; _sha=$4; _backup=$5; _desc=$6
-    _dir="$WTOOL_STATE/$WTOOL_PROJECT_ID/system/$(wt_sysfile_slug "$_dest")"
-    _orig="$_dir/original"
+    _slug=$(wt_sysfile_slug "$_dest")
+    _b3="$WTOOL_STATE/$WTOOL_PROJECT_ID/system/$_slug/original"
 
     if [ "$_mode" = disable ]; then
         if [ ! -e "$_dest" ]; then
@@ -318,23 +388,43 @@ wt_sysfile_apply() {
         fi
         wt_run wt_sysfile_run "$_dest" mv -- "$_dest" "$_dest.wtool-disabled"
         wt_journal_add sysfile disable "$_dest" "$_dest.wtool-disabled" "-"
+        wt_sysfile_record_add disable "$_dest" "-" "-" "$_desc"
         return 0
     fi
 
-    _bak="-"
+    _orig_sha=""
     if [ -e "$_dest" ]; then
-        if [ "$_backup" = yes ]; then
-            if wt_dry; then
-                wt_step "[dry-run] 备份 $_dest -> $_orig"
-            else
-                wt_ensure_dir "$_dir"
-                wt_sysfile_run "$_dest" cp -f -- "$_dest" "$_orig" || wt_die "备份失败: $_dest"
-                printf '%s\n' "$_dest" > "$_dir/dest"
-                _bak="$_orig"
+        _orig_sha=$(wt_sha256 "$_dest")
+    fi
+    if [ "$_backup" = yes ] && [ -e "$_dest" ]; then
+        if wt_dry; then
+            wt_step "[dry-run] 备份 $_dest（原文件旁边 / var-backups / state 三份）"
+        else
+            _bak_ok=""
+            # 第 3 份一定写得了（state 是我们的地盘）
+            wt_ensure_dir "$(dirname -- "$_b3")"
+            if wt_sysfile_run "$_dest" cp -f -- "$_dest" "$_b3" 2>/dev/null; then
+                _bak_ok="$_bak_ok state"
             fi
-        elif [ "$_mode" = add ]; then
-            wt_die "dest 已存在，且这条规则 backup=no / mode=add: $_dest"
+            # 第 1 份：原文件旁边（直写得了就写，写不了不勉强）
+            if wt_can_write "$_dest" && cp -f -- "$_dest" "$_dest.wtool-orig" 2>/dev/null; then
+                _bak_ok="$_bak_ok orig"
+            fi
+            # 第 2 份：/var/backups（**要 root**）。非 root 直接说明跳过，
+            # 不去碰 sudo —— 一个"顺手 sudo"的备份动作会变成密码提示。
+            if [ "$(id -u)" = 0 ]; then
+                mkdir -p -- "$(dirname -- "/var/backups/wtool$_dest")" 2>/dev/null \
+                    && cp -f -- "$_dest" "/var/backups/wtool$_dest" 2>/dev/null \
+                    && _bak_ok="$_bak_ok backups"
+            fi
+            wt_info "  备份:${_bak_ok:- 无}"
+            case $_bak_ok in
+                *backups*) ;;
+                *) wt_info "  （/var/backups 那一份要 root，这次跳过 —— 其余两份照常）" ;;
+            esac
         fi
+    elif [ "$_mode" = add ] && [ -e "$_dest" ]; then
+        wt_die "dest 已存在，且这条规则 backup=no / mode=add: $_dest"
     fi
 
     if wt_dry; then
@@ -346,37 +436,70 @@ wt_sysfile_apply() {
         wt_sysfile_run "$_dest" chmod 644 -- "$_tmp" 2>/dev/null || true
         wt_sysfile_run "$_dest" mv -f -- "$_tmp" "$_dest" || wt_die "替换失败: $_dest"
     fi
-    wt_journal_add sysfile "$_mode" "$_dest" "$_bak" "$_sha"
+    # journal 那一行留着做审计（§3.3：以后要审计靠 journal），
+    # 但还原的**依据**是 system.tsv —— 它不会被 uninstall 删掉。
+    wt_journal_add sysfile "$_mode" "$_dest" "$_b3" "$_sha"
+    wt_sysfile_record_add "$_mode" "$_dest" "${_orig_sha:--}" "$_sha" "$_desc"
 }
 
-# 还原系统文件（uninstall 时由 journal 触发）
-wt_sysfile_restore() {
-    _mode=$1; _dest=$2; _bak=$3; _sha=$4
-    case $_mode in
-        disable)
-            if [ -e "$_bak" ] && [ ! -e "$_dest" ]; then
-                wt_run wt_sysfile_run "$_dest" mv -- "$_bak" "$_dest"
-            fi
-            ;;
-        replace|add)
-            if [ -n "$_bak" ] && [ "$_bak" != "-" ] && [ -f "$_bak" ]; then
-                if wt_dry; then
-                    wt_step "[dry-run] 还原 $_dest"
-                else
-                    _tmp="$_dest.wtool.restore.$$"
-                    wt_sysfile_run "$_dest" cp -f -- "$_bak" "$_tmp" || wt_die "还原失败: $_dest"
-                    wt_sysfile_run "$_dest" mv -f -- "$_tmp" "$_dest"
-                fi
-            elif [ -f "$_dest" ]; then
-                _cur=$(sha256sum -- "$_dest" 2>/dev/null | cut -d' ' -f1)
-                if [ "$_cur" = "$_sha" ] || [ "${WTOOL_FORCE:-0}" = 1 ]; then
-                    wt_run wt_sysfile_run "$_dest" rm -f -- "$_dest"
-                else
-                    wt_warn "跳过（文件内容已被改动）: $_dest"
-                fi
-            fi
-            ;;
-    esac
+# 还原系统文件（sudo-uninstall 时由 system.tsv 触发）
+wt_sysfile_restore() {   # <mode> <dest> <orig_sha> <new_sha>
+    _mode=$1; _dest=$2; _orig_sha=$3; _new_sha=$4
+
+    if [ "$_mode" = disable ]; then
+        if [ -e "$_dest.wtool-disabled" ] && [ ! -e "$_dest" ]; then
+            wt_run wt_sysfile_run "$_dest" mv -- "$_dest.wtool-disabled" "$_dest"
+        fi
+        return 0
+    fi
+
+    _pick=""; _pick_sha=""
+    for _c in $(wt_sysfile_backups "$_dest"); do
+        [ -f "$_c" ] || continue
+        _cs=$(wt_sha256 "$_c")
+        if [ -z "$_pick" ]; then
+            _pick=$_c; _pick_sha=$_cs
+        fi
+        if [ -n "$_orig_sha" ] && [ "$_orig_sha" != "-" ] && [ "$_cs" = "$_orig_sha" ]; then
+            _pick=$_c; _pick_sha=$_cs
+            break
+        fi
+    done
+
+    if [ -n "$_pick" ]; then
+        if [ -n "$_orig_sha" ] && [ "$_orig_sha" != "-" ] && [ "$_pick_sha" != "$_orig_sha" ] \
+           && [ "${WTOOL_FORCE:-0}" != 1 ]; then
+            # 三份备份里没有一份和记录对得上 —— 报出来，不许默默挑一份用
+            wt_die "备份内容和记录对不上: $_dest
+  记录 sha256: $_orig_sha
+  找到的备份: $_pick（$_pick_sha）
+三份备份：$(wt_sysfile_backups "$_dest" | tr '\n' ' ')
+确认要用它还原就加 --force。"
+        fi
+        if wt_dry; then
+            wt_step "[dry-run] 还原 $_dest（来源 $_pick）"
+        else
+            _tmp="$_dest.wtool.restore.$$"
+            wt_sysfile_run "$_dest" cp -f -- "$_pick" "$_tmp" || wt_die "还原失败: $_dest"
+            wt_sysfile_run "$_dest" mv -f -- "$_tmp" "$_dest"
+        fi
+    elif [ -f "$_dest" ]; then
+        _cur=$(wt_sha256 "$_dest")
+        if [ "$_cur" = "$_new_sha" ] || [ "${WTOOL_FORCE:-0}" = 1 ]; then
+            wt_run wt_sysfile_run "$_dest" rm -f -- "$_dest"
+        else
+            wt_warn "跳过（文件内容已被改动）: $_dest"
+        fi
+    fi
+
+    # 三份全删：价值已经兑现（以后要审计靠 journal 里的文本记录）
+    for _c in $(wt_sysfile_backups "$_dest"); do
+        [ -e "$_c" ] || continue
+        case $_c in
+            /var/backups/*) [ "$(id -u)" = 0 ] && rm -f -- "$_c" 2>/dev/null || true ;;
+            *) rm -f -- "$_c" 2>/dev/null || true ;;
+        esac
+    done
 }
 
 # 判断"脏文件是否全部来自 overlay"（我们上次铺进去的那些）
@@ -564,83 +687,6 @@ wt_publish_can_push() {
     esac
 }
 
-# 打源码包：wt_pack_source <项目绝对路径> <输出文件> [额外目录 额外相对路径]
-# 给了额外参数就再往里塞一个成员（用来放 .wtool-dist/<id>.json 标记）。
-# 本机可用的打包压缩扩展名（没有 zstd 就 gz）。调用方据此决定资产名，
-# 保证"文件名里的扩展名"和"包里的实际内容"永远一致。
-wt_pack_ext() {
-    if command -v zstd >/dev/null 2>&1; then printf 'zst'
-    elif command -v gzip >/dev/null 2>&1; then printf 'gz'
-    else printf 'tar'
-    fi
-}
-
-# 打源码包：wt_pack_source <项目绝对路径> <输出文件> [额外目录 额外相对路径]
-# 给了额外参数就再往里塞一个成员（用来放 .wtool-dist/<id>.json 标记）。
-# 输出文件必须以 .tar.zst / .tar.gz / .tar 结尾，压缩器按扩展名选——
-# 绝不出现"名字叫 zst、内容其实是 gz"这种事。
-wt_pack_source() {
-    _wtpub_proj=$1; _wtpub_out=$2; _wtpub_extra_dir=${3:-}; _wtpub_extra_rel=${4:-}
-    _wtpub_prefix=${WTOOL_PUBLISH_PREFIX:-wtool}
-    _wtpub_rel=$(python3 -c 'import os,sys;print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])))' \
-               "$_wtpub_proj" "$WTOOL_ROOT") || wt_die "算不出 $_wtpub_proj 相对 $WTOOL_ROOT 的路径"
-    case "$_wtpub_rel" in
-        ..|../*|/*) wt_die "$_wtpub_proj 不在工作区 $WTOOL_ROOT 里，无法按 wtool/ 前缀打包" ;;
-    esac
-    [ -d "$WTOOL_ROOT/$_wtpub_rel" ] || wt_die "项目目录不存在: $WTOOL_ROOT/$_wtpub_rel"
-
-    # 有 .git 就用 HEAD 提交时间当 mtime，打出来的包可复现（同样的树 → 同样的字节）
-    _wtpub_mtime=""
-    if git -C "$_wtpub_proj" rev-parse --git-dir >/dev/null 2>&1; then
-        _wtpub_epoch=$(git -C "$_wtpub_proj" log -1 --format=%ct 2>/dev/null || true)
-        [ -n "$_wtpub_epoch" ] && _wtpub_mtime="--mtime=@$_wtpub_epoch"
-    fi
-
-    wt_ensure_dir "$(dirname -- "$_wtpub_out")"
-    if wt_dry; then
-        wt_step "[dry-run] 打包 $_wtpub_rel → $_wtpub_out（前缀 $_wtpub_prefix/）"
-        return 0
-    fi
-
-    _wtpub_tar="$_wtpub_out.tmp.$$.tar"
-    # --transform 结尾那个 S 不能少：默认情况下 GNU tar 会把变换同时应用到
-    # **符号链接的指向**上，于是包里的相对软链会被改写成
-    #   themes/foo.zsh-theme -> wtool/bar.zsh-theme
-    # 解压出来全是断链。S = 不要动符号链接的指向。
-    # （实测 oh-my-zsh 的 themes/*.zsh-theme 和 plugins/*/*.plugin.zsh 中招。）
-    # shellcheck disable=SC2086
-    tar -C "$WTOOL_ROOT" \
-        --transform="s|^|$_wtpub_prefix/|S" \
-        --sort=name --numeric-owner --owner=0 --group=0 $_wtpub_mtime \
-        --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
-        --exclude='.mypy_cache' --exclude='.pytest_cache' --exclude='.ruff_cache' \
-        --exclude='*.log' \
-        -cf "$_wtpub_tar" "$_wtpub_rel" || { rm -f "$_wtpub_tar"; wt_die "tar 打包失败: $_wtpub_rel"; }
-
-    if [ -n "$_wtpub_extra_dir" ] && [ -n "$_wtpub_extra_rel" ]; then
-        tar -C "$_wtpub_extra_dir" --transform="s|^|$_wtpub_prefix/|S" \
-            --sort=name --numeric-owner --owner=0 --group=0 \
-            -rf "$_wtpub_tar" "$_wtpub_extra_rel" \
-            || { rm -f "$_wtpub_tar"; wt_die "追加 $_wtpub_extra_rel 失败"; }
-    fi
-
-    # 压缩器按输出扩展名选。名字和内容必须一致：用户拿到 .tar.zst 就该能
-    # tar --zstd 解开，静默退化成 gzip 会让人以为包坏了。
-    case "$_wtpub_out" in
-        *.tar.zst) command -v zstd >/dev/null 2>&1 \
-                       || wt_die "输出名是 .tar.zst 但本机没有 zstd（装 zstd，或用 wt_pack_ext 取扩展名）"
-                   zstd -q -T0 -12 -f -o "$_wtpub_out" "$_wtpub_tar" \
-                       || { rm -f "$_wtpub_tar"; wt_die "zstd 压缩失败"; } ;;
-        *.tar.gz)  gzip -9 -c "$_wtpub_tar" > "$_wtpub_out" \
-                       || { rm -f "$_wtpub_tar"; wt_die "gzip 压缩失败"; } ;;
-        *.tar)     mv -f "$_wtpub_tar" "$_wtpub_out" ;;
-        *) wt_die "输出名必须以 .tar.zst / .tar.gz / .tar 结尾，实际: $_wtpub_out" ;;
-    esac
-    rm -f "$_wtpub_tar"
-    [ -s "$_wtpub_out" ] || wt_die "打出来的包是空的: $_wtpub_out"
-    wt_step "打包 $(wc -c < "$_wtpub_out" | tr -d ' ') 字节 → $(basename -- "$_wtpub_out")"
-}
-
 # 建 release（已存在就复用）
 wt_publish_gh_release() {
     _wtpub_repo=$1; _wtpub_tag=$2; _wtpub_title=$3; _wtpub_notes=$4
@@ -823,7 +869,7 @@ wt_env_sync() {
     wt_dry && return 0
     _es_scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-env.XXXXXX") || return 0
     if ! python3 "$PY" plan-env --home "$WTOOL_HOME" --state "$WTOOL_STATE" \
-            --scratch "$_es_scratch" >/dev/null 2>&1; then
+            --exclude "${1:-}" --scratch "$_es_scratch" >/dev/null 2>&1; then
         rm -rf -- "$_es_scratch"
         wt_warn "环境变量汇总失败，跳过（rc 里的块可能不同步）"
         return 0
@@ -874,5 +920,405 @@ wt_git_dirty() {   # <项目目录>
         case $_gd_f in *' -> '*) _gd_f=${_gd_f##* -> } ;; esac
         _gd_abs="$_gd_dir/$_gd_f"
         wt_generated_owns "$_gd_abs" || printf '%s\n' "$_gd_line"
+    done
+}
+
+
+# ==========================================================================
+# pack-release / unpack-release
+#
+# 分工：Python 只算"打哪些文件"（读 .gitignore 是文本逻辑，见 wtool_plan.py
+# 的 pack-plan），切卷、算 sha256、落盘全在这里做。
+#
+# 归档用 lib/wtool_zip.py（python3 zipfile）而不是系统的 zip 命令：
+# 这台机器上的 Info-ZIP **不设 UTF-8 名字标志**（实测 flag_bits=0），
+# 而归档名里有中文（源码.zip / release.zip），用别的工具解开就是乱码。
+# 它和 tar/gzip 一样只是个工具，由这一层调用、写调用方给的路径。
+# ==========================================================================
+WT_ZIP_TOOL="$here/lib/wtool_zip.py"
+
+wt_sha256() { sha256sum -- "$1" | cut -d' ' -f1; }
+wt_bytes()  { wc -c < "$1" | tr -d ' '; }
+
+# "32M" / "128M" / "1G" / 字节数 → 字节数
+wt_size_bytes() {
+    case $1 in
+        *[Kk]) printf '%s' $(( ${1%[Kk]} * 1024 )) ;;
+        *[Mm]) printf '%s' $(( ${1%[Mm]} * 1048576 )) ;;
+        *[Gg]) printf '%s' $(( ${1%[Gg]} * 1073741824 )) ;;
+        *)     printf '%s' "$1" ;;
+    esac
+}
+
+wt_hash_file() {   # <文件> → "sha256  名字"
+    printf '%s  %s\n' "$(wt_sha256 "$1")" "$(basename -- "$1")"
+}
+
+# 生成 zip。dry-run 时只报数，不产文件。
+# 多出来的参数原样转给 wtool_zip.py（--prefix= / --extra <abs> <arc>）。
+wt_zip_create() {   # <out.zip> <base-dir> <list-file> [--prefix=P] [--extra ...]
+    _zc_out=$1; _zc_base=$2; _zc_list=$3; shift 3
+    _zc_n=$(awk 'END{print NR}' "$_zc_list" 2>/dev/null || echo 0)
+    if wt_dry; then
+        wt_step "[dry-run] 打包 $(basename -- "$_zc_out")（$_zc_n 个文件）"
+        return 0
+    fi
+    python3 "$WT_ZIP_TOOL" create "$_zc_out" "$_zc_base" "$_zc_list" "$@" \
+        || wt_die "打包失败: $_zc_out"
+    wt_step "打包 $(basename -- "$_zc_out")（$_zc_n 个文件，$(wt_bytes "$_zc_out") 字节）"
+}
+
+# 解开一个包：zip 走 wtool_zip.py，tar.* 走 tar
+wt_unpack_one() {   # <包文件> <目标目录>
+    _uo_pkg=$1; _uo_dest=$2
+    case $_uo_pkg in
+        *.zip)  python3 "$WT_ZIP_TOOL" extract "$_uo_pkg" "$_uo_dest" \
+                    || wt_die "解包失败: $_uo_pkg" ;;
+        *.tar.zst) tar --zstd -xf "$_uo_pkg" -C "$_uo_dest" || wt_die "解包失败: $_uo_pkg" ;;
+        *.tar.gz|*.tgz) tar -xzf "$_uo_pkg" -C "$_uo_dest" || wt_die "解包失败: $_uo_pkg" ;;
+        *.tar)  tar -xf "$_uo_pkg" -C "$_uo_dest" || wt_die "解包失败: $_uo_pkg" ;;
+        *)      wt_warn "不认识的包格式，原样留着: $_uo_pkg" ;;
+    esac
+}
+
+# 打一个项目的发布包 → <项目>/publish/
+#   wt_pack_release <项目目录> <tag> <repo> <卷大小> <scratch> [<项目id>]
+wt_pack_release() {
+    _pk_dir=$1; _pk_tag=$2; _pk_repo=$3; _pk_vol=$4; _pk_scratch=$5; _pk_pid=${6:-}
+    _pk_pub="$_pk_dir/publish"
+
+    # 1) 算文件表：源码包读 .gitignore（**必须**，否则 GB 级 release/ 会被打进去），
+    #    release 包用 release/ 里的全部东西 + 声明面。
+    python3 "$PY" pack-plan "$_pk_dir" --scratch "$_pk_scratch" \
+        > "$_pk_scratch/pack.log" 2>&1 || {
+        cat -- "$_pk_scratch/pack.log" >&2
+        wt_die "算发布文件表失败: $_pk_dir"
+    }
+    _pk_declare=$(awk -F'\t' '{printf "%s%s", sep, $1; sep=","}' \
+                  "$_pk_scratch/declare.tsv" 2>/dev/null || true)
+    _pk_nsrc=$(awk 'END{print NR}' "$_pk_scratch/source.files" 2>/dev/null || echo 0)
+    _pk_nrel=$(awk 'END{print NR}' "$_pk_scratch/release.files" 2>/dev/null || echo 0)
+
+    if wt_dry; then
+        wt_step "[dry-run] 源码.zip  ← $_pk_nsrc 个文件（已按 .gitignore 过滤，永远排除 release/ publish/）"
+        wt_step "[dry-run] release.zip ← $_pk_nrel 个文件 + 声明面 ${_pk_declare:-（无）}"
+        wt_step "[dry-run] 写 $_pk_pub/：dist.json、源码-hash.txt、release-hash.txt、超 $_pk_vol 就切分卷"
+        wt_step "[dry-run] 写 $_pk_dir/scripts/downloads.sh 和 $_pk_dir/docs/download.md"
+        wt_step "[dry-run] 发布地址 https://github.com/$_pk_repo/releases/download/$_pk_tag/"
+        return 0
+    fi
+
+    if [ "$_pk_nrel" -le 0 ]; then
+        # 纯声明式项目（只有 wtool.xml + 配置，没有 build/download）本来就没有产物。
+        # 有 build.sh/download.sh 却拿不出 release/ 才是真错误 —— 那多半是
+        # 忘了 build/download，装出来的会是半成品。
+        if [ -f "$_pk_dir/scripts/build.sh" ] || [ -f "$_pk_dir/scripts/download.sh" ] \
+           || [ -f "$_pk_dir/build.sh" ] || [ -f "$_pk_dir/download.sh" ]; then
+            wt_die "release/ 里什么都没有 —— 先跑 wtool build 或 wtool download ${_pk_pid:-<项目>}"
+        fi
+        wt_info "没有 release/（这个项目没有产物）：release.zip 只带声明面"
+    fi
+
+    wt_run mkdir -p -- "$_pk_pub"
+    # 只清掉"这次会重新生成"的文件。publish/ 也可能是 unpack-release 的下载落点，
+    # 把用户下下来的东西删了是最难解释的那种事故。
+    rm -f -- "$_pk_pub/源码.zip" "$_pk_pub/release.zip" "$_pk_pub/dist.json" \
+             "$_pk_pub/源码-hash.txt" "$_pk_pub/release-hash.txt" 2>/dev/null || true
+    rm -f -- "$_pk_pub/源码.zip-vol"* "$_pk_pub/release.zip-vol"* 2>/dev/null || true
+
+    # 2) 两个包
+    #
+    # 源码包：第一层是 wtool/（**固定名，跟本机工作区目录叫什么无关**），
+    # 所以解压到工作区上一层得到的路径和 repo sync 完全一致；
+    # 再带上 .wtool-dist/<id>.json 标记 —— 解压副本没有 .git，
+    # 靠这个标记才认得出"这是 wtool 发布的副本"，head 也才有出处。
+    _pk_commit=$(git -C "$_pk_dir" rev-parse HEAD 2>/dev/null || echo "")
+    _pk_dirty=0
+    [ -n "$(git -C "$_pk_dir" status --porcelain 2>/dev/null)" ] && _pk_dirty=1
+    _pk_dashed=$(printf '%s' "$_pk_pid" | tr '/' '-')
+    wt_run mkdir -p -- "$_pk_scratch/dist/.wtool-dist"
+    cat > "$_pk_scratch/dist/.wtool-dist/$_pk_dashed.json" <<EOF
+{
+  "project": "$_pk_pid",
+  "repo": "$_pk_repo",
+  "commit": "$_pk_commit",
+  "dirty": $([ "$_pk_dirty" = 1 ] && echo true || echo false),
+  "packed_at": "$(wt_now)",
+  "view": "release",
+  "layout": "wtool/$_pk_pid"
+}
+EOF
+    # 包内第一层 = wtool/<项目在工作区里的相对路径>，解压到工作区上一层
+    # 得到的路径和 repo sync 完全一致（项目 id 和工作区路径大多相同，
+    # 但 id 是对外契约、可以自己写，所以这里按**真实相对路径**算）。
+    _pk_rel=$(python3 -c 'import os,sys
+print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])))' \
+              "$_pk_dir" "$WTOOL_ROOT" 2>/dev/null || echo "$_pk_pid")
+    case $_pk_rel in ..|../*|/*) _pk_rel=$_pk_pid ;; esac
+
+    if [ "$_pk_nsrc" -gt 0 ]; then
+        wt_zip_create "$_pk_pub/源码.zip" "$_pk_dir" "$_pk_scratch/source.files" \
+            --prefix="wtool/$_pk_rel/" \
+            --extra "$_pk_scratch/dist/.wtool-dist/$_pk_dashed.json" \
+                    "wtool/.wtool-dist/$_pk_dashed.json"
+        wt_hash_file "$_pk_pub/源码.zip" > "$_pk_pub/源码-hash.txt"
+    else
+        wt_warn "源码包是空的（.gitignore 是否把什么都排除了？），跳过"
+    fi
+
+    : > "$_pk_scratch/release.all"
+    cat -- "$_pk_scratch/release.files" >> "$_pk_scratch/release.all"
+    cut -f2 "$_pk_scratch/declare.tsv" >> "$_pk_scratch/release.all" 2>/dev/null || true
+    LC_ALL=C sort -u -o "$_pk_scratch/release.all" "$_pk_scratch/release.all"
+    wt_zip_create "$_pk_pub/release.zip" "$_pk_dir" "$_pk_scratch/release.all"
+    wt_hash_file "$_pk_pub/release.zip" > "$_pk_pub/release-hash.txt"
+
+    # 3) 分卷（大包传不上去：实测直连 ~237KB/s，几分钟断一次）
+    : > "$_pk_scratch/rows.tsv"
+    _pk_volbytes=$(wt_size_bytes "$_pk_vol")
+    for _pk_name in 源码.zip release.zip; do
+        [ -f "$_pk_pub/$_pk_name" ] || continue
+        _pk_b=$(wt_bytes "$_pk_pub/$_pk_name")
+        case $_pk_name in
+            源码.zip) _pk_role=source ;;
+            *)        _pk_role=release ;;
+        esac
+        printf '%s\t%s\t%s\t%s\t\n' "$_pk_name" "$(wt_sha256 "$_pk_pub/$_pk_name")" \
+            "$_pk_b" "$_pk_role" >> "$_pk_scratch/rows.tsv"
+        if [ "$_pk_b" -gt "$_pk_volbytes" ]; then
+            wt_info "  $_pk_name 有 $((_pk_b / 1048576))M，按 $_pk_vol 一卷切开"
+            split -b "$_pk_vol" -d -a 2 --numeric-suffixes=1 \
+                "$_pk_pub/$_pk_name" "$_pk_pub/$_pk_name-vol" || wt_die "切分卷失败: $_pk_name"
+            # 大文件本身不留在 publish/：它正是传不上去的那个。
+            # （留在 scratch 里，调用方的临时目录一删就没了）
+            mv -f -- "$_pk_pub/$_pk_name" "$_pk_scratch/$_pk_name"
+            for _pk_v in "$_pk_pub/$_pk_name"-vol*; do
+                printf '%s\t%s\t%s\tvolume\t%s\n' "$(basename -- "$_pk_v")" \
+                    "$(wt_sha256 "$_pk_v")" "$(wt_bytes "$_pk_v")" "$_pk_name" \
+                    >> "$_pk_scratch/rows.tsv"
+            done
+        fi
+    done
+
+    # 4) dist.json（每卷的名字 / sha256 / 大小，按顺序逐个声明）
+    python3 "$PY" write-dist --out "$_pk_scratch/dist.json" --rows "$_pk_scratch/rows.tsv" \
+        --project-id "$_pk_pid" --tag "$_pk_tag" --repo "$_pk_repo" \
+        --commit "$(git -C "$_pk_dir" rev-parse HEAD 2>/dev/null || echo -)" \
+        --at "$(wt_now)" --volume-size "$_pk_vol" --declare "$_pk_declare" \
+        || wt_die "写 dist.json 失败"
+    cp -f -- "$_pk_scratch/dist.json" "$_pk_pub/dist.json"
+
+    # 5) 两个给人/给脚本的文本（进 Git —— 不然下一台机器不知道最新一版在哪）
+    wt_run mkdir -p -- "$_pk_dir/scripts" "$_pk_dir/docs"
+    python3 "$PY" downloads-sh --rows "$_pk_scratch/rows.tsv" --tag "$_pk_tag" \
+        --repo "$_pk_repo" > "$_pk_scratch/downloads.sh" || wt_die "生成 downloads.sh 失败"
+    python3 "$PY" download-doc --rows "$_pk_scratch/rows.tsv" --tag "$_pk_tag" \
+        --repo "$_pk_repo" --project-id "$_pk_pid" --at "$(date +%Y-%m-%d)" \
+        > "$_pk_scratch/download.md" || wt_die "生成 download.md 失败"
+    cp -f -- "$_pk_scratch/downloads.sh" "$_pk_dir/scripts/downloads.sh"
+    cp -f -- "$_pk_scratch/download.md" "$_pk_dir/docs/download.md"
+    wt_generated_add "$_pk_dir/scripts/downloads.sh"
+    wt_generated_add "$_pk_dir/docs/download.md"
+
+    _pk_n=$(awk -F'\t' '$4=="volume"{v++; next} {n++} END{printf "%d 个文件 / %d 个分卷", n, v}' \
+            "$_pk_scratch/rows.tsv")
+    wt_info "发布包已生成: $_pk_pub（$_pk_n）"
+    wt_info "  该提交的（文本，进 Git，不然下一台机器不知道最新一版在哪）："
+    wt_info "    scripts/downloads.sh"
+    wt_info "    docs/download.md"
+    wt_info "  publish/ 是待上传目录（.gitignore 里，不进 Git）"
+}
+
+# 按 dist.json 校验分卷 → 拼接 → 解开到 <项目>/release/ 和项目根
+#   wt_unpack_release <项目目录> <scratch>
+wt_unpack_release() {
+    _ur_dir=$1; _ur_scratch=$2
+    _ur_pub="$_ur_dir/publish"
+    _ur_dist="$_ur_pub/dist.json"
+    [ -f "$_ur_dist" ] || wt_die "没有 $_ur_dist —— 把 dist.json 和所有分卷下到项目 publish/ 里"
+
+    python3 "$PY" read-dist "$_ur_dist" > "$_ur_scratch/dist.rows.tsv" \
+        || wt_die "读不了 dist.json: $_ur_dist"
+    _ur_rows="$_ur_scratch/dist.rows.tsv"
+    _ur_legacy=$(awk -F'\t' '$1=="meta" && $2=="legacy"{print 1}' "$_ur_rows")
+    _ur_comp=$(awk -F'\t' '$1=="meta" && $2=="compression"{print $3}' "$_ur_rows")
+    _ur_tmp="$_ur_scratch/unpack"
+
+    _ur_field() {   # <kind> <name> <列号>
+        awk -F'\t' -v k="$1" -v n="$2" -v c="$3" '$1==k && $2==n {print $c}' "$_ur_rows"
+    }
+
+    _ur_got=0
+    if [ "$_ur_legacy" != 1 ]; then
+        for _ur_name in $(awk -F'\t' '$1=="file"{print $2}' "$_ur_rows"); do
+            _ur_role=$(_ur_field file "$_ur_name" 5)
+            _ur_sha=$(_ur_field file "$_ur_name" 3)
+            _ur_vols=$(awk -F'\t' -v n="$_ur_name" '$1=="volume" && $5==n {print $2}' "$_ur_rows")
+            if [ -n "$_ur_vols" ]; then
+                # install 只消费 release.zip（§5）：源码包的分卷不全就跳过，
+                # 不是错误 —— 只下 release.zip 的机器完全合法。
+                _ur_lack=""
+                for _ur_v in $_ur_vols; do
+                    [ -f "$_ur_pub/$_ur_v" ] || { _ur_lack=$_ur_v; break; }
+                done
+                if [ -n "$_ur_lack" ]; then
+                    if [ "$_ur_role" = "source" ]; then
+                        wt_warn "源码包的分卷不全（缺 $_ur_lack），跳过 —— install 不需要它"
+                        continue
+                    fi
+                    wt_die "缺分卷: $_ur_pub/$_ur_lack"
+                fi
+                wt_run mkdir -p -- "$_ur_tmp"
+                _ur_out="$_ur_tmp/$_ur_name"
+                : > "$_ur_out"
+                _ur_k=0
+                for _ur_v in $_ur_vols; do
+                    _ur_exp=$(_ur_field volume "$_ur_v" 3)
+                    _ur_have=$(wt_sha256 "$_ur_pub/$_ur_v")
+                    [ "$_ur_have" = "$_ur_exp" ] || wt_die "分卷校验失败: $_ur_v
+  期望 sha256: $_ur_exp
+  实际 sha256: $_ur_have"
+                    cat -- "$_ur_pub/$_ur_v" >> "$_ur_out"
+                    _ur_k=$((_ur_k + 1))
+                done
+                wt_step "拼接 $_ur_k 卷 → $_ur_name"
+            else
+                _ur_out="$_ur_pub/$_ur_name"
+                if [ ! -f "$_ur_out" ]; then
+                    if [ "$_ur_role" = "source" ]; then
+                        wt_warn "源码包没下，跳过（install 只认 release.zip）: $_ur_name"
+                        continue
+                    fi
+                    wt_die "缺文件: $_ur_out（把 dist.json 和它一起下到 publish/）"
+                fi
+            fi
+            if [ -n "$_ur_sha" ] && [ "$_ur_sha" != "-" ]; then
+                _ur_have=$(wt_sha256 "$_ur_out")
+                [ "$_ur_have" = "$_ur_sha" ] || wt_die "$_ur_name 整体校验失败（下载不完整？）
+  期望 sha256: $_ur_sha
+  实际 sha256: $_ur_have"
+            fi
+            if [ "$_ur_role" = "source" ]; then
+                # 源码包只校验不铺开：install 只消费 release.zip，装东西的人不需要源码
+                wt_info "源码包校验通过（不铺开）: $_ur_name"
+                _ur_got=$((_ur_got + 1))
+                continue
+            fi
+            wt_info "解开 $_ur_name → $_ur_dir"
+            wt_run mkdir -p -- "$_ur_dir"
+            wt_unpack_one "$_ur_out" "$_ur_dir"
+            _ur_got=$((_ur_got + 1))
+        done
+    fi
+
+    # 老格式（astronvim 的 publish.sh 自己写的 dist.json）：只有 volumes + compression，
+    # 拼接 + 解压出来是一棵 tar。过渡路径，项目迁到 pack-release 之后就不走了。
+    if [ "$_ur_got" = 0 ] && [ -n "$(awk -F'\t' '$1=="volume"{print $2}' "$_ur_rows")" ]; then
+        wt_run mkdir -p -- "$_ur_tmp" "$_ur_dir/release"
+        _ur_out="$_ur_tmp/legacy.tar"
+        : > "$_ur_out"
+        for _ur_v in $(awk -F'\t' '$1=="volume"{print $2}' "$_ur_rows"); do
+            [ -f "$_ur_pub/$_ur_v" ] || wt_die "缺分卷: $_ur_pub/$_ur_v"
+            _ur_exp=$(_ur_field volume "$_ur_v" 3)
+            _ur_have=$(wt_sha256 "$_ur_pub/$_ur_v")
+            [ "$_ur_have" = "$_ur_exp" ] || wt_die "分卷校验失败: $_ur_v"
+            cat -- "$_ur_pub/$_ur_v" >> "$_ur_out"
+        done
+        wt_warn "这是老格式的 dist.json（没有 files 段）—— 按整棵 tar 解到 $_ur_dir/release/"
+        case $_ur_comp in
+            zstd) zstd -dc -- "$_ur_out" | tar -xf - -C "$_ur_dir/release" \
+                      || wt_die "解开老格式发布包失败" ;;
+            *)    gzip -dc -- "$_ur_out" | tar -xf - -C "$_ur_dir/release" \
+                      || wt_die "解开老格式发布包失败" ;;
+        esac
+        _ur_got=1
+    fi
+
+    [ "$_ur_got" -gt 0 ] || wt_die "dist.json 里没有可解的东西: $_ur_dist"
+    wt_info "unpack-release 完成（只校验 + 铺到 release/，不做安装）"
+    wt_info "  下一步: wtool install $_ur_dir"
+}
+
+
+# ==========================================================================
+# sudo-install：apt 差集（装了哪些包）——只记"这次新装进来的"
+#
+# sudo-uninstall 要能把包卸掉，可是 playbook / 脚本里装了什么引擎读不出来。
+# 做法：跑之前和跑之后各取一次已装包快照，差集就是这次的账。
+# 只删这次的账 —— 用户本来就在的包一个都不碰。
+# ==========================================================================
+wt_apt_snapshot() {   # 打印已装包名（一行一个）；没有 dpkg 就返回 1
+    command -v dpkg-query >/dev/null 2>&1 || return 1
+    dpkg-query -W -f='${Package}\n' 2>/dev/null | LC_ALL=C sort
+}
+
+wt_apt_record_new() {   # <项目id> <before文件> <after文件>
+    _ar_id=$1; _ar_before=$2; _ar_after=$3
+    wt_dry && return 0
+    [ -f "$_ar_before" ] && [ -f "$_ar_after" ] || return 0
+    _ar_new=$(LC_ALL=C comm -13 -- "$_ar_before" "$_ar_after" 2>/dev/null | sed '/^$/d' || true)
+    [ -n "$_ar_new" ] || return 0
+    mkdir -p -- "$WTOOL_STATE/$_ar_id" 2>/dev/null || return 0
+    printf '%s\n' "$_ar_new" | while IFS= read -r _ar_p; do
+        [ -n "$_ar_p" ] || continue
+        printf '%s\t%s\n' "$_ar_p" "$(date +%Y-%m-%dT%H:%M:%S%z)"
+    done >> "$WTOOL_STATE/$_ar_id/apt.tsv" 2>/dev/null || true
+    wt_info "记账：本次新装了 $(printf '%s\n' "$_ar_new" | awk 'END{print NR}') 个包（sudo-uninstall 会卸掉它们）"
+}
+
+wt_apt_remove_recorded() {   # <项目id>
+    _rr_id=$1
+    _rr_f="$WTOOL_STATE/$_rr_id/apt.tsv"
+    [ -s "$_rr_f" ] || return 0
+    _rr_pkgs=$(awk -F'\t' '{print $1}' "$_rr_f" | LC_ALL=C sort -u | tr '\n' ' ')
+    [ -n "$_rr_pkgs" ] || return 0
+    # WTOOL_APT_GET 是给测试用的桩：真环境永远是 apt-get
+    _rr_apt=${WTOOL_APT_GET:-apt-get}
+    if ! command -v "$_rr_apt" >/dev/null 2>&1; then
+        wt_warn "找不到 $_rr_apt，跳过 apt 卸载。这些包是 wtool 装进来的："
+        wt_warn "  $_rr_pkgs"
+        return 0
+    fi
+    wt_info "apt 卸载本次装进来的包: $_rr_pkgs"
+    # shellcheck disable=SC2086
+    wt_run wt_sysfile_run /etc "$_rr_apt" remove -y $_rr_pkgs \
+        || wt_warn "apt 卸载没成功（包名可能在别的发行版上不存在），请手工检查"
+}
+
+
+# ==========================================================================
+# kill-self-forever：删掉 wtool 的一切痕迹
+#
+# 分两类，界线**只有一条**：wtool 自己铺的（软链、~/.wtool、状态）删；
+# 系统层（apt 包、/etc）不删 —— 那是 sudo-uninstall 的事（不越权）。
+# ==========================================================================
+wt_kill_links() {   # 从 stdin 读 kill-plan 的输出，只删"还指向原位"的软链
+    while IFS='	' read -r _kl_kind _kl_dest _kl_target; do
+        [ -n "${_kl_kind:-}" ] || continue
+        case $_kl_kind in
+            link)
+                if [ -L "$_kl_dest" ]; then
+                    if [ "$_kl_target" = "-" ] \
+                       || [ "$(readlink -- "$_kl_dest")" = "$_kl_target" ]; then
+                        wt_run rm -f -- "$_kl_dest"
+                    else
+                        wt_warn "跳过（指向已变，可能是你自己的链）: $_kl_dest"
+                    fi
+                fi
+                ;;
+        esac
+    done
+}
+
+wt_kill_paths() {   # 从 stdin 读 kill-plan 的输出，删目录
+    while IFS='	' read -r _kp_kind _kp_dest _kp_target; do
+        [ -n "${_kp_kind:-}" ] || continue
+        case $_kp_kind in
+            dir)
+                if [ -e "$_kp_dest" ]; then
+                    wt_run rm -rf -- "$_kp_dest"
+                fi
+                ;;
+        esac
     done
 }

@@ -3,25 +3,26 @@
 wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软链与 shell 注入。
 
 ```sh
-# 在任意项目目录下
-./install.sh          # 建软链 + 往 ~/.zshrc 写受管块
-./uninstall.sh        # 完全回退
-```
+# 日常三条（一条铁律：要 sudo 的都叫 sudo-*）
+./wtool.sh sudo-install <项目>    # 系统层：/etc 下的文件、apt 包、要跑的脚本（可能要 sudo）
+./wtool.sh install      <项目>    # 用户层：release/ → ~/.wtool，再铺 $HOME 软链（永不 sudo）
+./wtool.sh uninstall    <项目>    # 撤销 install（不还原 /etc —— 那是 sudo-uninstall 的事）
 
-或直接驱动引擎：
+# 系统层
+./wtool.sh sudo-uninstall <项目>|all   # /etc 还原 + 卸掉这次装进来的 apt 包
+./wtool.sh sudo-bootstrap              # 所有项目的 sudo-install
 
-```sh
-# 可逆部分（软链 + rc 块，不需要 root）
-./wtool.sh install   ../terminal/tmux
-./wtool.sh uninstall ../terminal/tmux
+# 产物与发布
+./wtool.sh build|download <项目>|all   # 跑项目自己的 scripts/build.sh / download.sh
+./wtool.sh pack-release   <项目>       # → <项目>/publish/（源码.zip / release.zip / 分卷 / dist.json）
+./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 release/
+./wtool.sh publish        [<项目>]     # pack-release + 上传（有 scripts/publish.sh 的走那个脚本）
 
-# 不可逆部分（换源 / 装包 / 编译，与 install 分离）
-./wtool.sh provision ../os/ubuntu --with-system
-./wtool.sh bootstrap                 # 全工作区按 priority 依次 provision + install
-
-# 其它
-./wtool.sh list | status | doctor | env | scaffold | validate
-./tests/run_all.sh                   # 27 + 22 条断言
+# 一次装好 / 出问题
+./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
+./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
+./wtool.sh status | doctor | validate | init | kill-self-forever
+./tests/run_all.sh                    # 7 组 / 266 条断言
 ```
 
 ---
@@ -35,10 +36,10 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 | 路径 | 作用 |
 |---|---|
 | `wtool.sh` | CLI 入口 |
-| `lib/wtool_plan.py` | 规划器：解析 `wtool.xml`、校验、计算 rc 新内容（只写 scratch） |
-| `lib/wtool_fs.sh` | 执行器：软链、原子写、journal、registry（唯一写 `$HOME` 的地方） |
-| `templates/stub.sh` | 项目存根模板（`install.sh`/`uninstall.sh` 都是它的副本） |
-| `tests/pairing_test.sh` | 7 组场景 / 17 条断言，全在临时 `$HOME` 里跑 |
+| `lib/wtool_plan.py` | 规划器：解析 `wtool.xml`、校验、算 rc 新内容、算发布文件表（只写 scratch） |
+| `lib/wtool_fs.sh` | 执行器：软链、原子写、journal、registry、打包/解包（唯一写 `$HOME` 的地方） |
+| `lib/wtool_zip.py` | 打包工具：zip 的读写（中文名要 UTF-8 标志，系统的 zip 不设） |
+| `tests/` | 7 组断言：pairing / sudo-install / publish / table / release-copy / release / contract |
 | `docs/spec.md` | **接口契约**（改代码前先看） |
 | `docs/manifest-schema.md` | `wtool.xml` 完整字段表 |
 | `docs/roadmap.md` | 未来方向与预留设计 |
@@ -83,9 +84,29 @@ wtool doctor
 
 ## 当前状态
 
-引擎 `1.0.0`，schema `1`。已实现 install / uninstall / list / status / doctor / scaffold / validate / `--dry-run` / `--force`，以及 bootstrap 自举（长期环境变量 + `wtool` 命令）。
+引擎 `1.0.0`，schema `1`。
 
-已实现 `provision` 层：`<system-file>`（换源，含备份/还原）、`<source>`（wsw.sh 编译型项目）、
-`<provision>`（Ansible / shell 任务，带幂等 marker）、`wtool bootstrap`。
+**已实现**：`install` / `uninstall` / `sudo-install` / `sudo-uninstall` / `sudo-bootstrap` /
+`bootstrap` / `build` / `download` / `pack-release` / `unpack-release` / `publish` /
+`check` / `repair` / `status` / `doctor` / `validate` / `init` / `kill-self-forever` /
+`version`，加 `--dry-run` / `--force`。
 
-**未实现**（见 `docs/roadmap.md`）：`--prune`、`--exact`、并发锁、fish 支持。
+**已经删掉的命令**（都会给出"现在该用什么"）：
+
+| 删掉的 | 现在用什么 |
+|---|---|
+| `provision` | `sudo-install`（`--with-system` 一并删掉） |
+| `table` | 裸跑 `wtool` |
+| `list` | `wtool status`（登记表并进去了） |
+| `env` | `wtool doctor`（`doctor --quiet` 只输出 export 行） |
+
+**已经删掉的标签**：`<publish>` / `<sub>` / `<target>`（能力由文件声明：有
+`scripts/publish.sh` 就是脚本型发布）。旧标签（`<env>` / `<link src= dest=>` /
+`<provision>` / `<system-file>` / `<publish>`）在**过渡期仍然认**，但 `wtool validate`
+和每次解析都会警告 —— 等项目都迁到新标签（`<zshrc>` / `<bashrc>` / 三段 `<link>` /
+`<sudo-install>`）就删掉兼容分支。
+
+**还没做**（见 `harness/notes/00-architecture.md` 的 🚧 与 `docs/roadmap.md`）：
+`/var/backups/wtool` 那一份备份需要 root（非 root 时跳过并说明）、
+`check --json`、`publish` 的目标系统矩阵（`<target>` 随 `<publish>` 一起删了，
+现在由项目自己的 `scripts/publish.sh` 决定）、`--prune`、`--exact`、并发锁、fish 支持。

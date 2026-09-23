@@ -255,19 +255,29 @@ fi
 rm -rf "$h"
 
 # --------------------------------------------------------------------------
-printf '\n== 场景 10：wtool env 在干净 shell 里 eval 后可用 ==\n'
+printf '\n== 场景 10：wtool doctor 在干净 shell 里 eval 后可用 ==\n'
+# `wtool env` 已经删掉，并进了 `wtool doctor`（2026-09）：
+# 不带参数是环境诊断，带 --quiet/--json 时**只**输出 export 行，好让 eval 直接用。
 got=$(env -i HOME="$HOME" PATH=/usr/bin:/bin sh -c \
-    "eval \"\$('$boot/wtool.sh' env)\"; printf '%s|%s|%s' \
+    "eval \"\$('$boot/wtool.sh' doctor --quiet)\"; printf '%s|%s|%s' \
      \"\$WTOOL_PREFIX\" \"\$WTOOL_OS_ID\" \"\$(command -v wtool)\"")
 check "eval 后 PREFIX/OS_ID/wtool 命令都可用" \
       "$HOME/.wtool/usr|ubuntu|$boot/bin/wtool" "$got"
 got2=$(env -i HOME="$HOME" PATH=/usr/bin:/bin sh -c \
-    "eval \"\$('$boot/wtool.sh' env --quiet)\"; printf '%s' \"\$WTOOL_JOBS\"")
+    "eval \"\$('$boot/wtool.sh' doctor --quiet)\"; printf '%s' \"\$WTOOL_JOBS\"")
 [ -n "$got2" ] && ok "--quiet 只输出 export 行且 WTOOL_JOBS 非空" \
               || bad "--quiet 只输出 export 行且 WTOOL_JOBS 非空"
-got3=$("$boot/wtool.sh" env --json | python3 -c \
+got3=$("$boot/wtool.sh" doctor --json | python3 -c \
     'import json,sys; print(json.load(sys.stdin)["WTOOL_OS_ID"])' 2>/dev/null)
 check "--json 可被程序解析" "ubuntu" "$got3"
+# 删掉的三个命令要给出"现在该用什么"，而不是一句"未知命令"
+for _dead in env list table; do
+    _msg=$("$boot/wtool.sh" $_dead 2>&1 || true)
+    case $_msg in
+        *已经删掉*) ok "$_dead 提示已删掉并指向替代命令" ;;
+        *) bad "$_dead 提示已删掉并指向替代命令" "$_msg" ;;
+    esac
+done
 
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'

@@ -3,18 +3,20 @@
 #
 # 全程用打桩的 gh：不碰网络、不碰真 $WTOOL_STATE、不碰 $HOME。
 # 验证点：
-#   1. 源码包第一层固定是 wtool/，解压后路径与 repo sync 一致
-#   2. 包里不含 .git
-#   3. 包里带 .wtool-dist/<id>.json（解压副本免 --force + 有 head 可溯源）
-#   4. kind="none" 的项目（nvim，第三方上游仓）不被发布
-#   5. kind="script" 的项目调项目内脚本，脚本产出啥就传啥
-#   6. 项目的 remote 名字是 github（repo 客户端）时也能找到目标仓
-#   7. 本地记录 publish.tsv
+#   1. 没有 publish.sh 的项目走 pack-release：源码.zip 里第一层是项目路径
+#      （解压到工作区即与 repo sync 一致），包里不含 .git
+#   2. 相对软链在包里还是软链（不是拷成实体），指向没被改写
+#   3. kind="none" 的项目（nvim，第三方上游仓）不被发布
+#   4. 有 scripts/publish.sh 的项目调那个脚本，脚本产出啥就传啥
+#   5. 项目的 remote 名字是 github（repo 客户端）时也能找到目标仓
+#   6. 本地记录 publish.tsv
+#   7. pack-release 写出的 scripts/downloads.sh / docs/download.md 是文本、进 Git
 set -eu
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 WS=$(cd -- "$here/../.." && pwd)
 WT="$WS/bootstrap/wtool.sh"
+WT_ZIP="$WS/bootstrap/lib/wtool_zip.py"
 
 pass=0; fail=0
 ok()   { pass=$((pass + 1)); printf '  ok   %s\n' "$*"; }
@@ -40,7 +42,9 @@ chmod +x "$T/bin/gh"
 
 # 安静一点：python 别刷 ResourceWarning，解包别刷 tar 的错误
 py() { python3 -W ignore "$@"; }
-# 按文件内容选解压器，别假设扩展名
+# 解发布包：源码包/发布包现在是 zip（wtool_zip.py 打的，中文名带 UTF-8 标志）
+unzip_to() { python3 -W ignore "$WT_ZIP" extract "$1" "$2"; }
+# 按文件内容选解压器，别假设扩展名（老的 tar 包也还能解）
 untar() {
     case $(file -b -- "$1") in
         *Zstandard*) zstd -dc -- "$1" | tar -xf - -C "$2" ;;
@@ -99,15 +103,13 @@ PATH="$T/bin:$PATH" WTOOL_ROOT="$WS1" WTOOL_STATE="$T/state" \
     "$WT" publish terminal/tmux --out="$T/out" > "$T/log1" 2>&1 || {
     bad "publish 退出码非 0"; sed 's/^/     /' "$T/log1"; }
 
-PKG=$(ls "$T/out"/terminal-tmux-*.tar.* 2>/dev/null | head -1)
-if [ -f "$PKG" ]; then ok "产出了源码包 $(basename "$PKG")"; else bad "没产出源码包"; fi
+PKG="$T/out/源码.zip"
+if [ -f "$PKG" ]; then ok "产出了源码包 源码.zip"; else bad "没产出源码包"; fi
 
 if [ -f "$PKG" ]; then
-    LIST=$(case $(file -b -- "$PKG") in
-               *Zstandard*) zstd -dc -- "$PKG" | tar -tf - ;;
-               *gzip*)      gzip -dc -- "$PKG" | tar -tf - ;;
-               *)           tar -tf "$PKG" ;;
-           esac)
+    LIST=$(py -c 'import sys,zipfile
+z=zipfile.ZipFile(sys.argv[1])
+print("\n".join(z.namelist()))' "$PKG")
     echo "$LIST" > "$T/list.txt"
 
     # 1) 第一层固定 wtool/
@@ -131,7 +133,7 @@ if [ -f "$PKG" ]; then
     MARK=$(printf '%s\n' "$LIST" | grep '^wtool/\.wtool-dist/' || true)
     chk "带一个 .wtool-dist 标记" "$(printf '%s\n' "$MARK" | grep -c . || true)" "1"
     mkdir -p "$T/out/x"
-    untar "$PKG" "$T/out/x"
+    unzip_to "$PKG" "$T/out/x"
     MJ="$T/out/x/wtool/.wtool-dist/terminal-tmux.json"
     if [ -f "$MJ" ]; then
         ok "标记文件能解出来"
@@ -149,7 +151,8 @@ grep -q 'release create snapshot-.* --repo allinkernel/wtool-tmux-config' "$T/gh
     && ok "对项目自己的仓建了 release" || { bad "没建 release"; sed 's/^/     /' "$T/gh.log"; }
 grep -q 'release upload .* --repo allinkernel/wtool-tmux-config' "$T/gh.log" \
     && ok "上传到同一个仓" || bad "没上传"
-grep -qE '\.tar\.(zst|gz)' "$T/gh.log" && ok "传的是 tar 包" || bad "传的不是 tar 包"
+grep -q '源码.zip' "$T/gh.log" && ok "上传了源码.zip（pack-release 的产物）" \
+    || bad "没上传源码.zip"
 
 echo "== 3. 本地记录 =="
 REC="$T/state/terminal/tmux/publish.tsv"
@@ -385,13 +388,12 @@ PATH="$T/bin:$PATH" WTOOL_ROOT="$FS5" WTOOL_STATE="$T/state9" \
     "$WT" publish lnk --out="$T/out9" > "$T/log9" 2>&1 || _rc=$?
 chk "发布成功" "$_rc" "0"
 
-LPKG=$(ls "$T/out9"/*.tar.* 2>/dev/null | head -1)
+# 新契约：pack-release 打的是 <项目>/publish/源码.zip，包内第一层是项目路径
+# 注意别用 `ls *.zip | head -1`：中文名排在 release.zip 后面，会挑错包。
+LPKG="$T/out9/源码.zip"
+[ -f "$LPKG" ] || LPKG="$T/ws5/lnk/publish/源码.zip"
 mkdir -p "$T/x9"
-case $(file -b -- "$LPKG") in
-    *Zstandard*) zstd -dc -- "$LPKG" | tar -xf - -C "$T/x9" ;;
-    *gzip*)      gzip -dc -- "$LPKG" | tar -xf - -C "$T/x9" ;;
-    *)           tar -xf "$LPKG" -C "$T/x9" ;;
-esac
+python3 "$WT_ZIP" extract "$LPKG" "$T/x9" || true
 
 B="$T/x9/wtool/lnk"
 chk "相对软链的指向没被改写" "$(readlink "$B/themes/alias.zsh-theme")" "real.zsh-theme"

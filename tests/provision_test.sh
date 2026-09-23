@@ -1,5 +1,9 @@
 #!/bin/sh
-# provision 层自测：system-file（换源）/ source（wsw.sh 编译型）/ task
+# sudo-install 层自测：系统文件（换源等）/ source（wsw.sh 编译型）/ task
+#
+# 2026-09 改名：`provision` → `sudo-install`，`--with-system` 删掉
+# （sudo-install 本来就是系统层）。**/etc 的还原归 sudo-uninstall** ——
+# `wtool uninstall` 不越权，一个字都不动系统文件。这两条都在下面守着。
 # 全程在临时目录里跑，不碰真实 $HOME、不碰 /etc、不需要 root。
 set -eu
 
@@ -50,18 +54,22 @@ cat > "$p/wtool.xml" <<EOF
 EOF
 commit "$p"
 
-# 第一次故意不加 --with-system：应当被跳过
-"$boot/wtool.sh" provision "$p" > "$H/p1.log" 2>&1 || bad "provision 执行" "$(cat "$H/p1.log")"
-check "未加 --with-system 时不动系统" "原来的源" "$(cat "$sys/test.sources")"
-grep -q '跳过系统文件' "$H/p1.log" && ok "提示了需要 --with-system" \
-    || bad "提示了需要 --with-system" "$(cat "$H/p1.log")"
-
-"$boot/wtool.sh" provision "$p" --with-system > "$H/p1b.log" 2>&1 || bad "provision --with-system" "$(cat "$H/p1b.log")"
-check "加 --with-system 后写入新内容" \
+# 现在的标签是 <sudo-install .../>（一个标签覆盖那三类内容）
+"$boot/wtool.sh" sudo-install "$p" > "$H/p1.log" 2>&1 || bad "sudo-install 执行" "$(cat "$H/p1.log")"
+check "sudo-install 写入系统文件（不再需要 --with-system）" \
       "$(printf 'Types: deb\nURIs: https://mirrors.ustc.edu.cn/ubuntu/')" "$(cat "$sys/test.sources")"
 
+# --with-system 已经删掉：给了要说清去哪了，不能静默忽略
+_w=$("$boot/wtool.sh" sudo-install "$p" --with-system 2>&1 || true)
+case $_w in *已经删掉*) ok "--with-system 提示已删掉" ;; *) bad "--with-system 提示已删掉" "$_w" ;; esac
+
+# install 不碰系统层；uninstall 也不还原 /etc（不越权）
 "$boot/wtool.sh" uninstall "$p" > "$H/u1.log" 2>&1 || bad "uninstall" "$(cat "$H/u1.log")"
-check "uninstall 后从备份还原" "原来的源" "$(cat "$sys/test.sources")"
+check "uninstall 不还原 /etc（那是 sudo-uninstall 的事）" \
+      "$(printf 'Types: deb\nURIs: https://mirrors.ustc.edu.cn/ubuntu/')" "$(cat "$sys/test.sources")"
+
+"$boot/wtool.sh" sudo-uninstall "$p" > "$H/su1.log" 2>&1 || bad "sudo-uninstall" "$(cat "$H/su1.log")"
+check "sudo-uninstall 从备份还原" "原来的源" "$(cat "$sys/test.sources")"
 rm -rf "$H"
 
 # --------------------------------------------------------------------------
@@ -78,11 +86,11 @@ cat > "$p/wtool.xml" <<EOF
 </wtool>
 EOF
 commit "$p"
-"$boot/wtool.sh" provision "$p" --with-system > /dev/null 2>&1 || true
+"$boot/wtool.sh" sudo-install "$p" > /dev/null 2>&1 || true
 [ -f "$sys/extra.sources" ] && ok "新文件已创建" || bad "新文件已创建"
-"$boot/wtool.sh" uninstall "$p" > /dev/null 2>&1 || true
-[ ! -f "$sys/extra.sources" ] && ok "卸载后文件被删除（原本不存在）" \
-    || bad "卸载后文件被删除（原本不存在）" "$(cat "$sys/extra.sources" 2>/dev/null)"
+"$boot/wtool.sh" sudo-uninstall "$p" > /dev/null 2>&1 || true
+[ ! -f "$sys/extra.sources" ] && ok "sudo-uninstall 后文件被删除（原本不存在）" \
+    || bad "sudo-uninstall 后文件被删除（原本不存在）" "$(cat "$sys/extra.sources" 2>/dev/null)"
 rm -rf "$H"
 
 # --------------------------------------------------------------------------
@@ -99,11 +107,11 @@ cat > "$p/wtool.xml" <<EOF
 </wtool>
 EOF
 commit "$p"
-"$boot/wtool.sh" provision "$p" --with-system > /dev/null 2>&1 || true
+"$boot/wtool.sh" sudo-install "$p" > /dev/null 2>&1 || true
 [ ! -e "$sys/ubuntu.sources" ] && [ -e "$sys/ubuntu.sources.wtool-disabled" ] \
     && ok "官方源已改名禁用" || bad "官方源已改名禁用" "$(ls "$sys")"
-"$boot/wtool.sh" uninstall "$p" > /dev/null 2>&1 || true
-[ -e "$sys/ubuntu.sources" ] && ok "卸载后改回原名" || bad "卸载后改回原名" "$(ls "$sys")"
+"$boot/wtool.sh" sudo-uninstall "$p" > /dev/null 2>&1 || true
+[ -e "$sys/ubuntu.sources" ] && ok "sudo-uninstall 后改回原名" || bad "sudo-uninstall 后改回原名" "$(ls "$sys")"
 rm -rf "$H"
 
 # --------------------------------------------------------------------------
@@ -120,7 +128,7 @@ cat > "$p/wtool.xml" <<EOF
 </wtool>
 EOF
 commit "$p"
-"$boot/wtool.sh" provision "$p" --with-system > "$H/p4.log" 2>&1 \
+"$boot/wtool.sh" sudo-install "$p" > "$H/p4.log" 2>&1 \
     || bad "kind=apt-mirror 执行" "$(cat "$H/p4.log")"
 got=$(cat "$sys/ubuntu.sources")
 case $got in
@@ -161,7 +169,7 @@ cat > "$p/wtool.xml" <<EOF
 EOF
 commit "$p"
 
-"$boot/wtool.sh" provision "$p" > "$H/p5.log" 2>&1 || bad "source+task 执行" "$(cat "$H/p5.log")"
+"$boot/wtool.sh" sudo-install "$p" > "$H/p5.log" 2>&1 || bad "source+task 执行" "$(cat "$H/p5.log")"
 srcdir="$H/src/test"
 check "源码已 clone 到指定目录" "v1" "$(cat "$srcdir/file.txt")"
 check "已切到固定 ref" "v1.0" "$(git -C "$srcdir" describe --tags --abbrev=0 2>/dev/null)"
@@ -174,9 +182,9 @@ check "任务拿到了 WTOOL_SOURCE_REF" "v1.0" "$(cat "$H/prefix/ref.txt" 2>/de
 
 # 第二次：marker 命中应跳过任务
 rm -f "$H/prefix/built.txt"
-"$boot/wtool.sh" provision "$p" > "$H/p5b.log" 2>&1
-grep -q '已装过' "$H/p5b.log" && ok "第二次 provision 跳过任务" \
-    || bad "第二次 provision 跳过任务" "$(cat "$H/p5b.log")"
+"$boot/wtool.sh" sudo-install "$p" > "$H/p5b.log" 2>&1
+grep -q '已装过' "$H/p5b.log" && ok "第二次 sudo-install 跳过任务" \
+    || bad "第二次 sudo-install 跳过任务" "$(cat "$H/p5b.log")"
 [ ! -f "$H/prefix/built.txt" ] && ok "任务确实没重跑" || bad "任务确实没重跑"
 rm -rf "$H"
 
@@ -197,7 +205,7 @@ cat > "$p/wtool.xml" <<EOF
 </wtool>
 EOF
 commit "$p"
-"$boot/wtool.sh" provision "$p" --with-system --dry-run > "$H/p6.log" 2>&1 \
+"$boot/wtool.sh" sudo-install "$p" --dry-run > "$H/p6.log" 2>&1 \
     || bad "dry-run 执行" "$(cat "$H/p6.log")"
 check "dry-run 不动系统文件" "原始" "$(cat "$sys/x.conf")"
 [ ! -d "$H/src/dry" ] && ok "dry-run 不 clone 源码" || bad "dry-run 不 clone 源码"

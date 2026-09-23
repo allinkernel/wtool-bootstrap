@@ -1,29 +1,46 @@
 #!/bin/sh
 # wtool —— wtool 集合的引擎（唯一一份，住在 wtool-bootstrap 里）
 #
-#   wtool.sh build     [<项目>...|all] [--dry-run]  跑项目自己的 scripts/build.sh
-#   wtool.sh download  [<项目>...|all] [--dry-run]  跑 scripts/download.sh
-#                      用发布页上现成的包代替自己编；产物落在和 build 相同的位置
-#   wtool.sh install   <项目目录> [--dry-run] [--force] [--no-script]
-#                      wtool.xml 的 link/rc 铺完之后，再跑项目自己的 install.sh
-#   wtool.sh uninstall <项目目录> [--dry-run] [--force] [--no-script]
-#   wtool.sh uninstall --id <项目id> [--dry-run] [--force] [--no-script]
-#   wtool.sh provision <项目目录> [--dry-run] [--force] [--with-system]
-#   wtool.sh publish   [<项目>...] [--tag=TAG] [--dry-run] [--force]
-#                      源码包发布到项目自己的 release；kind="script" 的项目
-#                      走项目内 publish.sh。不带参数则发布所有声明过的项目。
-#   wtool.sh bootstrap [--with-system|--no-system|--install-only|--dry-run|--force]
-#   wtool.sh status    [<项目目录>]
-#   wtool.sh table     [--verbose] [--summary]
-#                      一行一个项目、一列一个能力；不带参数跑 wtool 也是这个
-#   wtool.sh list
-#   wtool.sh validate  <项目目录>
-#   wtool.sh doctor
-#   wtool.sh env       [--quiet|--json]   输出可用的环境变量（带中文说明）
-#   wtool.sh init      <目录> [--id ID] [--priority N] [--all]
-#                      新建一个 wtool 项目（生成 wtool.xml + 可选脚本模板）
-#   wtool.sh version
+#   ── 日常三条 ───────────────────────────────────────────────
+#   wtool sudo-install <项目>... [--dry-run] [--force]
+#                      系统层：/etc 下的文件 + 要跑的脚本/playbook + apt 包。
+#                      **可能要 sudo、要联网**；和 install 永不互相调用
+#   wtool install      <项目目录> [--dry-run] [--force] [--no-script]
+#                      用户层：项目 install.sh（release/ → ~/.wtool）→
+#                      wtool.xml 的 link（影子 HOME → $HOME）。**永不 sudo、永不联网**
+#   wtool uninstall    <项目目录>|--id <id> [--dry-run] [--force] [--no-script]
+#                      撤销上一条（不还原 /etc —— 那是 sudo-uninstall 的事）
 #
+#   ── 系统层 ─────────────────────────────────────────────────
+#   wtool sudo-uninstall <项目>...|all    撤系统层：/etc 还原 + 卸掉这次装的 apt 包
+#   wtool sudo-bootstrap [--dry-run]      所有项目的 sudo-install
+#
+#   ── 产物与发布 ─────────────────────────────────────────────
+#   wtool build     [<项目>...|all] [--dry-run]   跑项目自己的 scripts/build.sh
+#   wtool download  [<项目>...|all] [--dry-run]   跑 scripts/download.sh
+#   wtool pack-release   <项目>... [--tag=T] [--repo=owner/repo] [--volume-size=32M]
+#                       打包到 <项目>/publish/：源码.zip、release.zip（大的切分卷）、
+#                       dist.json、两个 -hash.txt，另写 scripts/downloads.sh + docs/download.md
+#   wtool unpack-release <项目>... [--from=目录]
+#                       照 dist.json 校验每卷 sha256 → 拼接 → 解到 release/
+#   wtool publish   [<项目>...] [--tag=TAG] [--dry-run] [--force]
+#                       pack-release + 上传；有 scripts/publish.sh 的项目走那个脚本
+#
+#   ── 一次装好 ───────────────────────────────────────────────
+#   wtool bootstrap [--dry-run] [--force]   所有项目 install（**不做系统层**）
+#
+#   ── 出问题 ─────────────────────────────────────────────────
+#   wtool                 裸跑 = 项目表（一行一个项目、一列一个能力）
+#   wtool check   [<项目>]        声明 / 日志 / 磁盘 三者对比，只报不改
+#   wtool repair  [<项目>|all]    修 check 报出来的（只重建、不删除）
+#   wtool status  [<项目目录>]    登记表 + 软链检查
+#   wtool doctor                  环境诊断（含环境变量与项目表）
+#   wtool validate <项目目录>     检查 wtool.xml 写得对不对
+#   wtool init    <目录> [--id ID] [--priority N] [--all]
+#   wtool kill-self-forever       删掉 wtool 的一切痕迹（含 state；要逐字确认）
+#   wtool version
+#
+# 一条铁律：**要 sudo 的都叫 sudo-\*；不叫 sudo-\* 的永远不要 sudo，也永远不碰网络。**
 # 设计原则：Python 只算不写（除 scratch），Shell 只写不算（除读 journal）。
 # 详见 docs/spec.md。
 set -eu
@@ -51,7 +68,8 @@ WTOOL_SRC=${WTOOL_SRC:-$WTOOL_HOME/.wtool/src}
 WTOOL_PREFIX=${WTOOL_PREFIX:-$WTOOL_HOME/.wtool/usr}
 WTOOL_FORCE=0
 WTOOL_DRY_RUN=0
-WTOOL_WITH_SYSTEM=0
+# 注意：`--with-system` 已经删掉（sudo-install 本来就是系统层），
+# 所以这里没有 WTOOL_WITH_SYSTEM 这个开关了。
 
 . "$here/lib/wtool_fs.sh"
 . "$here/lib/wtool_os.sh"
@@ -208,8 +226,12 @@ wt_print_plan() {
 # 为什么裸命令不等于 all：`wtool install` 误触一次就往 $HOME 里铺一堆东西，
 # 而"我想看看有哪些项目"是高频得多的操作。默认安全，要动手就明写。
 # --------------------------------------------------------------------------
-wt_all_projects() {   # <过滤条件>：build | download | install | publish | 空=全部
+wt_all_projects() {   # <过滤条件>：build | download | install | publish | sudo | 空=全部
     _ap_filter=$1
+    _ap_sudo=""
+    if [ "$_ap_filter" = "sudo" ]; then
+        _ap_sudo=$(python3 "$PY" sudo-list --root "$WTOOL_ROOT" | cut -f2)
+    fi
     python3 "$PY" publish-list --root "$WTOOL_ROOT" |
     while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
         [ -n "${_pid:-}" ] || continue
@@ -217,6 +239,7 @@ wt_all_projects() {   # <过滤条件>：build | download | install | publish | 
             build)    wt_project_script "$_path" build.sh    >/dev/null 2>&1 || continue ;;
             download) wt_project_script "$_path" download.sh >/dev/null 2>&1 || continue ;;
             publish)  [ "$_kind" = "none" ] && continue ;;
+            sudo)     printf '%s\n' "$_ap_sudo" | grep -qxF -- "$_pid" || continue ;;
             install)  ;;
         esac
         printf '%s\n' "$_pid"
@@ -548,6 +571,23 @@ cmd_install() {
 
     wt_git_precheck "$_project"
 
+    # 产物检查（§4.1）：项目里有 build.sh 或 download.sh ⟺ 装之前 release/ 得在。
+    # 理由：install 是**断网也要能跑**的，所以它不替你去编译或下载 ——
+    # 但也不能装作没事，那样装出来的是半成品。
+    if wt_project_script "$_project" build.sh >/dev/null 2>&1 \
+       || wt_project_script "$_project" download.sh >/dev/null 2>&1; then
+        if [ -z "$(ls -A -- "$_project/release" 2>/dev/null)" ]; then
+            if [ "${WTOOL_FORCE:-0}" = 1 ]; then
+                wt_warn "release/ 还没有东西（--force 继续），装出来的可能不完整"
+            else
+                wt_die "$_project 要先产出产物（release/ 是空的）：
+  wtool download $_project      # 用发布页上现成的包（要联网）
+  wtool build    $_project      # 或者自己编（可能要几十分钟）
+install 不替你做这个决定 —— 它永不联网。"
+            fi
+        fi
+    fi
+
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
 
@@ -560,7 +600,25 @@ cmd_install() {
     wt_load_project "$_scratch"
     wt_info "project: $WTOOL_PROJECT_ID"
     wt_print_plan "$_scratch/plan.tsv"
+    wt_print_plan "$_scratch/plan.home.tsv"
+
+    # 执行顺序（§4.2，和以前相反，别改回去）：
+    #   ① 引擎基建：中转链接 + env 块
+    #   ① 项目自己的 install.sh：release/ → ~/.wtool
+    #   ② wtool.xml 的 link：影子 HOME → $HOME
+    # ②建的软链**指向**①铺出来的东西，顺序反了就是先建一堆悬空链接。
     wt_plan_exec "$_scratch/plan.tsv"
+
+    # ⚠️ 正因为引擎会跑 install.sh，**项目里不能再放"调用 wtool install"的存根**，
+    #    那会变成 install.sh → wtool install → install.sh 的无限递归。
+    if [ "$_no_script" = 1 ]; then
+        wt_info "跳过项目自己的 install.sh（--no-script）"
+    elif wt_project_script "$_project" install.sh >/dev/null; then
+        wt_info "项目脚本: install.sh（release/ → ~/.wtool）"
+        wt_run_project_script "$_project" install.sh || wt_die "install.sh 失败: $WTOOL_PROJECT_ID"
+    fi
+
+    wt_plan_exec "$_scratch/plan.home.tsv"
 
     if ! wt_dry; then
         cp -f -- "$_scratch/meta.tsv" "$WTOOL_META"
@@ -568,23 +626,8 @@ cmd_install() {
         printf 'engine\t%s\n' "$ENGINE_VERSION" >> "$WTOOL_META"
     fi
 
-    # 项目自己的 install.sh 在这之后跑：
-    #   1) wtool.xml 的 link/rc 是通用机制，先铺好，脚本才能依赖
-    #      ~/.wtool/wtool-work-dir/links/<id> 这个稳定地址；
-    #   2) 项目特有的安装步骤（编好的东西怎么摆、shell 集成怎么加）
-    #      只有项目自己知道，交给脚本。
-    #
-    # ⚠️ 正因为引擎会跑 install.sh，**项目里不能再放"调用 wtool install"的存根**，
-    #    那会变成 install.sh → wtool install → install.sh 的无限递归。
-    #    存根已经全部删除；需要自定义安装的项目才提供 install.sh。
-    if [ "$_no_script" = 1 ]; then
-        wt_info "跳过项目自己的 install.sh（--no-script）"
-    elif wt_project_script "$_project" install.sh >/dev/null; then
-        wt_info "项目脚本: install.sh"
-        wt_run_project_script "$_project" install.sh || wt_die "install.sh 失败: $WTOOL_PROJECT_ID"
-    fi
-
-    # 全量重算环境变量汇总（用户的 rc 里始终只有一个 loader 块）
+    # 全量重算环境变量汇总（用户的 rc 里始终只有一个 loader 块），
+    # 顺带保证 ~/usr → ~/.wtool/usr 这条全局软链在（§8）。
     wt_env_sync
 
     wt_info "install 完成"
@@ -607,7 +650,33 @@ cmd_uninstall() {
         esac
         shift
     done
-    [ -n "$_project" ] || [ -n "$_id" ] || wt_die "用法: wtool.sh uninstall <项目目录>|--id <id>"
+    [ -n "$_project" ] || [ -n "$_id" ] || wt_die "用法: wtool uninstall <项目目录>|--id <id>|all [--dry-run] [--force] [--no-script]"
+
+    # `all` = 卸掉所有装过的项目（判据是 state 里的账，不是项目表：
+    # 项目目录可能已经不在磁盘上了，那种情况正好靠 --id 也卸得掉）。
+    if [ "$_project" = "all" ]; then
+        _all_ids=$(wt_installed_ids)
+        if [ -z "$_all_ids" ]; then
+            wt_info "没有装过的项目（state 是空的）"
+            return 0
+        fi
+        wt_info "卸掉所有装过的项目："
+        for _ai in $_all_ids; do
+            wt_step "$_ai"
+        done
+        _rc_all=0
+        for _ai in $_all_ids; do
+            _force_all=""
+            [ "${WTOOL_FORCE:-0}" = 1 ] && _force_all="--force"
+            [ "${WTOOL_DRY_RUN:-0}" = 1 ] && _force_all="$_force_all --dry-run"
+            _noscript_all=""
+            [ "${WTOOL_NO_SCRIPT:-0}" = 1 ] && _noscript_all="--no-script"
+            # shellcheck disable=SC2086
+            cmd_uninstall --id "$_ai" $_force_all $_noscript_all || _rc_all=1
+        done
+        [ "$_rc_all" = 0 ] && wt_info "uninstall all 完成" || wt_warn "有些项目没卸干净"
+        return $_rc_all
+    fi
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
@@ -626,27 +695,13 @@ cmd_uninstall() {
     wt_load_project "$_scratch"
     wt_info "project: $WTOOL_PROJECT_ID"
 
-    # 0) 先让项目自己撤。
-    #
-    # 这一步原来是**缺的**：install 会跑项目自己的 install.sh，
-    # uninstall 却只逆放引擎自己的 journal —— 而项目脚本装的东西
-    # （编译产物、下载的包、铺到 $HOME 的配置）不在那本 journal 里。
-    # 结果 `wtool uninstall` 跑得"成功"，东西一个没少。
-    # 实测 astronvim_v5：plan 出来 actions: 0。
-    #
-    # 必须**先于** journal 逆放：项目脚本删的是实体（大件），
-    # 引擎删的是软链和状态。反过来软链先没了，项目脚本可能就找不到自己装的东西。
-    if [ "${WTOOL_NO_SCRIPT:-0}" != 1 ] \
-       && wt_project_script "$WTOOL_PROJECT_ROOT" install.sh >/dev/null 2>&1; then
-        wt_info "项目脚本: install.sh --uninstall"
-        if ! wt_run_project_script "$WTOOL_PROJECT_ROOT" install.sh --uninstall; then
-            if [ "${WTOOL_FORCE:-0}" = 1 ]; then
-                wt_warn "  install.sh --uninstall 失败（--force 继续）"
-            else
-                wt_die "install.sh --uninstall 失败；加 --force 强行继续"
-            fi
-        fi
-    fi
+    # 0) 拆 $HOME 软链之前先问一句：**还有别的项目要这条软链吗？**
+    #    判据是磁盘上所有 wtool 项目的 wtool.xml（§4.2），不是 registry ——
+    #    registry 一条落点只能有一个主人，而"两个项目都要 ~/.gitconfig"
+    #    是完全合理的。有别人要用就留着，把登记改成那个项目。
+    _claims=$(mktemp "${TMPDIR:-/tmp}/wtool-claims.XXXXXX")
+    python3 "$PY" claimed --root "$WTOOL_ROOT" --home "$WTOOL_HOME" \
+        --exclude-id "$WTOOL_PROJECT_ID" > "$_claims" 2>/dev/null || : > "$_claims"
 
     # 1) rc 回退（内容由 py 算好，sh 只负责落盘）
     while IFS='	' read -r _action _kind _dest _source _sha _extra; do
@@ -672,14 +727,21 @@ cmd_uninstall() {
         fi
     fi
 
-    # 2) 逆序回放 journal
+    # 2) 逆序回放 journal（安装时引擎做过什么，这里逆着做）
     if [ -f "$WTOOL_JOURNAL" ]; then
         wt_journal_reverse | while IFS='	' read -r _action _kind _dest _target _sha; do
             [ -z "${_action:-}" ] && continue
             case $_action in
                 link)
-                    wt_link_remove "$_dest" "$_target"
-                    wt_registry_del "$_dest"
+                    _other=$(awk -F'\t' -v d="$_dest" '$1 == d {print $2; exit}' "$_claims" 2>/dev/null || true)
+                    if [ -n "$_other" ]; then
+                        # 还有别人要用：软链留着，登记改到那个项目名下
+                        wt_info "保留 $_dest（项目 $_other 也声明了它）"
+                        wt_registry_set "$_dest" "$_other" "$_kind"
+                    else
+                        wt_link_remove "$_dest" "$_target"
+                        wt_registry_del "$_dest"
+                    fi
                     ;;
                 mkdir)
                     wt_remove_dir_if_empty "$_dest"
@@ -692,8 +754,8 @@ cmd_uninstall() {
                 rc) : ;;   # 已由上面的 rc 回退处理
                 rccreate) : ;;   # 由第 5 步的全局收尾处理
                 sysfile)
-                    # system-file 是可逆的：从备份还原（可能需要 root）
-                    wt_sysfile_restore "$_kind" "$_dest" "$_target" "$_sha"
+                    # 系统文件是 sudo-install 的地盘，这里**不动**它：
+                    # uninstall 不越权（不还原 /etc，那是 sudo-uninstall 的事）
                     ;;
                 srcdir)
                     # 源码树是构建缓存：清干净就删（有未提交改动则保留）
@@ -707,6 +769,25 @@ cmd_uninstall() {
                     ;;
             esac
         done
+    fi
+    rm -f -- "$_claims"
+
+    # 3) 最后才让项目自己撤（§4.2：②' 拆 $HOME 软链 → ①' install.sh --uninstall）。
+    #
+    # 这一步原来在**最前面**，顺序是反的：项目脚本撤的是实体（大件），
+    # 引擎拆的是指向那些实体的软链 —— 反过来的话，脚本可能已经找不到
+    # 自己装的东西了。而且 install 现在是"先脚本后软链"，uninstall 逆着来
+    # 才叫配对。
+    if [ "${WTOOL_NO_SCRIPT:-0}" != 1 ] \
+       && wt_project_script "$WTOOL_PROJECT_ROOT" install.sh >/dev/null 2>&1; then
+        wt_info "项目脚本: install.sh --uninstall"
+        if ! wt_run_project_script "$WTOOL_PROJECT_ROOT" install.sh --uninstall; then
+            if [ "${WTOOL_FORCE:-0}" = 1 ]; then
+                wt_warn "  install.sh --uninstall 失败（--force 继续）"
+            else
+                wt_die "install.sh --uninstall 失败；加 --force 强行继续"
+            fi
+        fi
     fi
 
     # 4) 清理引擎自己的空目录
@@ -724,7 +805,9 @@ cmd_uninstall() {
     # 4.5) 重算环境变量汇总。必须在第 5 步之前：
     #      最后一个项目卸载完时，汇总文件要消失、loader 块要从 rc 里剥掉，
     #      剥完 rc 才可能变成空文件，第 5 步才有东西可删。
-    wt_env_sync
+    #      把"正在撤的这个项目"排除掉 —— 它的 state 目录到第 6 步才删，
+    #      不排除的话 ~/usr 这条全局软链永远等不到"一个项目都不剩"。
+    wt_env_sync "$WTOOL_PROJECT_ID"
 
     # 5) 收尾：当初由 wtool 创建的 rc 文件，如果现在已经空了就删掉
     #    （必须放在最后：只有最后一个项目卸载完，共享的 ~/.zshrc 才会变空）
@@ -748,9 +831,15 @@ cmd_uninstall() {
         fi
     fi
 
-    # 6) 清理状态目录（连带清掉空掉的父目录，例如 state/terminal）
+    # 6) 清理状态目录。**只删 install 自己的账**：
+    #    系统层的账（system.tsv、system/ 备份、apt.tsv、provisioned/ marker）
+    #    留着 —— 那归 sudo-uninstall 管（不越权，也不越俎代庖）。
     if ! wt_dry; then
-        rm -rf -- "$WTOOL_PROJECT_DIR"
+        for _f in meta.tsv journal.tsv env.zsh env.bash artifacts.tsv \
+                  actions.tsv publish.tsv; do
+            [ -e "$WTOOL_PROJECT_DIR/$_f" ] && rm -f -- "$WTOOL_PROJECT_DIR/$_f"
+        done
+        rmdir -- "$WTOOL_PROJECT_DIR" 2>/dev/null || true
         _p=$(dirname -- "$WTOOL_PROJECT_DIR")
         while [ "$_p" != "$WTOOL_STATE" ] && [ -d "$_p" ] \
               && [ -z "$(ls -A -- "$_p" 2>/dev/null)" ]; do
@@ -769,8 +858,13 @@ cmd_uninstall() {
 }
 
 # --------------------------------------------------------------------------
-# provision：system-file → source → task
-# 与 install 完全分离：install 只做可逆的软链/rc；这里做换源、拉源码、装包、编译
+# sudo-install：系统层 —— /etc 下的文件 + 要跑的脚本/playbook + apt 包
+#
+# 和 install 完全分离（§0 那条铁律）：
+#   * 要 sudo 的都叫 sudo-*；sudo-install 永不碰 $HOME 里的软链
+#   * 可逆的（/etc 下的系统文件）记 journal，sudo-uninstall 还原
+#   * 不可逆的（apt 包、编译产物）只记 marker 和 **apt 差集**
+#     —— 差集就是"这次新装进来的包"，sudo-uninstall 只卸这些
 # --------------------------------------------------------------------------
 wt_when_match() {
     _when=$1
@@ -791,25 +885,70 @@ wt_when_match() {
     return 0
 }
 
-cmd_provision() {
-    _project=""
+cmd_sudo_install() {
+    _targets=""
     for arg in "$@"; do
         case $arg in
             --dry-run)     WTOOL_DRY_RUN=1 ;;
             --force)       WTOOL_FORCE=1 ;;
-            --with-system) WTOOL_WITH_SYSTEM=1 ;;
+            --with-system) wt_die "--with-system 已经删掉：sudo-install 本来就是系统层。
+用户层用 wtool install —— 两条命令永不互相调用。" ;;
+            --no-system)   wt_die "--no-system 已经删掉：那正是 sudo-install 不做的事（它只管系统层）" ;;
             -*)            wt_die "未知参数: $arg" ;;
-            *)             _project=$arg ;;
+            *)             _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_project" ] || wt_die "用法: wtool.sh provision <项目目录> [--dry-run] [--force] [--with-system]"
-    [ -d "$_project" ] || wt_die "项目目录不存在: $_project"
-    _project=$(cd -- "$_project" && pwd)
+
+    if [ -z "$_targets" ]; then
+        wt_info "这些项目声明了 <sudo-install>（系统层）："
+        _n=0
+        while IFS='	' read -r _prio _pid _path; do
+            [ -n "${_pid:-}" ] || continue
+            wt_step "$_pid"
+            _n=$((_n + 1))
+        done <<EOF
+$(python3 "$PY" sudo-list --root "$WTOOL_ROOT")
+EOF
+        [ "$_n" -gt 0 ] || wt_info "  （一个都没有）"
+        wt_info "装其中一个：wtool sudo-install <项目>；全部：wtool sudo-bootstrap"
+        return 0
+    fi
+
+    _targets=$(wt_expand_targets sudo $_targets)
+    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目（试试 wtool sudo-install 看有哪些）"
+
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+        _common=""
+        [ "$WTOOL_FORCE" = 1 ] && _common="--force"
+        [ "$WTOOL_DRY_RUN" = 1 ] && _common="$_common --dry-run"
+        # shellcheck disable=SC2086
+        wt_sudo_install_one "$_path" "$_pid" $_common || exit $?
+    done
+    # shellcheck disable=SC2086
+    [ -n "${_SI_SCRATCHES:-}" ] && rm -rf -- $_SI_SCRATCHES
+    return 0
+}
+
+# 一个项目的系统层动作：system-file → source → task（顺序固定）
+wt_sudo_install_one() {   # <项目目录> <项目 id> [--dry-run] [--force]
+    _si_dir=$1; _si_pid=$2; shift 2
+    for arg in "$@"; do
+        case $arg in
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            --force)   WTOOL_FORCE=1 ;;
+        esac
+    done
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool.XXXXXX")
-    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    # 清理交给调用方（cmd_sudo_install / cmd_sudo_bootstrap）——
+    # trap 是进程级的，在循环里每次覆盖上一个，前面那些临时目录就漏了。
+    _SI_SCRATCHES="${_SI_SCRATCHES:-} $_scratch"
 
-    python3 "$PY" plan-provision "$_project" \
+    wt_info "── $_si_pid  系统层"
+    python3 "$PY" plan-provision "$_si_dir" \
         --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
         --os-id "$WTOOL_OS_ID" --os-version "$WTOOL_OS_VERSION" \
         --os-codename "$WTOOL_OS_CODENAME" --arch "$WTOOL_ARCH" \
@@ -817,16 +956,20 @@ cmd_provision() {
         $([ "$WTOOL_FORCE" = 1 ] && echo --force) || exit $?
 
     wt_load_project "$_scratch"
-    wt_info "project: $WTOOL_PROJECT_ID"
 
-    # 1) system-file（需要 root；默认不动系统）
+    # apt 差集：跑之前取一次已装包快照，跑完再取一次，差就是"这次的账"
+    _si_apt_before=""
+    if [ -s "$_scratch/tasks.tsv" ]; then
+        if wt_apt_snapshot > "$_scratch/apt.before" 2>/dev/null; then
+            _si_apt_before="$_scratch/apt.before"
+        fi
+    fi
+
+    # 1) 系统文件（/etc 下）：可逆，备份三份 + 记 system.tsv。
+    #    **不再需要 --with-system** —— sudo-install 本来就是系统层。
     if [ -s "$_scratch/sysfiles.tsv" ]; then
         while IFS='	' read -r _mode _dest _content _sha _bak _desc; do
             [ -z "${_mode:-}" ] && continue
-            if [ "${WTOOL_WITH_SYSTEM:-0}" != 1 ]; then
-                wt_warn "跳过系统文件（需要 --with-system）: $_dest"
-                continue
-            fi
             wt_info "系统文件[$_mode]: $_dest  ${_desc:+(${_desc})}"
             wt_sysfile_apply "$_mode" "$_dest" "$_content" "$_sha" "$_bak" "$_desc"
         done < "$_scratch/sysfiles.tsv"
@@ -855,22 +998,131 @@ cmd_provision() {
         done < "$_scratch/tasks.tsv"
     fi
 
-    wt_info "provision 完成"
+    if [ -n "$_si_apt_before" ] && ! wt_dry; then
+        wt_apt_snapshot > "$_scratch/apt.after" 2>/dev/null || : > "$_scratch/apt.after"
+        wt_apt_record_new "$WTOOL_PROJECT_ID" "$_si_apt_before" "$_scratch/apt.after"
+    fi
+
+    wt_info "sudo-install 完成: $_si_pid"
 }
 
 # --------------------------------------------------------------------------
-# bootstrap：把工作区里所有 wtool 项目按 priority 依次 provision + install
+# sudo-uninstall：撤系统层 —— /etc 还原 + 卸掉这次装进来的 apt 包
+#
+# **不越权**：它只碰 sudo-install 做过的事，$HOME 里的软链一个字都不动
+# （那是 wtool uninstall 的事）。
+# --------------------------------------------------------------------------
+cmd_sudo_uninstall() {
+    _targets=""
+    _ids=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            --force)   WTOOL_FORCE=1 ;;
+            --id)      shift; _ids="$_ids ${1:-}" ;;
+            -*)        wt_die "未知参数: $1" ;;
+            *)         _targets="$_targets $1" ;;
+        esac
+        shift
+    done
+
+    if [ -z "$_targets" ] && [ -z "$_ids" ]; then
+        wt_info "这些项目在 state 里有系统层的记录："
+        _n=0
+        for _d in "$WTOOL_STATE"/*; do
+            [ -d "$_d" ] || continue
+            _b=$(basename -- "$_d")
+            if [ -d "$_d/system" ] || [ -d "$_d/provisioned" ] || [ -f "$_d/apt.tsv" ]; then
+                wt_step "$_b"
+                _n=$((_n + 1))
+            fi
+        done
+        [ "$_n" -gt 0 ] || wt_info "  （一个都没有）"
+        wt_info "撤其中一个：wtool sudo-uninstall <项目>；全部：wtool sudo-uninstall all"
+        return 0
+    fi
+
+    if [ -n "$_targets" ]; then
+        _want_all=0
+        for _want in $_targets; do
+            [ "$_want" = "all" ] && _want_all=1
+        done
+        if [ "$_want_all" = 1 ]; then
+            # `all` 按 **state 里剩下的账**认，不按项目表认：
+            # 系统层装过什么只有 system.tsv / apt.tsv / provisioned 知道，
+            # 而项目清单可能早就改了、甚至项目目录都不在了。
+            _ids="$_ids $(wt_sudo_ids)"
+        fi
+        _targets=$(wt_expand_targets sudo $_targets)
+        for _want in $_targets; do
+            [ "$_want" = "all" ] && continue
+            _row=$(wt_resolve_project "$_want") || exit $?
+            _ids="$_ids $(printf '%s\n' "$_row" | cut -f2)"
+        done
+    fi
+
+    for _id in $_ids; do
+        [ -n "$_id" ] || continue
+        wt_sudo_uninstall_one "$_id"
+    done
+    wt_info "sudo-uninstall 完成"
+}
+
+wt_sudo_uninstall_one() {   # <项目 id>
+    _su_id=$1
+    _su_dir="$WTOOL_STATE/$_su_id"
+    if [ ! -d "$_su_dir" ]; then
+        wt_warn "state 里没有 $_su_id（没跑过 sudo-install？）"
+        return 0
+    fi
+
+    # 1) /etc 还原：依据是 system.tsv（系统层自己的账）。
+    #    它**不会被 `wtool uninstall` 删掉** —— 两层各有各的账；
+    #    uninstall 把它删了，sudo-uninstall 就再也没依据还原了。
+    _su_r="$_su_dir/system.tsv"
+    if [ -s "$_su_r" ]; then
+        while IFS='	' read -r _mode _dest _osha _nsha _desc; do
+            [ -n "${_mode:-}" ] || continue
+            wt_info "还原系统文件[$_mode]: $_dest  ${_desc:+(${_desc})}"
+            wt_sysfile_restore "$_mode" "$_dest" "$_osha" "$_nsha"
+        done < "$_su_r"
+    elif [ -s "$_su_dir/journal.tsv" ]; then
+        # 更早的版本把依据记在 journal 里（sysfile 模式 落点 备份 sha）
+        grep -v '^#' "$_su_dir/journal.tsv" | awk -F'\t' '$1 == "sysfile"' | \
+        while IFS='	' read -r _act _mode _dest _bak _sha; do
+            [ -n "${_mode:-}" ] || continue
+            wt_info "还原系统文件[$_mode]（老记录）: $_dest"
+            wt_sysfile_restore "$_mode" "$_dest" "-" "$_sha"
+        done
+    fi
+
+    # 2) apt：只卸"这次装进来的"（apt.tsv 就是那次快照的差集）
+    wt_apt_remove_recorded "$_su_id"
+
+    # 3) 账本 / marker / 备份：价值已经兑现（要么还原了，要么卸了）
+    for _su_p in "$_su_dir/system.tsv" "$_su_dir/system" "$_su_dir/provisioned" \
+                 "$_su_dir/apt.tsv" "$_su_dir/provision.log"; do
+        [ -e "$_su_p" ] && wt_run rm -rf -- "$_su_p"
+    done
+    rmdir -- "$_su_dir" 2>/dev/null || true
+    wt_info "sudo-uninstall 完成: $_su_id"
+}
+
+# --------------------------------------------------------------------------
+# bootstrap：把工作区里所有 wtool 项目按 priority 依次 install
+#
+# **不做系统层**（那要 sudo、要联网，是 sudo-bootstrap 的事）：
+# 这条命令永不 sudo、永不联网，失败原因只可能是"某个项目的声明或产物"。
 # --------------------------------------------------------------------------
 cmd_bootstrap() {
-    _no_system=0
-    _install_only=0
     for arg in "$@"; do
         case $arg in
             --dry-run)      WTOOL_DRY_RUN=1 ;;
             --force)        WTOOL_FORCE=1 ;;
-            --with-system)  WTOOL_WITH_SYSTEM=1 ;;
-            --no-system)    _no_system=1 ;;
-            --install-only) _install_only=1 ;;
+            --with-system)  wt_die "--with-system 已经删掉：系统层请用 wtool sudo-bootstrap
+（bootstrap 只做用户层，永不 sudo、永不联网）" ;;
+            --no-system)    wt_die "--no-system 已经删掉：bootstrap 本来就不做系统层" ;;
+            --install-only) wt_die "--install-only 已经删掉：bootstrap 现在就是 install-only" ;;
             -*)             wt_die "未知参数: $arg" ;;
             *)              wt_die "bootstrap 不接受位置参数: $arg" ;;
         esac
@@ -905,6 +1157,8 @@ cmd_bootstrap() {
             wt_has_action "$_pid" build && _ready=1
             wt_has_action "$_pid" download && _ready=1
             [ -f "$_path/scripts/release.json" ] && _ready=1
+            # release/ 里有东西就算产出过了（有人手工铺的、或者 unpack-release 解开的）
+            [ -n "$(ls -A -- "$_path/release" 2>/dev/null)" ] && _ready=1
         fi
 
         if [ -n "$_needs" ] && [ "$_ready" = 0 ]; then
@@ -916,14 +1170,6 @@ cmd_bootstrap() {
         _common=""
         [ "$WTOOL_FORCE" = 1 ] && _common="$_common --force"
         [ "$WTOOL_DRY_RUN" = 1 ] && _common="$_common --dry-run"
-        _prov="$_common"
-        [ "$WTOOL_WITH_SYSTEM" = 1 ] && [ "$_no_system" = 0 ] && _prov="$_prov --with-system"
-        if [ "$_install_only" = 1 ]; then
-            wt_info "(--install-only：跳过换源/装包/编译，只做软链与注入)"
-        else
-            # shellcheck disable=SC2086
-            cmd_provision "$_path" $_prov || wt_die "provision 失败: $_pid"
-        fi
         # shellcheck disable=SC2086
         cmd_install "$_path" $_common || wt_die "install 失败: $_pid"
     done < "$_list"
@@ -965,12 +1211,327 @@ cmd_bootstrap() {
 }
 
 # --------------------------------------------------------------------------
-# 其它命令
+# sudo-bootstrap：所有项目的**系统层**（= 逐个 sudo-install）
+#
+# 和 bootstrap 分开是有意的：这条要 sudo、要联网，失败原因在系统环境那一头；
+# bootstrap 永不 sudo、永不联网，失败原因在某个项目的声明或产物那一头。
+# 混成一条命令就分不清该修哪边（§1 那张表）。
 # --------------------------------------------------------------------------
-cmd_list() {
-    [ -f "$WTOOL_REGISTRY" ] || { wt_info "（registry 为空）"; return 0; }
-    printf '%-12s %-8s %s\n' PROJECT KIND DEST
-    awk -F'\t' '{printf "%-12s %-8s %s\n", $2, $3, $1}' "$WTOOL_REGISTRY"
+cmd_sudo_bootstrap() {
+    for arg in "$@"; do
+        case $arg in
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            --force)   WTOOL_FORCE=1 ;;
+            -*)        wt_die "未知参数: $arg" ;;
+            *)         wt_die "sudo-bootstrap 不接受位置参数: $arg" ;;
+        esac
+    done
+
+    _list=$(mktemp "${TMPDIR:-/tmp}/wtool-sudo.XXXXXX")
+    python3 "$PY" sudo-list --root "$WTOOL_ROOT" > "$_list" || {
+        rm -f "$_list"; wt_die "扫描项目失败"; }
+    if [ ! -s "$_list" ]; then
+        rm -f "$_list"
+        wt_info "没有任何项目声明 <sudo-install>，没什么可做的"
+        return 0
+    fi
+
+    _n=0
+    while IFS='	' read -r _prio _pid _path; do
+        [ -z "${_pid:-}" ] && continue
+        printf '\n=== [%s] %s ===\n' "$_prio" "$_pid"
+        _common=""
+        [ "$WTOOL_FORCE" = 1 ] && _common="$_common --force"
+        [ "$WTOOL_DRY_RUN" = 1 ] && _common="$_common --dry-run"
+        # shellcheck disable=SC2086
+        wt_sudo_install_one "$_path" "$_pid" $_common || wt_die "sudo-install 失败: $_pid"
+        _n=$((_n + 1))
+    done < "$_list"
+    rm -f "$_list"
+    # shellcheck disable=SC2086
+    [ -n "${_SI_SCRATCHES:-}" ] && rm -rf -- $_SI_SCRATCHES
+    wt_info "sudo-bootstrap 完成（$_n 个项目）"
+}
+
+# --------------------------------------------------------------------------
+# pack-release：打包 → <项目>/publish/
+#
+# 产出全部落在 publish/：源码.zip、release.zip、（超 32M 就切分卷）、dist.json
+# 和两个 -hash.txt。另外往**项目目录里**写 scripts/downloads.sh 和
+# docs/download.md —— 让"下一台机器怎么下"这件事不用人记（都是文本，进 Git）。
+#
+# **不替你 commit**：跑完把该提交的打出来提醒。
+# --------------------------------------------------------------------------
+cmd_pack_release() {
+    _targets=""
+    _tag_override=""
+    _repo_override=""
+    _vol_override=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)        WTOOL_DRY_RUN=1 ;;
+            --force)          WTOOL_FORCE=1 ;;
+            --tag=*)          _tag_override=${arg#--tag=} ;;
+            --repo=*)         _repo_override=${arg#--repo=} ;;
+            --volume-size=*)  _vol_override=${arg#--volume-size=} ;;
+            -*)               wt_die "未知参数: $arg" ;;
+            *)                _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] || wt_die "用法: wtool pack-release <项目>... [--tag=TAG] [--repo=owner/repo] [--volume-size=32M]
+
+  产出落在 <项目>/publish/：源码.zip、release.zip（大的切分卷）、dist.json、
+  两个 -hash.txt；另外写 <项目>/scripts/downloads.sh 和 <项目>/docs/download.md"
+    [ -n "$_vol_override" ] || _vol_override=${WTOOL_VOLUME_SIZE:-32M}
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-pack.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+
+    _done=0
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+        _tpl=$(printf '%s\n' "$_row" | cut -f6)
+
+        if [ -n "$_tag_override" ]; then _tag=$_tag_override; else _tag=$(wt_publish_tag "$_tpl"); fi
+        if [ -n "$_repo_override" ]; then
+            _repo=$_repo_override
+        else
+            _repo=$(wt_publish_repo_of "$_path") || wt_die "$_pid 没有可用的 git remote，用 --repo=owner/repo 指定目标仓"
+        fi
+
+        wt_info "── $_pid"
+        wt_info "  目标仓 : $_repo"
+        wt_info "  tag    : $_tag"
+        wt_info "  卷大小 : $_vol_override"
+        wt_pack_release "$_path" "$_tag" "$_repo" "$_vol_override" "$_scratch" "$_pid"
+        _done=$((_done + 1))
+    done
+    wt_info "pack-release 完成（$_done 个项目）"
+}
+
+# --------------------------------------------------------------------------
+# unpack-release：按 dist.json 校验每卷 sha256 → 拼接 → 解开
+#
+# 只认 dist.json，**不需要任何项目特定知识**：
+#   release 那一份解到项目根（里面有 release/ 和声明面 wtool.xml / env.zsh /
+#   env.bash），源码包只校验不铺开。
+# "解开"和"装"是两件事 —— 装是 wtool install 的事（这样才登记得进清单、卸得掉）。
+# --------------------------------------------------------------------------
+cmd_unpack_release() {
+    _targets=""
+    _from=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            --from=*)  _from=${arg#--from=} ;;
+            -*)        wt_die "未知参数: $arg" ;;
+            *)         _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] || wt_die "用法: wtool unpack-release <项目>... [--from=下载目录]
+
+  默认从 <项目>/publish/ 读 dist.json 和分卷；--from= 可以指到别处。" \
+        ""
+    [ -z "$_from" ] || _from=$(cd -- "$_from" && pwd) || wt_die "目录不存在: $_from"
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-unpack.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+
+    _done=0
+    for _want in $_targets; do
+        # 这里**不能**要求有 wtool.xml：unpack-release 的活正是"把声明面
+        # （wtool.xml/env 文件）从包里解出来"，目标目录当然可能还没有它。
+        # 所以目录路径直接认，只有给的是项目名时才去查项目表。
+        _path=""
+        case $_want in
+            /*) [ -d "$_want" ] && _path=$(cd -- "$_want" && pwd) ;;
+            *)  [ -d "$WTOOL_ROOT/$_want" ] && _path=$(cd -- "$WTOOL_ROOT/$_want" && pwd) ;;
+        esac
+        if [ -n "$_path" ]; then
+            _pid=$(basename -- "$_path")
+        else
+            _row=$(wt_resolve_project "$_want") || exit $?
+            _pid=$(printf '%s\n' "$_row" | cut -f2)
+            _path=$(printf '%s\n' "$_row" | cut -f3)
+        fi
+        wt_info "── $_pid"
+        if [ -n "$_from" ]; then
+            wt_unpack_release "$_path" "$_scratch" "$_from"
+        else
+            wt_unpack_release "$_path" "$_scratch"
+        fi
+        _done=$((_done + 1))
+    done
+    wt_info "unpack-release 完成（$_done 个项目）"
+}
+
+# --------------------------------------------------------------------------
+# check / repair：声明 / 日志 / 磁盘 三者对比
+#   check  只报不改（有问题退出码 1）
+#   repair 只重建、不删除（补软链、重写 rc 块、重建 ~/usr）
+# --------------------------------------------------------------------------
+cmd_check() {
+    _args=""
+    _project=""
+    for arg in "$@"; do
+        case $arg in
+            --json) wt_die "--json 还没实现（现在只有人能读的表格输出）" ;;
+            -*)     wt_die "未知参数: $arg" ;;
+            *)      _project=$arg ;;
+        esac
+    done
+    if [ -n "$_project" ]; then
+        _row=$(wt_resolve_project "$_project") || exit $?
+        _project=$(printf '%s\n' "$_row" | cut -f3)
+    fi
+    _out=$(python3 "$PY" check --root "$WTOOL_ROOT" --home "$WTOOL_HOME" \
+        --state "$WTOOL_STATE" ${_project:+"$_project"}) || _rc=$?
+    _rc=${_rc:-0}
+    if [ -n "$_out" ]; then
+        printf '%s\n' "$_out" | while IFS='	' read -r _who _what; do
+            if [ "$_who" = "-" ]; then
+                printf 'wtool: [全局] %s\n' "$_what"
+            else
+                printf 'wtool: [%s] %s\n' "$_who" "$_what"
+            fi
+        done
+        printf '\n'
+        wt_warn "上面这些对不上（声明 / 日志 / 磁盘）。修：wtool repair"
+        return 1
+    fi
+    wt_info "一切对得上（声明 / 日志 / 磁盘）"
+    return 0
+}
+
+cmd_repair() {
+    _targets=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            -*)        wt_die "未知参数: $arg" ;;
+            *)         _targets="$_targets $arg" ;;
+        esac
+    done
+    if [ -z "$_targets" ]; then
+        _targets="all"
+    fi
+    _targets=$(wt_expand_targets repair $_targets)
+    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目"
+
+    # repair = 重跑一遍 install 的**引擎部分**：
+    #   * 补中转链接、补 $HOME 软链、重写 env 块与汇总（plan-install 幂等）
+    #   * 不跑项目自己的 install.sh（那可能重新编译/下载 —— repair 不猜你想干什么）
+    #   * 永不删除：plan 里没有删除动作，只重建
+    _n=0
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+        [ -d "$_path" ] || { wt_warn "$_pid 的目录不在磁盘上，跳过"; continue; }
+        wt_info "── repair $_pid"
+        _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-repair.XXXXXX")
+        python3 "$PY" plan-install "$_path" \
+            --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
+            --head "-" --at "$(wt_now)" --force || {
+            rm -rf -- "$_scratch"; wt_warn "$_pid 的清单有问题，跳过"; continue; }
+        wt_load_project "$_scratch"
+        wt_plan_exec "$_scratch/plan.tsv"
+        wt_plan_exec "$_scratch/plan.home.tsv"
+        rm -rf -- "$_scratch"
+        _n=$((_n + 1))
+    done
+    wt_env_sync
+    if wt_dry; then
+        wt_info "repair 计划完成（$_n 个项目）"
+    else
+        wt_info "repair 完成（$_n 个项目；只重建，没删任何东西）"
+    fi
+}
+
+# --------------------------------------------------------------------------
+# kill-self-forever：删掉 wtool 的一切痕迹（**不可逆**）
+#
+# 要求逐字输入一句全大写确认（照抄 GitHub 删仓库的做法），
+# 并且先把"删什么、不删什么"一条条列清楚：这个命令的破坏力要求
+# 用户在按回车之前就知道自己在做什么。
+# --------------------------------------------------------------------------
+wt_kill_confirm_word="KILL-SELF-FOREVER"
+
+cmd_kill_self_forever() {
+    _yes=0
+    for arg in "$@"; do
+        case $arg in
+            --yes) _yes=1 ;;
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            -*) wt_die "未知参数: $arg（用法: wtool kill-self-forever [--dry-run]）" ;;
+            *)  wt_die "不接受位置参数: $arg" ;;
+        esac
+    done
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-kill.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    python3 "$PY" kill-plan --home "$WTOOL_HOME" --state "$WTOOL_STATE" \
+        > "$_scratch/kill.tsv" || wt_die "算不出要删什么"
+
+    _nlink=$(awk -F'\t' '$1=="link"{n++} END{print n+0}' "$_scratch/kill.tsv")
+
+    printf '\n'
+    wt_info "kill-self-forever 会删掉下面这些（**不可逆**）："
+    printf '\n'
+    printf '  【$HOME 里的软链】%s 条，都是 wtool 自己建的（只删还指向 wtool 的）\n' "$_nlink"
+    awk -F'\t' '$1=="link"{printf "      %s\n", $2}' "$_scratch/kill.tsv" | head -20
+    [ "$_nlink" -gt 20 ] && printf '      …（还有 %s 条）\n' "$((_nlink - 20))"
+    printf '\n'
+    printf '  【影子 HOME】%s\n' "$WTOOL_HOME/.wtool"
+    printf '      （编译产物 ~/.wtool/usr、自举副本 ~/.wtool/bootstrap、\n'
+    printf '        所有项目的 env 汇总都在这里，一起没）\n'
+    printf '  【状态目录】%s\n' "$WTOOL_STATE"
+    printf '      （装过什么、怎么撤的记录；删了就只能靠手工收拾）\n'
+    printf '  【rc 里的 loader 块】%s\n' "$WTOOL_HOME/.zshrc 和 $WTOOL_HOME/.bashrc 里 # >>> wtool >>> 那一段"
+    printf '\n'
+    wt_info "**不删**下面这些（它们不归 wtool 管）："
+    printf '\n'
+    printf '  * apt 包和 /etc 下的改动 —— 那是 sudo 装的，用 wtool sudo-uninstall all 撤\n'
+    printf '  * 项目仓库本身（工作区里的源码一个字节都不动）\n'
+    printf '  * 你自己手工建的东西 / 你自己的 rc 内容\n'
+    printf '  * 引擎本体：%s（它是工作区里的源码，删它请自己 rm -rf）\n' "$WTOOL_BOOTSTRAP"
+    printf '\n'
+
+    if [ "$_yes" != 1 ]; then
+        printf '确认要删，请逐字输入 %s：' "$wt_kill_confirm_word"
+        _ans=""
+        if [ -t 0 ]; then
+            read -r _ans || _ans=""
+        else
+            read -r _ans || _ans=""
+        fi
+        if [ "$_ans" != "$wt_kill_confirm_word" ]; then
+            wt_info "输入不匹配，什么都没做"
+            return 1
+        fi
+    else
+        wt_warn "--yes：跳过确认（脚本里用；出事自己负责）"
+    fi
+
+    if wt_dry; then
+        wt_info "[dry-run] 上面这些都会被删（现在什么都没动）"
+        return 0
+    fi
+
+    # 1) 软链（只删还指向原位的）
+    wt_kill_links < "$_scratch/kill.tsv"
+    # 2) 影子 HOME 和状态目录
+    wt_kill_paths < "$_scratch/kill.tsv"
+    # 3) rc 里的 loader 块：把 state 指到一个**空目录**再算一遍。
+    #    不能直接用真的 state：wt_env_sync 里的记账会 mkdir 它，
+    #    于是"删干净"之后 state 又冒出来了（踩过）。
+    _kill_tmp=$(mktemp -d "${TMPDIR:-/tmp}/wtool-kill-state.XXXXXX")
+    ( WTOOL_STATE="$_kill_tmp" wt_env_sync )
+    rm -rf -- "$_kill_tmp"
+    wt_info "wtool 的痕迹已经删干净了"
+    wt_info "（sudo 装的那些还在，要撤：wtool sudo-uninstall all）"
 }
 
 cmd_status() {
@@ -979,21 +1540,49 @@ cmd_status() {
               >/dev/null 2>&1 && echo ok || echo fail)
         [ "$_id" = ok ] || { wt_warn "清单校验失败: $1"; return 1; }
     fi
+    # ① 软链检查
     _bad=0
+    _n=0
     if [ -f "$WTOOL_REGISTRY" ]; then
         while IFS='	' read -r _dest _id _kind; do
             [ -z "${_dest:-}" ] && continue
+            _n=$((_n + 1))
             if [ ! -L "$_dest" ]; then
                 wt_warn "缺失: $_dest（项目 $_id）"
                 _bad=$((_bad + 1))
             fi
         done < "$WTOOL_REGISTRY"
     fi
-    [ "$_bad" -eq 0 ] && wt_info "所有登记的软链都在"
+    [ "$_bad" -eq 0 ] && wt_info "所有登记的软链都在（$_n 条）"
+
+    # ② 登记表（原来 `wtool list` 的那张，2026-09 并进 status）
+    printf '\n'
+    if [ "$_n" -eq 0 ]; then
+        wt_info "（registry 为空 —— 还没装过任何项目）"
+        return 0
+    fi
+    printf '%-12s %-8s %s\n' PROJECT KIND DEST
+    awk -F'\t' '{printf "%-12s %-8s %s\n", $2, $3, $1}' "$WTOOL_REGISTRY"
     return 0
 }
 
 cmd_doctor() {
+    # --quiet/--json：只要环境变量那一批 export 行，别的什么都不印。
+    # 这条路径要能直接 eval：
+    #     eval "$(wtool doctor --quiet)"
+    # 所以它**一个诊断行都不能有** —— 混进去的话 eval 会去执行
+    # "wtool: engine : 1.0.0" 这种句子。
+    _env_only=0
+    for _a in "$@"; do
+        case $_a in
+            --quiet|-q|--json) _env_only=1 ;;
+        esac
+    done
+    if [ "$_env_only" = 1 ]; then
+        cmd_env "$@"
+        return 0
+    fi
+
     wt_info "engine      : $ENGINE_VERSION"
     wt_info "bootstrap   : $WTOOL_BOOTSTRAP"
     wt_info "root        : $WTOOL_ROOT"
@@ -1007,7 +1596,19 @@ cmd_doctor() {
     _n=0
     [ -f "$WTOOL_REGISTRY" ] && _n=$(grep -c . "$WTOOL_REGISTRY" 2>/dev/null || echo 0)
     wt_info "registered  : $_n 条"
-    echo
+    _uk="$WTOOL_HOME/usr"
+    if [ -L "$_uk" ]; then
+        wt_info "~/usr       : $(readlink -- "$_uk")"
+    elif [ -e "$_uk" ]; then
+        wt_warn "~/usr       : 存在但不是软链（应该是 → ~/.wtool/usr）"
+    else
+        wt_info "~/usr       : 还没有（装第一个项目时由引擎建）"
+    fi
+
+    # 环境变量（原来 `wtool env` 的那份，2026-09 并进 doctor）
+    printf '\n'
+    cmd_env
+    printf '\n'
     cmd_table --verbose --summary
 }
 
@@ -1080,8 +1681,8 @@ EOF
 
     _c() { [ "$_quiet" = 1 ] && return 0; printf '%s\n' "$1"; }
 
-    _c "# wtool 环境变量 —— 由 \`wtool env\` 生成"
-    _c "# 立即生效： eval \"\$(wtool env)\""
+    _c "# wtool 环境变量 —— 由 \`wtool doctor\` 生成（原来那条 wtool env 已经并进来）"
+    _c "# 立即生效： eval \"\$(wtool doctor --quiet)\""
     _c "# 长期生效： 装 bootstrap 项目（cd bootstrap && ./install.sh），它会自动导出这些"
     _c ""
     _c "# ── wtool 自身的位置 ──────────────────────────────"
@@ -1195,31 +1796,46 @@ print(os.path.basename(p) if rel.startswith("..") else rel)
 -->
 <wtool schema="1" id="$_id" priority="$_prio">
 
-  <!-- 被 shell source 的部分。加载器已经导出
-       WTOOL_PROJECT_ID / WTOOL_PROJECT_DIR / WTOOL_PROJECT_ROOT -->
-  <env src="env.zsh" shells="zsh,bash"/>
+  <!-- shell 集成：两个 shell 各一份，内容要等价（公司机器上没有 zsh 的多得很） -->
+  <zshrc  src="env.zsh"/>
+  <bashrc src="env.bash"/>
 
-  <!-- src 相对本文件所在目录，dest 相对 \$HOME -->
-  <!-- <link src="foo.conf" dest=".config/foo/foo.conf"/> -->
+  <!-- 提供一个配置文件：三段映射，三个属性都必填
+         home=        \$HOME 下的落点（写全，带 ~/）
+         wtool=       影子 HOME（~/.wtool/）下的落点
+         subproject=  项目里的相对路径（内容从这儿来）
+       连起来：<项目>/foo.conf → ~/.wtool/.foo.conf → ~/.foo.conf
+  <link home="~/.foo.conf" wtool="~/.wtool/.foo.conf" subproject="foo.conf"/>
+  -->
 
-  <!-- 需要 apt / 编译 / 跑脚本的，用 provision（不可逆，和 install 分开） -->
-  <!-- <provision src="provision/packages.yaml" marker="$_id-deps"/> -->
+  <!-- 目录、内容由项目自己的 install.sh 产出时，把 subproject 换成 produced-by：
+  <link home="~/.config/foo" wtool="~/.wtool/.config/foo" produced-by="install.sh"/>
+  -->
+
+  <!-- 系统层（apt 包、/etc 下的文件、要跑的脚本）：**不在 install 里跑**
+  <sudo-install src="provision/packages.yaml" marker="$_id-deps"/>
+  -->
 
 </wtool>
 EOF
         wt_step "生成 wtool.xml"
     fi
 
-    if [ ! -f "$_dir/env.zsh" ]; then
-        cat > "$_dir/env.zsh" <<'EOF'
+    # env 两份必须同改：只写 zsh 的后果是"那个 shell 的用户敲命令 command not found"，
+    # 而 rc 文件里看起来明明装过了 —— 这种半装状态最难查。
+    for _sh in zsh bash; do
+        if [ ! -f "$_dir/env.$_sh" ]; then
+            cat > "$_dir/env.$_sh" <<'EOF'
 # 被 shell 的 wtool 托管块 source。
 # 加载器已经导出：WTOOL_PROJECT_ID / WTOOL_PROJECT_DIR / WTOOL_PROJECT_ROOT
 #
 # 这里放这个项目需要的环境变量，例如：
 #   export PATH="$WTOOL_PROJECT_DIR/bin:$PATH"
+#   export PATH="$WTOOL_PREFIX/bin:$PATH"   # 装出来的东西的 bin，最容易漏的就是这句
 EOF
-        wt_step "生成 env.zsh"
-    fi
+            wt_step "生成 env.$_sh"
+        fi
+    done
 
     _tpl_dir="$here/templates"
     mkdir -p -- "$_dir/scripts"
@@ -1287,6 +1903,36 @@ wt_publish_resolve() {
            printf '%s\n' "$_hits" | awk -F'\t' '{print "  " $2}' >&2
            wt_die "请写完整的项目 id" ;;
     esac
+}
+
+# 把用户给的项目名解析成一行完整的 7 列记录（和 publish-list 同格式）。
+#
+# 比 wt_publish_resolve 多认一样东西：**工作区外面的目录**。
+# sudo-install / pack-release / check 这些命令拿的是"项目目录"，
+# 测试和临时目录里的项目不在工作区里，也应该能直接指过来。
+wt_resolve_project() {
+    _rp_want=$1
+    _rp_abs=""
+    case $_rp_want in
+        /*) [ -d "$_rp_want" ] && _rp_abs=$(cd -- "$_rp_want" && pwd) ;;
+        *)  [ -d "$WTOOL_ROOT/$_rp_want" ] && _rp_abs=$(cd -- "$WTOOL_ROOT/$_rp_want" && pwd) ;;
+    esac
+    if [ -n "$_rp_abs" ] && [ -f "$_rp_abs/wtool.xml" ]; then
+        _rp_info=$(python3 "$PY" publish-info "$_rp_abs" --root "$WTOOL_ROOT" 2>/dev/null) || true
+        if [ -n "$_rp_info" ]; then
+            _rp_prio=$(printf '%s\n' "$_rp_info" | awk -F'\t' '$1=="priority"{print $2}')
+            _rp_pid=$(printf '%s\n' "$_rp_info" | awk -F'\t' '$1=="project_id"{print $2}')
+            _rp_kind=$(printf '%s\n' "$_rp_info" | awk -F'\t' '$1=="kind"{print $2}')
+            _rp_scr=$(printf '%s\n' "$_rp_info" | awk -F'\t' '$1=="script"{print $2}')
+            _rp_tag=$(printf '%s\n' "$_rp_info" | awk -F'\t' '$1=="tag"{print $2}')
+            _rp_to=$(printf '%s\n' "$_rp_info" | awk -F'\t' '$1=="to"{print $2}')
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "${_rp_prio:-100}" "$_rp_pid" "$_rp_abs" "${_rp_kind:-source}" \
+                "${_rp_scr:--}" "${_rp_tag:-snapshot-%Y-%m-%d}" "${_rp_to:--}"
+            return 0
+        fi
+    fi
+    wt_publish_resolve "$_rp_want"
 }
 
 cmd_publish() {
@@ -1458,13 +2104,13 @@ cmd_publish() {
             continue
         fi
 
-        # kind=source
+        # 没有 publish.sh 的项目 = 引擎自己打包（pack-release）+ 上传
         if ! git -C "$_path" rev-parse --git-dir >/dev/null 2>&1; then
             wt_warn "  $_path 不是 git 仓库，无法确定版本，跳过（用 --force 也推不出有意义的包）"
             continue
         fi
-        # 脏检查扣掉 wtool 自己生成的文件（下载块、以后的 release.json）。
-        # 不扣的话：一次 publish 写完文档 → 项目变脏 → 下一轮 publish
+        # 脏检查扣掉 wtool 自己生成的文件（downloads.sh / download.md / 下载块）。
+        # 不扣的话：一次发布写完文档 → 项目变脏 → 下一轮 publish
         # 以"有未提交改动"拒绝它 —— 一次发布把下一次发布堵死。
         _dirty=$(wt_git_dirty "$_path")
         if [ "${WTOOL_FORCE:-0}" != 1 ] && [ -n "$_dirty" ]; then
@@ -1477,47 +2123,52 @@ cmd_publish() {
             wt_info "  只有 wtool 自己生成的文件变了，按干净处理（记得提交）"
         fi
 
-        _commit=$(git -C "$_path" rev-parse HEAD 2>/dev/null || echo "")
-        _dirty=0
-        [ -n "$(git -C "$_path" status --porcelain 2>/dev/null)" ] && _dirty=1
-        _dashed=$(printf '%s' "$_pid" | tr '/' '-')
-        _asset="$_dashed-$_date.tar.$(wt_pack_ext)"
+        # publish = pack-release + 上传（契约的一部分，见 00-architecture.md §5）
+        wt_pack_release "$_path" "$_tag" "$_repo" "${WTOOL_VOLUME_SIZE:-32M}" \
+            "$_scratch" "$_pid" || {
+            wt_warn "  pack-release 失败，跳过上传"
+            _failed=$((_failed + 1))
+            continue
+        }
+        if wt_dry; then
+            _done=$((_done + 1))
+            continue
+        fi
 
-        # 发布副本标记：解压后 install 不必加 --force，head 也从这里取
-        mkdir -p -- "$_scratch/dist/.wtool-dist"
-        cat > "$_scratch/dist/.wtool-dist/$_dashed.json" <<EOF
-{
-  "project": "$_pid",
-  "repo": "$_repo",
-  "commit": "$_commit",
-  "dirty": $([ "$_dirty" = 1 ] && echo true || echo false),
-  "packed_at": "$(date +%Y-%m-%dT%H:%M:%S%z)",
-  "view": "release",
-  "layout": "wtool/$_pid"
-}
-EOF
-
-        _out=$_scratch/out-$_done
-        wt_pack_source "$_path" "$_out/$_asset" "$_scratch/dist" ".wtool-dist/$_dashed.json" \
-            || exit $?
-        wt_info "  资产   : $_asset  (commit $(printf '%s' "$_commit" | cut -c1-7), dirty=$_dirty)"
-        wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
-            "由 wtool publish 生成。解压到工作区上一层即可（包内第一层是 wtool/）。"
-        if ! wt_publish_gh_upload "$_repo" "$_tag" "$_out/$_asset"; then
-            _keep_scratch=1              # 同上：产物别删
+        _files=$(find "$_path/publish" -maxdepth 1 -type f | LC_ALL=C sort)
+        _n=$(printf '%s\n' "$_files" | awk 'NF{n++} END{print n+0}')
+        if [ "$_n" = 0 ]; then
+            wt_warn "  publish/ 里什么都没有，跳过"
             _failed=$((_failed + 1))
             continue
         fi
-        wt_publish_record "$_pid" "$_repo" "$_tag" 1 "source:$_commit"
+        wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
+            "由 wtool pack-release + publish 生成。内容与每卷的 sha256 见 dist.json。"
+        # shellcheck disable=SC2086
+        if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
+            _keep_scratch=1              # 产物（publish/）本来就在项目里，别删
+            _failed=$((_failed + 1))
+            continue
+        fi
+        wt_publish_record "$_pid" "$_repo" "$_tag" "$_n" "release:$_tag"
+        _pubbed="${_pubbed:-} $_path/publish"
         _done=$((_done + 1))
     done
     exec 3<&-
 
     # 产物交付给 --out（如果指定了）
+    #   两条路都要顾：脚本型项目的产物在 scratch 的 out-*/ 里，
+    #   引擎打包的产物在项目自己的 publish/ 里（已经在那儿了，拷一份给 --out）。
     if [ -n "${_outdir:-}" ] && ! wt_dry; then
         _copied=0
         for _d in "$_scratch"/out-*; do
             [ -d "$_d" ] || continue
+            for _f in "$_d"/*; do
+                [ -f "$_f" ] || continue
+                cp -f -- "$_f" "$_outdir/" && _copied=$((_copied + 1))
+            done
+        done
+        for _d in ${_pubbed:-}; do
             for _f in "$_d"/*; do
                 [ -f "$_f" ] || continue
                 cp -f -- "$_f" "$_outdir/" && _copied=$((_copied + 1))
@@ -1650,14 +2301,22 @@ case $_cmd in
     download)  cmd_download "$@" ;;
     install)   cmd_install "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
-    provision) cmd_provision "$@" ;;
+    sudo-install)   cmd_sudo_install "$@" ;;
+    sudo-uninstall) cmd_sudo_uninstall "$@" ;;
+    sudo-bootstrap) cmd_sudo_bootstrap "$@" ;;
+    provision) wt_die "provision 已改名为 sudo-install，请用：
+  wtool sudo-install <项目>      # 一个
+  wtool sudo-bootstrap           # 全部项目的系统层
+（改名理由：要 sudo 的都叫 sudo-*，不叫 sudo-* 的永不要 sudo —— 见架构书 §0）" ;;
+    pack-release)   cmd_pack_release "$@" ;;
+    unpack-release) cmd_unpack_release "$@" ;;
     publish)   cmd_publish "$@" ;;
     bootstrap) cmd_bootstrap "$@" ;;
-    list)      cmd_list "$@" ;;
-    table)     cmd_table "$@" ;;
+    check)     cmd_check "$@" ;;
+    repair)    cmd_repair "$@" ;;
+    kill-self-forever) cmd_kill_self_forever "$@" ;;
     status)    cmd_status "$@" ;;
     doctor)    cmd_doctor "$@" ;;
-    env)       cmd_env "$@" ;;
     docs)      shift; [ "${1:-}" = "refresh" ] && shift
                wt_refresh_downloads ;;
     refresh-downloads) wt_refresh_downloads ;;
@@ -1665,12 +2324,20 @@ case $_cmd in
     scaffold)  wt_warn "scaffold 已改名为 init，请用 wtool init"; cmd_init "$@" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;
+    table)     wt_die "table 已经删掉：裸跑 wtool 就是项目表
+  wtool            # 一行一个项目、一列一个能力
+  wtool doctor     # 环境诊断（表也在里面）" ;;
+    list)      wt_die "list 已经删掉：并进了 wtool status
+  wtool status     # 登记表 + 软链检查" ;;
+    env)       wt_die "env 已经删掉：并进了 wtool doctor
+  wtool doctor     # 环境诊断 + 环境变量
+  eval \"\$(wtool doctor --quiet)\"   # 只要 export 行" ;;
     -h|--help|help)
         # 打印文件头的注释块，不写死行号（否则加一行用法就错位）
         awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"
         ;;
     "")
-        # 不带参数 = 看板：哪些项目装过、provision 过、发布过
+        # 不带参数 = 看板：哪些项目装过、sudo 装过、发布过
         cmd_table --verbose --summary
         ;;
     *) wt_die "未知命令: $_cmd（用 --help 查看用法）" ;;

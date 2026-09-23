@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
@@ -55,14 +56,19 @@ def links_dir_shell(project_id):
     return '"$HOME/.wtool/%s/links/%s"' % (WORK_DIR_NAME, project_id)
 
 
-# publish 的默认行为：没有 <publish> 声明的项目按源码打包推送
+# 影子 HOME 的根（~/.wtool）；$HOME 里的路径在它下面同名
+SHADOW_ROOT_NAME = ".wtool"
+# release.zip 里带的"声明面"：只下 release.zip 的机器也要能 wtool install
+DECLARE_FILES = ("wtool.xml", "env.zsh", "env.bash")
+# 分卷大小：网络不稳，卷要小（见 00-architecture.md §5）
+DEFAULT_VOLUME_SIZE = "32M"
+
+# publish 的默认行为：能力由**文件存在**声明（scripts/publish.sh），
+# 没有它就是源码包。<publish> 标签已经删掉，这里只为过渡期兼容老清单保留。
 DEFAULT_PUBLISH_TAG = "snapshot-%Y-%m-%d"
 PUBLISH_KINDS = ("source", "script", "none")
 # source 包的第一层目录名固定，跟本机工作区目录叫什么无关
 PUBLISH_ARCHIVE_PREFIX = "wtool"
-# 打进源码包的排除项（tar --exclude 的 glob；实测裸 .git 能匹配任意层级）
-PUBLISH_EXCLUDES = (".git", "__pycache__", "*.pyc", "*.pyo",
-                    ".mypy_cache", ".pytest_cache", ".ruff_cache", "*.log")
 
 # 哪些 shell 有"用户级 rc 文件"可以注入
 RC_FILE_BY_SHELL = {"zsh": ".zshrc", "bash": ".bashrc"}
@@ -121,8 +127,14 @@ class Entry(object):
         return "<Entry %s %s>" % (self.kind, self.src)
 
 
-def parse_manifest(path, project_root, errors):
-    """解析 wtool.xml（支持 include）。返回 (meta, entries)。"""
+def parse_manifest(path, project_root, errors, warnings=None):
+    """解析 wtool.xml（支持 include）。返回 (meta, entries)。
+
+    warnings 传了就把"旧写法该改了"这类提示记进去；没传就丢掉
+    （表格扫描、publish 解析这些只关心结果的调用方不需要它们）。
+    """
+    if warnings is None:
+        warnings = []
     text = read_text(path)
     if text is None:
         errors.append("清单不存在: %s" % path)
@@ -161,12 +173,15 @@ def parse_manifest(path, project_root, errors):
         "manifest_path": path,
         "manifest_sha": sha256_text(text),
         # 没写 <publish> 就等于 kind="source"：打包源码推到本项目自己 origin 的 release。
+        # _declared 记"老清单显式写过 <publish>"，用来在能力判定里区分
+        # "声明了不发布" 和 "压根没声明"。
         "publish": {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
-                    "asset": "", "subs": [], "targets": []},
+                    "asset": "", "subs": [], "targets": [], "_declared": False},
     }
 
     entries = []
-    _parse_children(root, project_root, path, meta, entries, errors, depth=0)
+    _parse_children(root, project_root, path, meta, entries, errors, depth=0,
+                    warnings=warnings)
     return meta, entries
 
 
@@ -201,6 +216,7 @@ def _parse_publish(node, meta, manifest_path, errors):
         "asset": (node.get("asset") or "").strip(),
         "subs": [],
         "targets": [],
+        "_declared": True,
     }
 
     for child in node:
@@ -234,14 +250,60 @@ def _parse_publish(node, meta, manifest_path, errors):
     meta["publish"] = info
 
 
-def _parse_children(node, project_root, manifest_path, meta, entries, errors, depth):
+def effective_publish(path, pub):
+    """发布方式的最终判定。
+
+    `<publish>` 标签整个删掉了（见 00-architecture.md §3 改名对照）：
+    **文件存在即能力声明** —— 项目里有 `scripts/publish.sh` 就是脚本型发布。
+    老清单里显式写的 `<publish>` 仍然认（过渡期），用来表达两件文件表达不了的
+    事：推到别的仓（`to=`）和"不发布"（`kind="none"`，第三方上游仓要它）。
+    """
+    out = dict(pub or {})
+    for key, default in (("kind", "source"), ("script", ""),
+                         ("tag", DEFAULT_PUBLISH_TAG), ("to", ""),
+                         ("asset", ""), ("subs", []), ("targets", [])):
+        out.setdefault(key, default)
+    if os.path.isfile(os.path.join(path, "scripts", "publish.sh")) or \
+            os.path.isfile(os.path.join(path, "publish.sh")):
+        out["kind"] = "script"
+        out["script"] = "publish.sh"
+    return out
+
+
+def _parse_children(node, project_root, manifest_path, meta, entries, errors, depth,
+                    warnings=None):
+    if warnings is None:
+        warnings = []
     if depth > 8:
         errors.append("include 嵌套超过 8 层，疑似循环: %s" % manifest_path)
         return
 
+    def _legacy(tag, new_hint):
+        warnings.append("<%s> 是旧写法，请改成 %s（%s）" % (tag, new_hint, manifest_path))
+
     for child in node:
         tag = child.tag
-        if tag == "env":
+
+        # ---------------------------------------------------------------- env
+        if tag in ("zshrc", "bashrc"):
+            # <zshrc src="env.zsh"/>：这个文件的内容进 ~/.wtool/.zshrc
+            shell = tag[:-2]                       # zshrc -> zsh, bashrc -> bash
+            src = child.get("src")
+            if not src:
+                errors.append("<%s> 缺少 src（%s）" % (tag, manifest_path))
+                continue
+            if not is_safe_rel(src):
+                errors.append("<%s src=%r> 必须是不含 .. 的相对路径" % (tag, src))
+                continue
+            prio = _int_attr(child, "priority", meta["priority"], errors,
+                             "%s %s" % (tag, src))
+            entries.append(Entry("env", src, shells=(shell,), priority=prio,
+                                 optional=_bool_attr(child, "optional"),
+                                 manifest=manifest_path))
+
+        elif tag == "env":
+            # 旧写法：<env src="env.zsh" shells="zsh"/>（shells 靠扩展名推断）
+            _legacy("env", '<zshrc src="env.zsh"/> / <bashrc src="env.bash"/>')
             src = child.get("src")
             if not src:
                 errors.append("<env> 缺少 src（%s）" % manifest_path)
@@ -267,44 +329,24 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                                  optional=_bool_attr(child, "optional"),
                                  manifest=manifest_path))
 
+        # --------------------------------------------------------------- link
         elif tag == "link":
-            src = child.get("src")
-            dest = child.get("dest")
-            if not src or not dest:
-                errors.append("<link> 必须同时有 src 和 dest（%s）" % manifest_path)
-                continue
-            entries.append(Entry("link", src, dest=dest,
-                                 force=_bool_attr(child, "force"),
-                                 optional=_bool_attr(child, "optional"),
-                                 manifest=manifest_path))
+            entry = _parse_link(child, errors, warnings, manifest_path)
+            if entry is not None:
+                entries.append(entry)
+
+        # -------------------------------------------------------- sudo-install
+        elif tag == "sudo-install":
+            for entry in _parse_sudo_install(child, errors, warnings,
+                                             manifest_path):
+                entries.append(entry)
 
         elif tag == "system-file":
-            # 写 $HOME 之外的系统文件（换源等）。可逆：备份→写；卸载时还原。
-            dest = child.get("dest")
-            # dest="auto" 只允许和 kind 一起用：由引擎按发行版算出目标路径
-            if dest != "auto" and (not dest or not dest.startswith("/")):
-                errors.append("<system-file> 的 dest 必须是绝对路径（或 kind 配 dest=\"auto\"）（%s）"
-                              % manifest_path)
-                continue
-            if dest == "auto" and not child.get("kind"):
-                errors.append("<system-file> dest=\"auto\" 必须和 kind 一起用")
-                continue
-            src = child.get("src")
-            kind = child.get("kind")
-            mode = (child.get("mode") or "replace").strip()
-            if mode not in ("replace", "add", "disable"):
-                errors.append("<system-file> mode 只能是 replace/add/disable，实际 %r" % mode)
-                continue
-            # disable 只是把原文件改名，不需要内容
-            if mode != "disable" and not src and not kind:
-                errors.append("<system-file> 需要 src（自己的内容）或 kind（引擎生成）")
-                continue
-            entries.append(Entry("sysfile", src or "", dest=dest, mode=mode,
-                                 sf_kind=kind, mirror=child.get("mirror") or "ustc",
-                                 backup=_bool_attr(child, "backup", default=(mode == "replace")),
-                                 when=child.get("when") or "",
-                                 desc=child.get("desc") or "",
-                                 manifest=manifest_path))
+            # 旧写法：换源等系统文件。已经并进 <sudo-install>
+            _legacy("system-file", '<sudo-install src=... dest=/etc/... mode=.../>')
+            entry = _parse_system_file(child, errors, manifest_path)
+            if entry is not None:
+                entries.append(entry)
 
         elif tag == "source":
             # 上游源码：clone → 固定 ref → 建/重置本地分支 → 铺 overlay
@@ -325,6 +367,8 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                                  manifest=manifest_path))
 
         elif tag == "provision":
+            # 旧写法：已改名为 <sudo-install src=.../>
+            _legacy("provision", '<sudo-install src="provision/packages.sh"/>')
             src = child.get("src")
             if not src:
                 errors.append("<provision> 需要 src（%s）" % manifest_path)
@@ -342,7 +386,9 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                                  manifest=manifest_path))
 
         elif tag == "publish":
-            # 发布能力声明：不是安装动作，只记进 meta
+            # 旧写法：发布能力声明。新契约里"有 scripts/publish.sh 就是脚本型发布"，
+            # 这个标签整个删掉了；仍然认它，是为了让还没迁过来的项目照常工作。
+            _legacy("publish", "项目里放 scripts/publish.sh（文件存在即能力声明）")
             _parse_publish(child, meta, manifest_path, errors)
 
         elif tag == "include":
@@ -363,11 +409,168 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                 errors.append("include XML 解析失败: %s: %s" % (inc_path, exc))
                 continue
             _parse_children(inc_root, project_root, inc_path, meta, entries,
-                            errors, depth + 1)
+                            errors, depth + 1, warnings=warnings)
 
         else:
             errors.append("未知元素 <%s>（%s）；自定义元素请用 x-* 前缀"
                           % (tag, manifest_path))
+
+
+def _home_rel(raw, errors, manifest_path, tag):
+    """把 ~/... 或 .config/... 归一成相对 $HOME 的路径。"""
+    if not raw:
+        return None
+    rel = raw
+    if rel.startswith("~/"):
+        rel = rel[2:]
+    elif rel == "~":
+        errors.append("<%s> 的 home 不能是 ~ 本身（%s）" % (tag, manifest_path))
+        return None
+    elif rel.startswith("~"):
+        errors.append("<%s> 的路径只认 ~/... 写法，实际 %r" % (tag, raw))
+        return None
+    rel = rel.lstrip("/")
+    if not is_safe_rel(rel):
+        errors.append("<%s> 的路径必须是不含 .. 的相对路径，实际 %r" % (tag, raw))
+        return None
+    return rel
+
+
+def _parse_link(child, errors, warnings, manifest_path):
+    """<link> 是**三段映射**（见 00-architecture.md §3.2）：
+
+        <link home="~/.tmux.conf"
+              wtool="~/.wtool/.tmux.conf"
+              subproject="tmux.conf"/>
+
+        <项目>/tmux.conf ──► ~/.wtool/.tmux.conf ──► ~/.tmux.conf
+
+    `home` 是目录、内容由项目自己的 install.sh 产出时，把 subproject 换成
+    produced-by="install.sh"（这时没有中间那一跳，实体由脚本铺）。
+
+    旧写法 <link src="tmux.conf" dest=".tmux.conf"/> 仍然认（过渡期），
+    等价于 home=dest、wtool=~/.wtool/<dest>、subproject=src。
+    """
+    home_raw = child.get("home")
+    wtool_raw = child.get("wtool")
+    sub = child.get("subproject")
+    produced = child.get("produced-by")
+
+    if not home_raw and child.get("dest"):
+        warnings.append("<link src= dest=> 是旧写法，请改成 "
+                        "<link home= wtool= subproject=>（%s）" % manifest_path)
+        home_raw = child.get("dest")
+        sub = child.get("src")
+        wtool_raw = None
+
+    if not home_raw:
+        errors.append("<link> 需要 home=\"~/...\"（%s）" % manifest_path)
+        return None
+    if sub and produced:
+        errors.append("<link> 的 subproject 和 produced-by 只能有一个（%s）"
+                      % manifest_path)
+        return None
+    if not sub and not produced:
+        errors.append("<link home=%r> 需要 subproject= 或 produced-by=（%s）"
+                      % (home_raw, manifest_path))
+        return None
+
+    home_rel = _home_rel(home_raw, errors, manifest_path, "link")
+    if home_rel is None:
+        return None
+
+    if wtool_raw:
+        wrel = _home_rel(wtool_raw, errors, manifest_path, "link")
+        if wrel is None:
+            return None
+        if not wrel.startswith(SHADOW_ROOT_NAME + "/"):
+            errors.append("<link wtool=%r> 必须写在 ~/%s/ 下面（影子 HOME）（%s）"
+                          % (wtool_raw, SHADOW_ROOT_NAME, manifest_path))
+            return None
+        wtool_rel = wrel[len(SHADOW_ROOT_NAME) + 1:]
+    else:
+        # 默认镜像路径：$HOME 里的路径在 ~/.wtool 下同名（§8）
+        wtool_rel = home_rel
+
+    if produced and produced.strip() != "install.sh":
+        errors.append("<link produced-by=%r> 目前只认 install.sh（%s）"
+                      % (produced, manifest_path))
+        return None
+
+    if sub and not is_safe_rel(sub):
+        errors.append("<link subproject=%r> 必须是不含 .. 的相对路径" % sub)
+        return None
+
+    return Entry("link", sub or "",
+                 home=home_rel, wtool=wtool_rel,
+                 produced_by=(produced or "").strip(),
+                 force=_bool_attr(child, "force"),
+                 optional=_bool_attr(child, "optional"),
+                 manifest=manifest_path)
+
+
+def _parse_system_file(child, errors, manifest_path):
+    """系统文件（/etc 下）：src=自己的内容，或 kind=让引擎按发行版生成。
+
+    dest="auto" 只允许和 kind 一起用 —— 目标路径由引擎算（换源就是这种）。
+    """
+    dest = child.get("dest")
+    if dest != "auto" and (not dest or not dest.startswith("/")):
+        errors.append("<sudo-install> 的 dest 必须是绝对路径（或 kind 配 dest=\"auto\"）（%s）"
+                      % manifest_path)
+        return None
+    if dest == "auto" and not child.get("kind"):
+        errors.append("<sudo-install> dest=\"auto\" 必须和 kind 一起用")
+        return None
+    src = child.get("src")
+    kind = child.get("kind")
+    mode = (child.get("mode") or "replace").strip()
+    if mode not in ("replace", "add", "disable"):
+        errors.append("<sudo-install> mode 只能是 replace/add/disable，实际 %r" % mode)
+        return None
+    # disable 只是把原文件改名，不需要内容
+    if mode != "disable" and not src and not kind:
+        errors.append("<sudo-install> 需要 src（自己的内容）或 kind（引擎生成）")
+        return None
+    return Entry("sysfile", src or "", dest=dest, mode=mode,
+                 sf_kind=kind, mirror=child.get("mirror") or "ustc",
+                 backup=_bool_attr(child, "backup", default=(mode == "replace")),
+                 when=child.get("when") or "",
+                 desc=child.get("desc") or "",
+                 manifest=manifest_path)
+
+
+def _parse_sudo_install(child, errors, warnings, manifest_path):
+    """<sudo-install>：系统层。**一个标签覆盖那三类内容**（§3.3）：
+
+        <sudo-install src="provision/packages.yaml" marker="apt-base"/>   ← 跑脚本/playbook
+        <sudo-install kind="apt-mirror" mirror="ustc" dest="auto"/>       ← 引擎生成的系统文件
+        <sudo-install src="my.conf" dest="/etc/foo.conf"/>                ← 项目里带的系统文件
+
+    判据：有 dest=（且是绝对路径或 auto）就是系统文件，否则是要跑的任务。
+    系统文件可逆（备份 → 还原），任务不可逆（只记 marker 与 apt 差集）。
+    """
+    if child.get("dest"):
+        entry = _parse_system_file(child, errors, manifest_path)
+        return [entry] if entry is not None else []
+
+    src = child.get("src")
+    if not src:
+        errors.append("<sudo-install> 需要 src 或 dest（%s）" % manifest_path)
+        return []
+    if not is_safe_rel(src):
+        errors.append("<sudo-install src=%r> 必须是不含 .. 的相对路径" % src)
+        return []
+    # runner= 已经删掉：按扩展名判断（.yaml/.yml → ansible，其余 → shell）
+    if child.get("runner"):
+        warnings.append("<sudo-install runner=...> 已经删掉，按扩展名自动判断（%s）"
+                        % manifest_path)
+    runner = "ansible" if src.endswith((".yaml", ".yml")) else "shell"
+    return [Entry("task", src, runner=runner,
+                  marker=child.get("marker") or "",
+                  when=child.get("when") or "",
+                  desc=child.get("desc") or "",
+                  manifest=manifest_path)]
 
 
 def _int_attr(node, name, default, errors, where):
@@ -473,7 +676,11 @@ def validate_entries(entries, project_root, home, state_dir, errors, warnings):
     seen_dest = {}
 
     for entry in entries:
-        # 只有 env / link / task 的 src 是"项目内相对路径"；
+        # link 有自己的两跳路径规则，先单独走
+        if entry.kind == "link":
+            _validate_link(entry, project_root, home, errors, warnings, seen_dest)
+            continue
+        # 只有 env / task 的 src 是"项目内相对路径"；
         # sysfile 的 src 可选（也可用 kind 生成），source 的 src 是 URL
         if entry.kind in ("sysfile", "source"):
             if entry.kind == "sysfile" and entry.src and not is_safe_rel(entry.src):
@@ -496,23 +703,7 @@ def validate_entries(entries, project_root, home, state_dir, errors, warnings):
             errors.append("%s src 逃出项目目录: %s" % (entry.kind, entry.src))
             continue
 
-        if entry.kind == "link":
-            if not is_safe_rel(entry.dest):
-                errors.append("link dest=%r 必须是相对 $HOME、不含 .. 的路径"
-                              % entry.dest)
-                continue
-            abs_dest = os.path.join(home, entry.dest)
-            if not is_under(abs_dest, home):
-                errors.append("link dest 逃出 $HOME: %s" % entry.dest)
-                continue
-            if abs_dest in seen_dest:
-                errors.append("同一个清单里 dest 重复: %s" % entry.dest)
-                continue
-            seen_dest[abs_dest] = entry
-            entry.abs_dest = abs_dest
-            entry.abs_src = abs_src
-
-        elif entry.kind == "env":
+        if entry.kind == "env":
             if entry.shells:
                 entry.rc_files = [os.path.join(home, RC_FILE_BY_SHELL[s])
                                   for s in entry.shells if s in RC_CAPABLE_SHELLS]
@@ -523,6 +714,45 @@ def validate_entries(entries, project_root, home, state_dir, errors, warnings):
     # 跨仓冲突：registry 里 dest 被别的项目占了
     registry = _read_registry(os.path.join(state_dir, "registry.tsv"))
     return registry
+
+
+def _validate_link(entry, project_root, home, errors, warnings, seen_dest):
+    """算出 <link> 两跳的绝对路径，并检查源与落点。"""
+    shadow = os.path.join(home, SHADOW_ROOT_NAME)
+    abs_dest = os.path.join(home, entry.home)
+    abs_wtool = os.path.join(shadow, entry.wtool)
+    if not is_under(abs_dest, home):
+        errors.append("link home 逃出 $HOME: %s" % entry.home)
+        return
+    if not is_under(abs_wtool, shadow) or abs_wtool == shadow:
+        errors.append("link wtool 逃出 ~/%s: %s" % (SHADOW_ROOT_NAME, entry.wtool))
+        return
+    if abs_dest in seen_dest:
+        errors.append("同一个清单里 home 重复: %s" % entry.home)
+        return
+    # home 那一跳的落点在 $HOME 里；中间那一跳是我们自己造的，允许已存在
+    seen_dest[abs_dest] = entry
+    entry.abs_dest = abs_dest
+    entry.abs_wtool = abs_wtool
+
+    if entry.src:                       # subproject：内容来自项目目录
+        if not is_safe_rel(entry.src):
+            errors.append("link subproject=%r 必须是不含 .. 的相对路径" % entry.src)
+            return
+        abs_src = os.path.join(project_root, entry.src)
+        if not os.path.exists(abs_src):
+            if getattr(entry, "optional", False):
+                warnings.append("link subproject 不存在（optional，跳过）: %s"
+                                % entry.src)
+                entry.skip = True
+                return
+            errors.append("link subproject 不存在: %s" % abs_src)
+            return
+        if not is_under(abs_src, project_root):
+            errors.append("link subproject 逃出项目目录: %s" % entry.src)
+            return
+        entry.abs_src = abs_src
+    # produced-by=install.sh：实体由项目脚本铺，这一跳只要落点没被占就行
 
 
 def _read_registry(path):
@@ -655,6 +885,19 @@ def merge_rc(text, project_id, block, prio, remove_only):
 # --------------------------------------------------------------------------
 # 规划
 # --------------------------------------------------------------------------
+def _link_hops(entry, link_dir):
+    """一条 <link> 声明要建的软链：[(落点, 指向), ...]，顺序就是建链顺序。
+
+    中间那一跳（影子 HOME 里的实体）在前，$HOME 里那一跳在后 ——
+    建第二跳的时候第一跳必须已经在，否则就是一条悬空链。
+    """
+    hops = []
+    if entry.src:
+        hops.append((entry.abs_wtool, os.path.join(link_dir, entry.src)))
+    hops.append((entry.abs_dest, entry.abs_wtool))
+    return hops
+
+
 def plan_install(args, scratch):
     project_root = os.path.abspath(args.project)
     home = os.path.abspath(args.home)
@@ -662,7 +905,7 @@ def plan_install(args, scratch):
 
     errors, warnings = [], []
     manifest_path = os.path.join(project_root, "wtool.xml")
-    meta, entries = parse_manifest(manifest_path, project_root, errors)
+    meta, entries = parse_manifest(manifest_path, project_root, errors, warnings)
     if meta is None:
         raise PlanError("\n".join(errors))
 
@@ -691,39 +934,45 @@ def plan_install(args, scratch):
     for entry in entries:
         if entry.kind != "link" or getattr(entry, "skip", False):
             continue
-        dest = entry.abs_dest
-        want = os.path.join(link_dir, entry.src)
-        if os.path.islink(dest):
-            current = os.readlink(dest)
-            if os.path.normpath(current) != os.path.normpath(want):
-                msg = "dest 已是软链但指向别处: %s -> %s" % (dest, current)
+        for dest, want in _link_hops(entry, link_dir):
+            if os.path.islink(dest):
+                current = os.readlink(dest)
+                if os.path.normpath(current) != os.path.normpath(want):
+                    msg = "dest 已是软链但指向别处: %s -> %s" % (dest, current)
+                    (warnings if (args.force or entry.force) else errors).append(msg)
+            elif os.path.lexists(dest):
+                msg = "dest 已存在且不是软链: %s" % dest
                 (warnings if (args.force or entry.force) else errors).append(msg)
-        elif os.path.lexists(dest):
-            msg = "dest 已存在且不是软链: %s" % dest
-            (warnings if (args.force or entry.force) else errors).append(msg)
 
     if errors:
         raise PlanError("\n".join(errors))
 
-    rows = []
+    rows = []          # 引擎基建：中转链接 + env 块（项目 install.sh **之前**）
+    home_rows = []     # 声明面：$HOME 里的软链（install.sh **之后**，见 §4.2）
 
-    def add_link(kind, dest, target):
+    def add_link(bucket, kind, dest, target):
         """reg 行始终发出（保持 registry 与磁盘一致）；
         link 行只在软链缺失/指向不对时才发出，这样重复 install 才是真正的 no-op。"""
-        rows.append(("reg", kind, dest, "", "", ""))
+        bucket.append(("reg", kind, dest, "", "", ""))
         want = os.path.normpath(target)
         if os.path.islink(dest) and os.path.normpath(os.readlink(dest)) == want:
             return
-        rows.append(("link", kind, dest, target, "", ""))
+        bucket.append(("link", kind, dest, target, "", ""))
 
     # 1) 稳定中转链接 ~/.wtool/wtool-work-dir/links/<id> -> <project_root>
-    add_link("dir", link_dir, project_root)
+    add_link(rows, "dir", link_dir, project_root)
 
-    # 2) 项目内的软链，全部经由中转链接，保证仓库可搬家
+    # 2) 项目内的软链，走**两跳**（§3.2）：
+    #       <项目>/<subproject> → ~/.wtool/<wtool> → $HOME/<home>
+    #    中间那一跳是实体落点（也进影子 HOME 的镜像规则），最后一跳才是
+    #    应用去找的那个位置。produced-by 的中间那一跳由项目 install.sh 铺，
+    #    引擎只建最后一跳。
     for entry in entries:
         if entry.kind != "link" or getattr(entry, "skip", False):
             continue
-        add_link("file", entry.abs_dest, os.path.join(link_dir, entry.src))
+        for dest, want in _link_hops(entry, link_dir):
+            bucket = home_rows if dest == entry.abs_dest else rows
+            add_link(bucket, "file", dest, want)
 
     # 3) rc 注入
     rc_index = 0
@@ -758,6 +1007,7 @@ def plan_install(args, scratch):
                      sha256_text(new_text), env_rel))
 
     _write_plan(scratch, rows)
+    _write_plan(scratch, home_rows, "plan.home.tsv")
     _write_meta(scratch, {
         "project_id": project_id,
         "project_root": project_root,
@@ -773,6 +1023,7 @@ def plan_install(args, scratch):
         "project_root": project_root,
         "meta": meta,
         "rows": rows,
+        "home_rows": home_rows,
         "warnings": warnings,
     }
 
@@ -874,7 +1125,7 @@ def plan_provision(args, scratch):
     os.makedirs(scratch, exist_ok=True)
 
     manifest_path = os.path.join(project_root, "wtool.xml")
-    meta, entries = parse_manifest(manifest_path, project_root, errors)
+    meta, entries = parse_manifest(manifest_path, project_root, errors, warnings)
     if meta is None:
         raise PlanError("\n".join(errors))
 
@@ -991,9 +1242,9 @@ def plan_provision(args, scratch):
             "sysfiles": sysfile_rows, "sources": source_rows, "tasks": task_rows}
 
 
-def _write_plan(scratch, rows):
+def _write_plan(scratch, rows, name="plan.tsv"):
     os.makedirs(scratch, exist_ok=True)
-    with open(os.path.join(scratch, "plan.tsv"), "w",
+    with open(os.path.join(scratch, name), "w",
               encoding="utf-8", errors="surrogateescape") as fh:
         for row in rows:
             fh.write("\t".join(row) + "\n")
@@ -1290,7 +1541,7 @@ def render_table(root, state_dir, verbose=False, color=None):
                     d.append("%d 个 marker" % p["markers"])
                 if p["sysfiles"]:
                     d.append("%d 个系统文件" % p["sysfiles"])
-                detail.append("provision: " + ("、".join(d) if d else "没跑过"))
+                detail.append("sudo-install: " + ("、".join(d) if d else "没跑过"))
             if p["pub"]["kind"] == "none":
                 detail.append("不发布")
             elif p["published"]:
@@ -1356,7 +1607,7 @@ def _loader_block(shell):
     ]
 
 
-def collect_env_blocks(state, shell):
+def collect_env_blocks(state, shell, exclude=""):
     """扫出所有项目的 env 块，按 (priority, id) 排序。"""
     state = os.path.abspath(state)
     found = []
@@ -1367,6 +1618,8 @@ def collect_env_blocks(state, shell):
         if name not in filenames:
             continue
         pid = os.path.relpath(dirpath, state)
+        if exclude and (pid == exclude or pid.startswith(exclude + "/")):
+            continue
         prio = DEFAULT_PRIORITY
         meta = os.path.join(dirpath, "meta.tsv")
         text = read_text(meta)
@@ -1382,7 +1635,7 @@ def collect_env_blocks(state, shell):
     return found
 
 
-def render_env(home, state, shell):
+def render_env(home, state, shell, exclude=""):
     """算出两个文件的新内容：用户的 rc，和汇总文件。
 
     返回 (rc_path, rc_text|None, agg_path, agg_text|None)
@@ -1392,7 +1645,7 @@ def render_env(home, state, shell):
     rc_path = os.path.join(home, ".%src" % shell)
     agg_path = os.path.join(home, ".wtool", ".%src" % shell)
 
-    blocks = collect_env_blocks(state, shell)
+    blocks = collect_env_blocks(state, shell, exclude=exclude)
 
     # 汇总文件
     if blocks:
@@ -1442,10 +1695,17 @@ def render_env(home, state, shell):
 
 
 def plan_env(args, scratch):
-    """把 render_env 的结果落成动作行，交给 shell 执行（Python 只算不写）。"""
+    """把 render_env 的结果落成动作行，交给 shell 执行（Python 只算不写）。
+
+    顺带管**唯一一条引擎自己造的全局软链**：`~/usr` → `~/.wtool/usr`。
+    它不属于任何项目，一个项目都不剩时随 loader 块一起收走
+    （见 00-architecture.md §8）。
+    """
     rows = []
+    exclude = getattr(args, "exclude", "") or ""
     for shell in ("zsh", "bash"):
-        rc_path, rc_text, agg_path, agg_text = render_env(args.home, args.state, shell)
+        rc_path, rc_text, agg_path, agg_text = render_env(args.home, args.state,
+                                                          shell, exclude=exclude)
 
         if rc_text is None:
             if os.path.isfile(rc_path):
@@ -1468,6 +1728,69 @@ def plan_env(args, scratch):
                 with open(f, "w", encoding="utf-8", errors="surrogateescape") as fh:
                     fh.write(agg_text)
                 rows.append(("write", "file", agg_path, f, sha256_text(agg_text), "-"))
+
+    rows.extend(plan_usr_link(args.home, args.state, exclude))
+    return rows
+
+
+def _installed_ids(state, exclude="", home=""):
+    """state 目录下"还装着"的项目 id。判据是文件，不是内存里的东西。
+
+    `~/usr` 那条引擎自己的登记要跳过：它**不属于任何项目**，但登记表里
+    会挂着最后一个装它的项目（wt_plan_exec 的 link 分支会登记）。
+    不跳过的话，那个项目卸完它还留着，`~/usr` 就永远收不走（踩过）。
+    """
+    usr_dest = os.path.join(os.path.abspath(home), "usr") if home else ""
+    state = os.path.abspath(state)
+    out = []
+    if not os.path.isdir(state):
+        return out
+    for dirpath, _dirnames, filenames in os.walk(state):
+        pid = os.path.relpath(dirpath, state)
+        if pid == ".":
+            continue
+        if exclude and (pid == exclude or pid.startswith(exclude + "/")):
+            continue
+        for name in ("meta.tsv", "env.zsh", "env.bash"):
+            if name in filenames:
+                out.append(pid)
+                break
+    # registry 里还有别的项目登记着也算（比如只有 link、没有 env 的项目）
+    for row in _read_tsv(os.path.join(state, "registry.tsv")):
+        # 引擎自己登记的不算"某个项目还装着"：owner 是 - 的、以及 ~/usr
+        if not row or not row[0]:
+            continue
+        if usr_dest and os.path.abspath(row[0]) == usr_dest:
+            continue
+        if len(row) >= 2 and row[1] and row[1] not in ("-", "wtool") \
+                and row[1] != exclude:
+            out.append(row[1])
+    return out
+
+
+def plan_usr_link(home, state, exclude=""):
+    """~/usr → ~/.wtool/usr 这条全局软链的动作行。
+
+    有项目装着就保证它在；一个都不剩就收走 —— 但**只删软链，不碰实体**：
+    ~/.wtool/usr 里是编译/下载产物，删了就没法卸干净了（那是 uninstall 的事）。
+    """
+    home = os.path.abspath(home)
+    dest = os.path.join(home, "usr")
+    target = os.path.join(home, SHADOW_ROOT_NAME, "usr")
+    rows = []
+    if _installed_ids(state, exclude, home):
+        # 刻意**不发 reg 行**：~/usr 不属于任何项目，它的生死归 wt_env_sync。
+        # 登记成某个项目的话，那个项目 uninstall 之后 registry 里还留着它，
+        # _installed_ids 就会永远认为"还有项目装着"，~/usr 再也收不走（踩过）。
+        if not (os.path.islink(dest) and os.path.normpath(os.readlink(dest))
+                == os.path.normpath(target)):
+            rows.append(("link", "dir", dest, target, "", ""))
+    else:
+        if os.path.islink(dest) and os.path.normpath(os.readlink(dest)) \
+                == os.path.normpath(target):
+            rows.append(("unlink", "dir", dest, target, "", ""))
+        # 登记表里那条也清掉（link 动作登记过它）
+        rows.append(("regdel", "dir", dest, "", "", ""))
     return rows
 
 
@@ -1693,7 +2016,7 @@ def scan_projects(root, manifests_only=False):
         if meta is None:
             continue
         found.append((meta["priority"], meta["id"] or os.path.basename(dirpath),
-                      dirpath, meta["publish"]))
+                      dirpath, effective_publish(dirpath, meta["publish"])))
         known.add(os.path.abspath(dirpath))
         for sub in meta["publish"]["subs"]:
             sub_abs = os.path.normpath(os.path.join(dirpath, sub["path"]))
@@ -1766,6 +2089,19 @@ def list_projects(root):
         print("%d\t%s\t%s" % (prio, pid, path))
 
 
+def sudo_list(root):
+    """声明了系统层（<sudo-install> / <source>）的项目：prio id path。
+
+    `wtool sudo-install`（不带参数）和 `wtool sudo-bootstrap` 拿它当工作清单。
+    """
+    for prio, pid, path, _pub in scan_projects(root, manifests_only=True):
+        errors, warnings = [], []
+        _meta, entries = parse_manifest(os.path.join(path, "wtool.xml"), path,
+                                        errors, warnings)
+        if any(e.kind in ("sysfile", "source", "task") for e in entries):
+            print("%d\t%s\t%s" % (prio, pid, path))
+
+
 def publish_list(root):
     """列出所有 wtool 项目的发布方式：prio id path kind script tag to"""
     for prio, pid, path, pub in scan_projects(root, manifests_only=True):
@@ -1785,8 +2121,9 @@ def publish_info(project_dir, ws_root=None):
         # 没有 wtool.xml 就是默认源码发布（这不是错误）
         meta = {"id": None, "priority": DEFAULT_PRIORITY,
                 "publish": {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
-                            "to": "", "asset": "", "subs": [], "targets": []}}
-    pub = meta["publish"]
+                            "to": "", "asset": "", "subs": [], "targets": [],
+                            "_declared": False}}
+    pub = effective_publish(root, meta["publish"])
     # 没有 wtool.xml 的项目用"相对工作区的路径"当 id，和 plan_install 的约定一致
     _ws = ws_root or os.environ.get("WTOOL_ROOT") or root
     _pid = meta["id"] or os.path.relpath(root, os.path.abspath(_ws))
@@ -1794,6 +2131,7 @@ def publish_info(project_dir, ws_root=None):
         _pid = os.path.basename(root)
     print("project_id\t%s" % _pid)
     print("project_root\t%s" % root)
+    print("priority\t%s" % meta.get("priority", DEFAULT_PRIORITY))
     print("kind\t%s" % pub["kind"])
     print("script\t%s" % (pub.get("script") or "-"))
     print("tag\t%s" % (pub.get("tag") or DEFAULT_PUBLISH_TAG))
@@ -1807,6 +2145,520 @@ def publish_info(project_dir, ws_root=None):
     for e in errors:
         print("error\t%s" % e, file=sys.stderr)
     return 1 if errors else 0
+
+
+# --------------------------------------------------------------------------
+# 声明认领：一条 $HOME 软链还有没有别的项目要它
+#
+# uninstall 拆软链之前必须先问这一句（见 00-architecture.md §4.2）：
+# 判据是**磁盘上所有 wtool 项目的 wtool.xml**，不是 registry ——
+# registry 只能有一个主人，而"两个项目都要 ~/.gitconfig"是完全合理的。
+# --------------------------------------------------------------------------
+def claimed_homes(root, exclude_id="", home=""):
+    """[(abs_dest, project_id), ...]：别的项目声明的 $HOME 落点。"""
+    home = os.path.abspath(home) if home else ""
+    out = []
+    for _prio, pid, path, _pub in scan_projects(root, manifests_only=True):
+        if pid == exclude_id:
+            continue
+        errors, warnings = [], []
+        _meta, entries = parse_manifest(os.path.join(path, "wtool.xml"), path,
+                                        errors, warnings)
+        for entry in entries:
+            if entry.kind != "link":
+                continue
+            out.append((os.path.join(home, entry.home), pid))
+    return sorted(set(out))
+
+
+# --------------------------------------------------------------------------
+# pack-release：把项目打成 publish/ 里的分卷
+#
+# Python 只算"打哪些文件"（读 .gitignore 是文本逻辑），实际打包、切卷、
+# 算 sha256 由 shell 侧做（wtool_fs.sh），产物落在 <项目>/publish/。
+# --------------------------------------------------------------------------
+ALWAYS_IGNORED_DIRS = ("release", "publish", ".git", "__pycache__",
+                       ".mypy_cache", ".pytest_cache", ".ruff_cache")
+
+
+def _git_ls_files(root):
+    """在 git 工作区里时，让 git 自己算文件表 —— 它就是 .gitignore 的权威实现。
+
+    返回 None 表示"不是 git 工作区/git 不可用"，调用方改用自带的解析器。
+    """
+    try:
+        p = subprocess.run(["git", "-C", root, "rev-parse", "--is-inside-work-tree"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    if p.returncode != 0 or p.stdout.strip() != b"true":
+        return None
+    try:
+        p = subprocess.run(["git", "-C", root, "ls-files", "-z", "-co",
+                            "--exclude-standard"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    if p.returncode != 0:
+        return None
+    return [f.decode("utf-8", "surrogateescape")
+            for f in p.stdout.split(b"\0") if f]
+
+
+def _ignore_regex(pattern):
+    """把 .gitignore 的一行编译成正则。够用就好：发布副本里没有 .git，
+    这条路只在"没有 git 可用"时兜底。"""
+    pat = pattern.rstrip()
+    anchored = pat.startswith("/")
+    pat = pat.lstrip("/")
+    out, i = [], 0
+    while i < len(pat):
+        c = pat[i]
+        if c == "*":
+            if pat[i:i + 2] == "**":
+                out.append(".*")
+                i += 2
+                if pat[i:i + 1] == "/":
+                    i += 1
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[":
+            j = pat.find("]", i)
+            if j < 0:
+                out.append(re.escape(c))
+            else:
+                out.append(pat[i:j + 1])
+                i = j
+        else:
+            out.append(re.escape(c))
+        i += 1
+    body = "".join(out)
+    if anchored or "/" in pat:
+        return re.compile(r"^" + body + r"(/.*)?$")
+    return re.compile(r"(^|.*/)" + body + r"(/.*)?$")
+
+
+def _gitignore_rules(root):
+    """收集项目里所有 .gitignore 的规则：(base_rel, regex, negate)。"""
+    rules = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ALWAYS_IGNORED_DIRS]
+        if ".gitignore" not in filenames:
+            continue
+        base = os.path.relpath(dirpath, root)
+        if base == ".":
+            base = ""
+        for line in (read_text(os.path.join(dirpath, ".gitignore")) or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            negate = line.startswith("!")
+            if negate:
+                line = line[1:]
+            if not line:
+                continue
+            rules.append((base, _ignore_regex(line), negate))
+    return rules
+
+
+def _ignored(rel, is_dir, rules):
+    hit = False
+    for base, rx, negate in rules:
+        if base:
+            if rel == base:
+                sub = ""
+            elif rel.startswith(base + "/"):
+                sub = rel[len(base) + 1:]
+            else:
+                continue
+        else:
+            sub = rel
+        if rx.match(sub):
+            hit = not negate
+    return hit
+
+
+def source_file_list(project_root):
+    """源码包里要打进去的文件（相对项目目录，已按路径排序）。
+
+    **一定读 .gitignore**：不读的话 GB 级的 release/ 会被原样打进源码包
+    （实测过）。git 可用就让 git 算，否则自己解析 .gitignore。
+    另外无论 .gitignore 怎么写，release/ 和 publish/ 永远排除。
+    """
+    root = os.path.abspath(project_root)
+    files = _git_ls_files(root)
+    if files is None:
+        files = []
+        rules = _gitignore_rules(root)
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in ALWAYS_IGNORED_DIRS]
+            for name in filenames:
+                files.append(os.path.relpath(os.path.join(dirpath, name), root))
+
+    picked = []
+    for rel in files:
+        rel = rel.replace(os.sep, "/")
+        if not is_safe_rel(rel):
+            continue
+        head = rel.split("/")[0]
+        if head in ALWAYS_IGNORED_DIRS:
+            continue
+        if not os.path.lexists(os.path.join(root, rel)):
+            continue                      # git 索引里有、磁盘上没有的文件
+        if os.path.isdir(os.path.join(root, rel)) \
+                and not os.path.islink(os.path.join(root, rel)):
+            continue                      # 子模块之类的 gitlink
+        picked.append(rel)
+    return sorted(set(picked))
+
+
+def release_file_list(project_root):
+    """release/ 里的文件（相对项目目录）。文件从这儿来，装到别的机器上去。"""
+    root = os.path.abspath(project_root)
+    rel_root = os.path.join(root, "release")
+    out = []
+    if not os.path.isdir(rel_root):
+        return out
+    for dirpath, _dirnames, filenames in os.walk(rel_root):
+        for name in filenames:
+            p = os.path.join(dirpath, name)
+            out.append(os.path.relpath(p, root).replace(os.sep, "/"))
+    return sorted(out)
+
+
+def pack_plan(args):
+    """写三张清单到 scratch：源码包的文件、release 包的文件、声明面。"""
+    root = os.path.abspath(args.project)
+    scratch = args.scratch
+    os.makedirs(scratch, exist_ok=True)
+    src_files = source_file_list(root)
+    rel_files = release_file_list(root)
+    declare = [f for f in DECLARE_FILES if os.path.isfile(os.path.join(root, f))]
+
+    with open(os.path.join(scratch, "source.files"), "w",
+              encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write("\n".join(src_files) + ("\n" if src_files else ""))
+    with open(os.path.join(scratch, "release.files"), "w",
+              encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write("\n".join(rel_files) + ("\n" if rel_files else ""))
+    with open(os.path.join(scratch, "declare.tsv"), "w", encoding="utf-8") as fh:
+        for name in declare:
+            fh.write("%s\t%s\n" % (name, name))
+    return {"root": root, "source": src_files, "release": rel_files,
+            "declare": declare}
+
+
+def write_dist(args):
+    """把 shell 算好的分卷表落成 dist.json（写 scratch，由 shell 拷走）。"""
+    rows = _read_tsv(args.rows)
+    files, volumes = [], []
+    for row in rows:
+        if len(row) < 4:
+            continue
+        name, sha, size, role = row[0], row[1], row[2], row[3]
+        of = row[4] if len(row) > 4 else ""
+        try:
+            nbytes = int(size or 0)
+        except ValueError:
+            nbytes = 0
+        if of:
+            volumes.append({"name": name, "sha256": sha, "bytes": nbytes, "of": of})
+        else:
+            files.append({"name": name, "role": role, "sha256": sha, "bytes": nbytes})
+
+    dist = {
+        "schema": 1,
+        "project": args.project_id,
+        "tag": args.tag,
+        "repo": args.repo,
+        "base_url": "https://github.com/%s/releases/download/%s" % (args.repo, args.tag),
+        "packed_at": args.at or "",
+        "commit": args.commit or "",
+        "volume_size": args.volume_size,
+        "declare": [d for d in (args.declare or "").split(",") if d],
+        # 顺序有意义：volumes 按顺序逐个拼接就是原来的大文件
+        "files": files,
+        "volumes": volumes,
+        "how": ("把 dist.json 和所有分卷下到项目的 publish/ 目录，然后："
+                "wtool unpack-release <项目> ；wtool install <项目>"),
+    }
+    text = json.dumps(dist, ensure_ascii=False, indent=2) + "\n"
+    with open(args.out, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return dist
+
+
+def _downloadable_rows(rows):
+    """从 rows.tsv 里挑出**真正能下载的东西**。
+
+    rows.tsv 的每一行是 `名字 sha256 字节 role of`：
+    被切成卷的大文件（of 非空的行指向它）本身不留在 publish/ 里，
+    所以下载页和 downloads.sh 都不该列它 —— 列了就是 404。
+    """
+    split = {row[4] for row in rows if len(row) > 4 and row[4]}
+    out = []
+    for row in rows:
+        if len(row) < 2:
+            continue
+        if len(row) > 4 and row[4]:
+            out.append(row)                      # 分卷：要下
+        elif row[0] in split:
+            continue                             # 被切开的原始大文件：不在 publish/ 里
+        else:
+            out.append(row)
+    return out
+
+
+def downloads_sh(args):
+    """scripts/downloads.sh 的内容：本次发布了什么（文本，进 Git）。"""
+    rows = _downloadable_rows(_read_tsv(args.rows))
+    base = "https://github.com/%s/releases/download/%s" % (args.repo, args.tag)
+    out = ["# 本次发布的资产清单 —— 由 `wtool pack-release` 生成，不要手改。",
+           "#",
+           "# download.sh 先定义 wt_dl_add（怎么下、并发几路、断线怎么续传），",
+           "# 再 source 本文件 —— 这里只说\"这次发了什么\"。",
+           "",
+           "WT_DL_TAG='%s'" % args.tag,
+           "WT_DL_BASE_URL='%s'" % base,
+           ""]
+    for row in rows:
+        out.append("wt_dl_add '%s' '%s'" % (row[0], row[1]))
+    print("\n".join(out) + "\n", end="")
+
+
+def download_doc(args):
+    """docs/download.md 的内容：给人看的下载页。"""
+    rows = _downloadable_rows(_read_tsv(args.rows))
+    base = "https://github.com/%s/releases/download/%s" % (args.repo, args.tag)
+    out = ["# 下载 %s" % args.project_id,
+           "",
+           "这一版：`%s`%s" % (args.tag,
+                              ("（%s）" % args.at if args.at else "")),
+           "",
+           "| 文件 | 大小 | 直链 |",
+           "|---|---|---|"]
+    for row in rows:
+        if len(row) < 3:
+            continue
+        try:
+            size = int(row[2] or 0)
+        except ValueError:
+            size = 0
+        out.append("| `%s` | %s | %s/%s |" % (row[0], _human_size(size), base, row[0]))
+    out += ["",
+            "## 怎么装",
+            "",
+            "```sh",
+            "# 1) 把 dist.json 和上面所有文件下到项目的 publish/ 目录",
+            "wtool unpack-release %s   # 校验每卷 sha256 → 拼接 → 解到 release/" % args.project_id,
+            "wtool install %s          # 再装（登记、软链、shell 集成）" % args.project_id,
+            "```",
+            "",
+            "`install` 只认 `release.zip`，不需要 `源码.zip`。",
+            ""]
+    print("\n".join(out), end="")
+
+
+def _human_size(n):
+    units = ("B", "K", "M", "G", "T")
+    v = float(n)
+    for u in units:
+        if v < 1024 or u == units[-1]:
+            return "%d%s" % (v, u) if u == "B" else "%.1f%s" % (v, u)
+        v /= 1024.0
+    return "%d" % n
+
+
+# --------------------------------------------------------------------------
+# check：声明 / 日志 / 磁盘 三者对比，只报不改
+# --------------------------------------------------------------------------
+def _journal_rows(state, pid):
+    return _read_tsv(os.path.join(state, pid, "journal.tsv"))
+
+
+def do_check(args):
+    home = os.path.abspath(args.home)
+    state = os.path.abspath(args.state)
+    root = os.path.abspath(args.root)
+    problems = []
+
+    def bad(pid, msg):
+        problems.append((pid, msg))
+
+    projects = scan_projects(root, manifests_only=True)
+    if args.project:
+        want = os.path.abspath(args.project)
+        projects = [p for p in projects if os.path.abspath(p[2]) == want]
+
+    # ---- 全局：~/usr 这条引擎自己造的软链
+    usr_dest = os.path.join(home, "usr")
+    usr_target = os.path.join(home, SHADOW_ROOT_NAME, "usr")
+    if os.path.islink(usr_dest):
+        if os.path.normpath(os.readlink(usr_dest)) != os.path.normpath(usr_target):
+            bad("-", "~/usr 指向了别处: %s（应该是 %s）"
+                % (os.readlink(usr_dest), usr_target))
+    elif os.path.exists(usr_dest):
+        bad("-", "~/usr 存在但不是软链（应该是 → ~/.wtool/usr）")
+    elif _installed_ids(state):
+        bad("-", "~/usr 不见了（有项目装着，它应该在）")
+
+    # ---- 全局：env 汇总与 loader 块
+    agg_zsh = os.path.join(home, SHADOW_ROOT_NAME, ".zshrc")
+    blocks = collect_env_blocks(state, "zsh")
+    if blocks and not os.path.isfile(agg_zsh):
+        bad("-", "~/.wtool/.zshrc 不见了，但还有 %d 个项目的 env 块" % len(blocks))
+    for shell in ("zsh", "bash"):
+        rc = os.path.join(home, ".%src" % shell)
+        text = read_text(rc) or ""
+        has_loader = any(l.strip() == LOADER_BEGIN for l in text.split("\n"))
+        has_blocks = bool(collect_env_blocks(state, shell))
+        if has_blocks and not has_loader:
+            bad("-", "%s 里没有 wtool 的 loader 块（env 不会生效）" % rc)
+        if has_loader and not has_blocks:
+            bad("-", "%s 里有 loader 块，但一个项目的 env 块都没有" % rc)
+
+    # ---- 逐项目
+    for _prio, pid, path, pub in projects:
+        errors, warnings = [], []
+        meta, entries = parse_manifest(os.path.join(path, "wtool.xml"), path,
+                                       errors, warnings)
+        for e in errors:
+            bad(pid, "清单有问题: %s" % e)
+        if meta is None:
+            continue
+        verrors, vwarnings = [], []
+        validate_entries(entries, path, home, state, verrors, vwarnings)
+        for e in verrors:
+            bad(pid, "声明与磁盘对不上: %s" % e)
+
+        journal = _journal_rows(state, pid)
+        if not journal and not os.path.isfile(os.path.join(state, pid, "meta.tsv")):
+            # 没装过**不是**"坏了"：扫全部项目时（wtool check）静默跳过，
+            # 只有明确点了这个项目才提一句（那时候人是想知道它为什么没生效）。
+            if args.project and any(e.kind in ("link", "env") for e in entries):
+                bad(pid, "还没装过（wtool install <路径>）")
+            continue
+
+        owned = set()
+        for row in journal:
+            act = row[0] if row else ""
+            dest = row[2] if len(row) > 2 else ""
+            target = row[3] if len(row) > 3 else "-"
+            owned.add(dest)
+            if act == "link":
+                if not os.path.islink(dest):
+                    if os.path.exists(dest):
+                        bad(pid, "%s 已经不是软链了（被换成了实体）" % dest)
+                    else:
+                        bad(pid, "%s 不见了（wtool repair 可以补）" % dest)
+                elif target != "-" and os.path.normpath(os.readlink(dest)) \
+                        != os.path.normpath(target):
+                    bad(pid, "%s 指向变了: %s（记录的是 %s）"
+                        % (dest, os.readlink(dest), target))
+            elif act == "sysfile":
+                if os.path.exists(dest) and os.path.exists(os.path.join(
+                        state, pid, "system")):
+                    pass
+
+        # 声明里有、日志里没有 → 装的时候没带上（或者被人手工删过）
+        for entry in entries:
+            if entry.kind != "link" or getattr(entry, "skip", False):
+                continue
+            for dest, _want in _link_hops(entry, links_dir_for(home, pid)):
+                if dest not in owned and (os.path.lexists(dest) or
+                                          dest == entry.abs_dest):
+                    if dest == entry.abs_dest and not os.path.lexists(dest):
+                        bad(pid, "%s 没建（wtool repair 可以补）" % dest)
+
+        # env 块：声明了 zshrc/bashrc，state 里得有对应的块文件
+        for entry in entries:
+            if entry.kind != "env" or getattr(entry, "skip", False):
+                continue
+            for shell in entry.shells:
+                if shell not in RC_CAPABLE_SHELLS:
+                    continue
+                blk = os.path.join(state, pid, "env.%s" % shell)
+                if not os.path.isfile(blk):
+                    bad(pid, "%s 的 env 块不见了: %s" % (shell, blk))
+
+    for pid, msg in problems:
+        print("%s\t%s" % (pid, msg))
+    return 1 if problems else 0
+
+
+# --------------------------------------------------------------------------
+# kill-self-forever：列出要删的、要说清不删的
+# --------------------------------------------------------------------------
+def kill_plan(args):
+    """打印要删的东西：link|<落点>|<指向>；dir|<路径>；rc|<文件>。
+
+    只**列**，删由 shell 做（Python 只算不写）。
+    """
+    home = os.path.abspath(args.home)
+    state = os.path.abspath(args.state)
+    seen = set()
+    for row in _read_tsv(os.path.join(state, "registry.tsv")):
+        if len(row) < 1 or not row[0]:
+            continue
+        dest = row[0]
+        if dest in seen:
+            continue
+        seen.add(dest)
+        target = os.readlink(dest) if os.path.islink(dest) else "-"
+        print("link\t%s\t%s" % (dest, target))
+    # 每个项目 journal 里的软链（registry 可能被删过）
+    if os.path.isdir(state):
+        for dirpath, _dirnames, filenames in os.walk(state):
+            if "journal.tsv" not in filenames:
+                continue
+            for row in _read_tsv(os.path.join(dirpath, "journal.tsv")):
+                if len(row) < 4 or row[0] != "link":
+                    continue
+                if row[2] in seen:
+                    continue
+                seen.add(row[2])
+                print("link\t%s\t%s" % (row[2], row[3]))
+    usr_dest = os.path.join(home, "usr")
+    usr_target = os.path.join(home, SHADOW_ROOT_NAME, "usr")
+    if os.path.islink(usr_dest) and usr_dest not in seen:
+        print("link\t%s\t%s" % (usr_dest, usr_target))
+    for shell in ("zsh", "bash"):
+        print("rc\t%s" % os.path.join(home, ".%src" % shell))
+    print("dir\t%s" % os.path.join(home, SHADOW_ROOT_NAME))
+    print("dir\t%s" % state)
+    return 0
+
+
+def read_dist(args):
+    """把 dist.json 摊平成 shell 好读的行。
+
+    file   <名字> <sha256> <字节> <role>
+    volume <名字> <sha256> <字节> <拼给谁>
+    meta   <键> <值>
+    """
+    try:
+        with open(args.dist, encoding="utf-8") as fh:
+            dist = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print("wtool: error: 读不了 dist.json: %s" % exc, file=sys.stderr)
+        return 2
+    for f in dist.get("files", []):
+        print("file\t%s\t%s\t%s\t%s" % (f.get("name", ""), f.get("sha256", "-"),
+                                        f.get("bytes", 0), f.get("role", "")))
+    for v in dist.get("volumes", []):
+        print("volume\t%s\t%s\t%s\t%s" % (v.get("name", ""), v.get("sha256", "-"),
+                                          v.get("bytes", 0),
+                                          v.get("of", "")))
+    for key in ("project", "tag", "repo", "base_url", "compression", "volume_size"):
+        if dist.get(key):
+            print("meta\t%s\t%s" % (key, dist[key]))
+    if not dist.get("files") and dist.get("volumes"):
+        # 老格式（astronvim 的 publish.sh 自己写的）：只有 volumes + compression，
+        # 拼接 + 解压之后是一棵 tar。这条是过渡路径。
+        print("meta\tlegacy\t1")
+    return 0
 
 
 def build_parser():
@@ -1847,6 +2699,9 @@ def build_parser():
     lp = sub.add_parser("list-projects")
     lp.add_argument("--root", required=True)
 
+    sl = sub.add_parser("sudo-list")
+    sl.add_argument("--root", required=True)
+
     pl = sub.add_parser("publish-list")
     pl.add_argument("--root", required=True)
 
@@ -1858,6 +2713,53 @@ def build_parser():
     pe.add_argument("--home", required=True)
     pe.add_argument("--state", required=True)
     pe.add_argument("--scratch", required=True)
+    # 正在卸载的那个项目要从"还剩谁"里扣掉：它的 state 目录这会儿还在
+    pe.add_argument("--exclude", default="")
+
+    cl = sub.add_parser("claimed")
+    cl.add_argument("--root", required=True)
+    cl.add_argument("--home", required=True)
+    cl.add_argument("--exclude-id", default="")
+
+    pk = sub.add_parser("pack-plan")
+    pk.add_argument("project")
+    pk.add_argument("--scratch", required=True)
+
+    wd = sub.add_parser("write-dist")
+    wd.add_argument("--out", required=True)
+    wd.add_argument("--rows", required=True)
+    wd.add_argument("--project-id", required=True)
+    wd.add_argument("--tag", required=True)
+    wd.add_argument("--repo", required=True)
+    wd.add_argument("--commit", default="")
+    wd.add_argument("--at", default="")
+    wd.add_argument("--volume-size", default=DEFAULT_VOLUME_SIZE)
+    wd.add_argument("--declare", default="")
+
+    ds = sub.add_parser("downloads-sh")
+    ds.add_argument("--rows", required=True)
+    ds.add_argument("--tag", required=True)
+    ds.add_argument("--repo", required=True)
+
+    dd = sub.add_parser("download-doc")
+    dd.add_argument("--rows", required=True)
+    dd.add_argument("--tag", required=True)
+    dd.add_argument("--repo", required=True)
+    dd.add_argument("--project-id", required=True)
+    dd.add_argument("--at", default="")
+
+    ck = sub.add_parser("check")
+    ck.add_argument("--root", required=True)
+    ck.add_argument("--home", required=True)
+    ck.add_argument("--state", required=True)
+    ck.add_argument("project", nargs="?")
+
+    kp = sub.add_parser("kill-plan")
+    kp.add_argument("--home", required=True)
+    kp.add_argument("--state", required=True)
+
+    rd = sub.add_parser("read-dist")
+    rd.add_argument("dist")
 
     ud = sub.add_parser("update-downloads")
     ud.add_argument("--doc", required=True)
@@ -1884,10 +2786,11 @@ def main(argv):
             for w in res["warnings"]:
                 print("wtool: warning: %s" % w, file=sys.stderr)
             n_link = sum(1 for r in res["rows"] if r[0] == "link")
+            n_home = sum(1 for r in res.get("home_rows", []) if r[0] == "link")
             n_rc = sum(1 for r in res["rows"] if r[0] in ("rc", "envblock"))
             print("project   : %s" % res["project_id"])
             print("root      : %s" % res["project_root"])
-            print("actions   : %d link, %d rc" % (n_link, n_rc))
+            print("actions   : %d link, %d home-link, %d rc" % (n_link, n_home, n_rc))
         elif args.cmd == "plan-uninstall":
             res = plan_uninstall(args, args.scratch)
             for w in res["warnings"]:
@@ -1903,6 +2806,8 @@ def main(argv):
                   % (len(res["sysfiles"]), len(res["sources"]), len(res["tasks"])))
         elif args.cmd == "list-projects":
             list_projects(args.root)
+        elif args.cmd == "sudo-list":
+            sudo_list(args.root)
         elif args.cmd == "publish-list":
             publish_list(args.root)
         elif args.cmd == "publish-info":
@@ -1911,6 +2816,29 @@ def main(argv):
             rows = plan_env(args, args.scratch)
             _write_plan(args.scratch, rows)
             print("actions   : %d" % len(rows))
+        elif args.cmd == "claimed":
+            for dest, pid in claimed_homes(args.root, args.exclude_id, args.home):
+                print("%s\t%s" % (dest, pid))
+        elif args.cmd == "pack-plan":
+            res = pack_plan(args)
+            print("source    : %d 个文件" % len(res["source"]))
+            print("release   : %d 个文件" % len(res["release"]))
+            print("declare   : %s" % (",".join(res["declare"]) or "-"))
+            print("declare_file\t%s" % os.path.join(args.scratch, "declare.tsv"))
+        elif args.cmd == "write-dist":
+            dist = write_dist(args)
+            print("dist      : %s（%d 个文件，%d 个分卷）"
+                  % (args.out, len(dist["files"]), len(dist["volumes"])))
+        elif args.cmd == "downloads-sh":
+            downloads_sh(args)
+        elif args.cmd == "download-doc":
+            download_doc(args)
+        elif args.cmd == "check":
+            return do_check(args)
+        elif args.cmd == "kill-plan":
+            return kill_plan(args)
+        elif args.cmd == "read-dist":
+            return read_dist(args)
         elif args.cmd == "update-downloads":
             # 内容从 stdout 出，由 shell 落盘（Python 只算不写）
             update_downloads(args.doc, args.rows)
@@ -1932,7 +2860,8 @@ def main(argv):
         elif args.cmd == "validate":
             errors, warnings = [], []
             root = os.path.abspath(args.project)
-            meta, entries = parse_manifest(os.path.join(root, "wtool.xml"), root, errors)
+            meta, entries = parse_manifest(os.path.join(root, "wtool.xml"), root,
+                                           errors, warnings)
             if meta is not None:
                 validate_entries(entries, root, args.home, args.state, errors, warnings)
             for w in warnings:
