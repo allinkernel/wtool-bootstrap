@@ -25,6 +25,13 @@
 #                       照 dist.json 校验每卷 sha256 → 拼接 → 解到 release/
 #   wtool publish   [<项目>...] [--tag=TAG] [--dry-run] [--force]
 #                       pack-release + 上传；有 scripts/publish.sh 的项目走那个脚本
+#   wtool pull-layers    <项目>... [--registry=<前缀>] [--target=] [--layer=]
+#                       从镜像仓库把层拉回来 → release/（**目标机不需要 docker**）
+#   wtool push-layers    <项目>... [--registry=<前缀>] [--target=] [--layer=]
+#                       release/ 的层 → 镜像仓库（docker push，**不是** crane push）
+#   wtool pack-layer     <项目> --layer=<层名> [--out=文件]
+#   wtool unpack-layer   <项目> --from=文件 --layer=<层名>
+#                       单个层 ↔ 一个"镜像形状"的 tar。**不联网**
 #
 #   ── 一次装好 ───────────────────────────────────────────────
 #   wtool bootstrap [--dry-run] [--force]   所有项目 install（**不做系统层**）
@@ -2291,6 +2298,312 @@ _publish_kind_cn() {
 }
 
 # --------------------------------------------------------------------------
+# push-layers / pull-layers / pack-layer / unpack-layer
+#
+# 第二条发布通道：**容器镜像仓库**。和 pack-release / publish（GitHub 分卷那条）
+# 是同一份 payload 的两种包装：
+#
+#   push-layers    release/<target>/<层>/{payload,OWNED.tsv}  →  镜像仓库
+#   pull-layers    镜像仓库  →  release/<target>/<层>/{payload,OWNED.tsv}
+#   pack-layer     单个层 → 一个镜像形状的 tar（**不联网**）
+#   unpack-layer   同上，反方向（**不联网**）
+#
+# **目标机上不需要 docker** —— 拉取只用一个 crane 静态二进制。
+# 为什么值得多这条通道（2026-09-26 实测）：上传两条路一样慢（~0.25 MB/s），
+# 但下载 **ACR 10.2 MB/s vs GitHub 2.6~4.8 MB/s** —— 发布一次慢，取用快一倍多。
+#
+# 完整设计见 harness/notes/00-architecture.md §5.1；
+# 踩过的坑见 harness/notes/03-hazards.md O 节（尤其 O1 crane push 推不了大层、
+# O2 docker push 的命门是 dockerd 写死的代理配置）。
+# --------------------------------------------------------------------------
+
+# registry 前缀的形状：<域名>/<命名空间>，例如
+#   crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry
+# 镜像名 = <前缀>/<项目 basename>；tag = <层名（/ 换成 -）>-<target>
+wt_layer_repo() { printf '%s/%s\n' "$1" "$(basename "$2")"; }
+wt_layer_tag()  { printf '%s-%s\n' "$(printf '%s' "$1" | tr '/' '-')" "$2"; }
+
+# release/<target>/ 下有哪些层。判据是"目录里有 payload/"，层名允许带斜杠（lang/perl）。
+wt_layers_of() {
+    [ -d "$1" ] || return 0
+    for _d in "$1"/*/ "$1"/*/*/; do
+        [ -d "${_d}payload" ] || continue
+        printf '%s\n' "${_d%/}" | sed "s|^$1/||"
+    done
+}
+
+wt_need_crane() {
+    _wc=${WTOOL_CRANE:-crane}
+    command -v "$_wc" >/dev/null 2>&1 || wt_die "找不到 crane（拉层用的静态二进制）。
+
+  crane 是单文件、静态链接、不用装也不用 root —— 目标机上只需要它，**不需要 docker**。
+  · 已经有的话：WTOOL_CRANE=<路径> wtool pull-layers …
+  · 或者干脆不拉：release/ 里的东西已经在了，直接 wtool install"
+    printf '%s\n' "$_wc"
+}
+
+# 取镜像**顶层那一层**的 digest。
+# ⚠️ `--platform linux/amd64` 不能省：不加的话返回的是多平台 index，
+#    里面**没有 layers 字段**。
+# ⚠️ 只取顶层：推上去的镜像必须是**一个 ADD 打出来的单层**（§5.1），
+#    多一个 ADD 就会多一层，layers[-1] 取到的就不是增量层了。
+wt_layer_digest() {   # $1=crane $2=完整 ref
+    "$1" manifest --platform linux/amd64 "$2" 2>/dev/null | python3 -c '
+import json,sys
+try:
+    print(json.load(sys.stdin)["layers"][-1]["digest"])
+except Exception:
+    sys.exit(1)' 2>/dev/null
+}
+
+# 解一个"镜像形状的层 tar"到 release/<target>/<层>/。
+#   root/.wtool/…         --strip 2 → payload/（影子 $HOME 的形状）
+#   wtool-layer/OWNED.tsv --strip 1 → 层目录下
+# OWNED.tsv 必须落到位：install.sh 拿它合并**卸载台账**，缺了会导致
+# wtool uninstall 删不干净（"半装状态"）。
+wt_layer_untar() {   # $1=tar 文件  $2=层目录（release/<target>/<层>）
+    [ -f "$1" ] || return 1
+    mkdir -p "$2/payload"
+    tar -xzf "$1" -C "$2/payload" --strip-components=2 \
+        --wildcards 'root/.wtool/*' --exclude='*/.wh.*' 2>/dev/null || true
+    if tar -xzf "$1" -C "$2" --strip-components=1 --wildcards 'wtool-layer/*' 2>/dev/null; then
+        [ -s "$2/OWNED.tsv" ] || wt_warn "$2 的 OWNED.tsv 是空的"
+    else
+        wt_warn "这一层里没有 wtool-layer/OWNED.tsv —— 装了以后卸载会删不干净"
+    fi
+}
+
+# 缺 --target= 时从 release/ 里推一个出来（只有一个才敢推）
+wt_guess_target() {   # $1=项目目录
+    _gt=$(ls -d "$1"/release/*/ 2>/dev/null | head -1)
+    [ -n "$_gt" ] && basename "$_gt"
+}
+
+cmd_pull_layers() {
+    _targets=""; _reg=""; _only_t=""; _only_l=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)    WTOOL_DRY_RUN=1 ;;
+            --registry=*) _reg=${arg#--registry=} ;;
+            --target=*)   _only_t=${arg#--target=} ;;
+            --layer=*)    _only_l=${arg#--layer=} ;;
+            -*)           wt_die "未知参数: $arg" ;;
+            *)            _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] || wt_die "用法: wtool pull-layers <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
+
+  从容器镜像仓库把层拉回来，落到 <项目>/release/<target>/<层>/ —— 和
+  build.sh / download.sh **完全相同的路径**，拉完直接 wtool install。
+
+  <前缀> 形如 crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry，
+  默认取 \$WTOOL_LAYER_REGISTRY。目标机上**不需要 docker**（只用一个 crane 二进制）。"
+    [ -n "$_reg" ] || _reg=${WTOOL_LAYER_REGISTRY:-}
+    [ -n "$_reg" ] || wt_die "没给 registry：--registry=<前缀> 或 export WTOOL_LAYER_REGISTRY=<前缀>"
+    _crane=$(wt_need_crane)
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-pull.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+
+    _done=0
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+        _repo=$(wt_layer_repo "$_reg" "$_path")
+        wt_info "── $_pid  ← $_repo"
+
+        _rel="$_path/release"
+        if [ -z "$_only_t" ]; then
+            _only_t=$(wt_guess_target "$_path")
+            [ -n "$_only_t" ] || wt_die "$_pid 的 release/ 是空的，也没给 --target=<os_ver>，
+  没法判断要拉哪个系统的层。明确指一个，例如 --target=ubuntu_22.04"
+        fi
+
+        # 层清单以**仓库里的 tag** 为准 —— 这样在一台全新的、release/ 还空着的
+        # 机器上也能拉（这正是"部署到公司机器"那个场景：那边没有本地构建产物）。
+        _tags=$("$_crane" ls "$_repo" 2>/dev/null) || true
+        [ -n "$_tags" ] || wt_die "读不到 $_repo 的 tag 列表（仓库不存在？凭据没配？）"
+
+        _n=0
+        for _tag in $_tags; do
+            case $_tag in
+                *-"$_only_t") _layer=${_tag%-"$_only_t"} ;;
+                *) continue ;;
+            esac
+            # tag 里的 - 是层名里的 / 换来的（docker tag 只认 [A-Za-z0-9_.-]）。
+            # 还原两步：
+            #   ① 本地已经有这个层目录 → 用本地那个名字（最准）
+            #   ② 本地没有（全新机器、release/ 还空着）→ 按 - → / 还原
+            # 局限：层名里如果有同时存在 `a-b` 和 `a/b` 两个层，这一步会有歧义。
+            # 本项目的层名是 main / others / lang/<语言>，不冲突。
+            _cand=$(wt_layers_of "$_rel/$_only_t" | grep -Fx "$_layer" || true)
+            if [ -n "$_cand" ]; then
+                _layer=$_cand
+            else
+                # 本地没有这一层（全新机器，或这一层刚被删掉）→ 按约定还原。
+                # ⚠️ 不能加"转换后目录要已存在"这种条件 —— 那正好把**需要还原**
+                #    的情形排除掉了（踩过：删掉 lang/lua 之后怎么都拉不回来）。
+                _layer=$(printf '%s' "$_layer" | tr '-' '/')
+            fi
+            [ -z "$_only_l" ] || [ "$_layer" = "$_only_l" ] || continue
+
+            _d=$(wt_layer_digest "$_crane" "$_repo:$_tag") \
+                || { wt_warn "取 $_tag 的 manifest 失败，跳过"; continue; }
+            _n=$((_n + 1))
+            if wt_dry; then
+                wt_step "[dry-run] $_repo:$_tag → $_rel/$_only_t/$_layer"
+                continue
+            fi
+            if ! "$_crane" blob "$_repo@$_d" > "$_scratch/l.tgz" 2>/dev/null; then
+                wt_warn "下载 $_tag 失败，跳过"; continue
+            fi
+            wt_layer_untar "$_scratch/l.tgz" "$_rel/$_only_t/$_layer"
+            wt_step "$_layer（$(du -sh "$_rel/$_only_t/$_layer" 2>/dev/null | cut -f1)）"
+            _n=$((_n + 1))
+        done
+        [ "$_n" -gt 0 ] || wt_warn "一个层都没拉到（target=$_only_t，仓库里没匹配的 tag？）"
+        _done=$((_done + 1))
+    done
+    wt_info "pull-layers 完成（$_done 个项目）—— 接下来 wtool install"
+}
+
+cmd_push_layers() {
+    _targets=""; _reg=""; _only_t=""; _only_l=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)    WTOOL_DRY_RUN=1 ;;
+            --registry=*) _reg=${arg#--registry=} ;;
+            --target=*)   _only_t=${arg#--target=} ;;
+            --layer=*)    _only_l=${arg#--layer=} ;;
+            -*)           wt_die "未知参数: $arg" ;;
+            *)            _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] || wt_die "用法: wtool push-layers <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
+
+  把 release/<target>/<层>/ 推成镜像：FROM scratch + **一个** ADD（= 一层），
+  tag 是 <层名（/ 换成 -）>-<target>。用 docker push —— **不是 crane push**，
+  后者把整个 blob 塞进一个 PATCH，大层会被服务器 reset（§5.1 / 03-hazards O1）。"
+    [ -n "$_reg" ] || _reg=${WTOOL_LAYER_REGISTRY:-}
+    [ -n "$_reg" ] || wt_die "没给 registry：--registry=<前缀> 或 export WTOOL_LAYER_REGISTRY=<前缀>"
+    command -v docker >/dev/null 2>&1 || wt_die "push-layers 要 docker（构建机上有；目标机不需要）"
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-push.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+
+    _done=0
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+        _repo=$(wt_layer_repo "$_reg" "$_path")
+        _rel="$_path/release"
+        [ -d "$_rel" ] || wt_die "$_pid 没有 release/：先 wtool build"
+        [ -n "$_only_t" ] || _only_t=$(wt_guess_target "$_path")
+        [ -n "$_only_t" ] || wt_die "$_pid 没有 release 目标，用 --target= 指定"
+        wt_info "── $_pid  → $_repo"
+
+        for _layer in $(wt_layers_of "$_rel/$_only_t"); do
+            [ -z "$_only_l" ] || [ "$_layer" = "$_only_l" ] || continue
+            _tag=$(wt_layer_tag "$_layer" "$_only_t")
+            if wt_dry; then wt_step "[dry-run] $_layer → $_repo:$_tag"; continue; fi
+
+            _ctx="$_scratch/ctx"; rm -rf "$_ctx"
+            mkdir -p "$_ctx/stage/root/.wtool" "$_ctx/stage/wtool-layer"
+            # 硬链接搭树：GB 级的层不用真拷一份
+            cp -al "$_rel/$_only_t/$_layer/payload/." "$_ctx/stage/root/.wtool/" 2>/dev/null || \
+                cp -a "$_rel/$_only_t/$_layer/payload/." "$_ctx/stage/root/.wtool/"
+            cp -a "$_rel/$_only_t/$_layer/OWNED.tsv" "$_ctx/stage/wtool-layer/" 2>/dev/null || \
+                wt_warn "$_layer 没有 OWNED.tsv —— 装了以后卸载会删不干净"
+            # ⚠️ 一个 tar、一个 ADD = 一层。拆成两个 ADD 会多一层，
+            #    拉取端取 layers[-1] 就取错了（§5.1 实测踩过）。
+            tar -czf "$_ctx/image.tar.gz" -C "$_ctx/stage" root wtool-layer
+            printf 'FROM scratch\nADD image.tar.gz /\n' > "$_ctx/Dockerfile"
+
+            if ! docker build -q -t "$_repo:$_tag" "$_ctx" >/dev/null 2>"$_scratch/err"; then
+                cat -- "$_scratch/err" >&2
+                wt_die "构建 $_tag 的镜像失败"
+            fi
+            if ! docker push "$_repo:$_tag" >"$_scratch/push.log" 2>&1; then
+                tail -5 -- "$_scratch/push.log" >&2
+                wt_die "推 $_tag 失败 —— dockerd 的代理配好了吗？（§5.1 / 03-hazards O2）"
+            fi
+            wt_step "$_layer → $_repo:$_tag"
+            _done=$((_done + 1))
+        done
+    done
+    wt_info "push-layers 完成（$_done 个层）"
+}
+
+cmd_pack_layer() {
+    _targets=""; _layer=""; _t=""; _out=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)  WTOOL_DRY_RUN=1 ;;
+            --layer=*)  _layer=${arg#--layer=} ;;
+            --target=*) _t=${arg#--target=} ;;
+            --out=*)    _out=${arg#--out=} ;;
+            -*)         wt_die "未知参数: $arg" ;;
+            *)          _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] && [ -n "$_layer" ] || wt_die "用法: wtool pack-layer <项目> --layer=<层名> [--target=<os_ver>] [--out=<文件.tar.gz>]
+
+  把一个层打成**镜像形状**的 tar（root/.wtool/… + wtool-layer/OWNED.tsv），
+  **不联网**。可以直接 docker load，也可以用 wtool unpack-layer 解回 release/。"
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-pl.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
+        [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
+        [ -n "$_t" ] || wt_die "$_pid 没有 release 目标，用 --target= 指定"
+        _src="$_path/release/$_t/$_layer"
+        [ -d "$_src/payload" ] || wt_die "层不存在: $_src"
+        [ -n "$_out" ] || _out="$PWD/$(basename "$_path")-$(printf '%s' "$_layer" | tr '/' '-')-$_t.tar.gz"
+        wt_info "── $_pid  $_layer → $_out"
+        if wt_dry; then wt_step "[dry-run] tar（镜像形状）"; continue; fi
+        mkdir -p "$_scratch/stage/root/.wtool" "$_scratch/stage/wtool-layer"
+        cp -al "$_src/payload/." "$_scratch/stage/root/.wtool/" 2>/dev/null || \
+            cp -a "$_src/payload/." "$_scratch/stage/root/.wtool/"
+        cp -a "$_src/OWNED.tsv" "$_scratch/stage/wtool-layer/" 2>/dev/null || true
+        tar -czf "$_out" -C "$_scratch/stage" root wtool-layer
+        wt_step "写好 $(du -h "$_out" | cut -f1)"
+    done
+}
+
+cmd_unpack_layer() {
+    _targets=""; _from=""; _t=""; _layer=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)  WTOOL_DRY_RUN=1 ;;
+            --from=*)   _from=${arg#--from=} ;;
+            --layer=*)  _layer=${arg#--layer=} ;;
+            --target=*) _t=${arg#--target=} ;;
+            -*)         wt_die "未知参数: $arg" ;;
+            *)          _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] && [ -n "$_from" ] && [ -n "$_layer" ] || \
+        wt_die "用法: wtool unpack-layer <项目> --from=<文件.tar.gz> --layer=<层名> [--target=<os_ver>]
+
+  把 pack-layer 打出来的文件（或 crane blob 下来的那一层）解回
+  <项目>/release/<target>/<层>/。**不联网**。"
+    [ -f "$_from" ] || wt_die "文件不存在: $_from"
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
+        [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
+        [ -n "$_t" ] || wt_die "$_pid 没有 release 目标，用 --target= 指定"
+        wt_info "── $_pid  $_from → release/$_t/$_layer"
+        if wt_dry; then wt_step "[dry-run] 解开"; continue; fi
+        wt_layer_untar "$_from" "$_path/release/$_t/$_layer"
+        wt_step "解完：$(du -sh "$_path/release/$_t/$_layer" 2>/dev/null | cut -f1)"
+    done
+}
+
+# --------------------------------------------------------------------------
 # 分发
 # --------------------------------------------------------------------------
 _cmd=${1:-}
@@ -2311,6 +2624,10 @@ case $_cmd in
     pack-release)   cmd_pack_release "$@" ;;
     unpack-release) cmd_unpack_release "$@" ;;
     publish)   cmd_publish "$@" ;;
+    push-layers)   cmd_push_layers "$@" ;;
+    pull-layers)   cmd_pull_layers "$@" ;;
+    pack-layer)    cmd_pack_layer "$@" ;;
+    unpack-layer)  cmd_unpack_layer "$@" ;;
     bootstrap) cmd_bootstrap "$@" ;;
     check)     cmd_check "$@" ;;
     repair)    cmd_repair "$@" ;;
