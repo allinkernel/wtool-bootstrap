@@ -9,6 +9,7 @@
 #   tests/contract_test.sh    新契约：新标签、两跳软链、执行顺序、check/repair、kill（69 条）
 #   tests/layer_test.sh       layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（38 条）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）
+#   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）
 #   tests/e2e_repo_sync_test.sh  repo sync 全流程（用本地裸仓，较慢）
 set -eu
 here=$(cd -- "$(dirname -- "$0")" && pwd)
