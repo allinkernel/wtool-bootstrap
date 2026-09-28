@@ -16,7 +16,10 @@
 #   wtool sudo-bootstrap [--dry-run]      所有项目的 sudo-install
 #
 #   ── 产物与发布 ─────────────────────────────────────────────
-#   wtool build     [<项目>...|all] [--dry-run]   跑项目自己的 scripts/build.sh
+#   wtool build     [<项目>...|all] [--dry-run] [--target=<目标系统>]
+#                       有 build/layers.tsv 的 kind="docker" 项目由**引擎驱动容器**
+#                       （ADR-0029：起容器 / commit / 落 layer/ / 导 output/），
+#                       其余项目跑自己的 scripts/build.sh
 #   wtool download-release [<项目>...|all] [--dry-run]
 #                       读**项目里提交的** scripts/release.json → 下到 <项目>/release/
 #                       只下载 + 校验，**不解包**（解包是 unpack-release）
@@ -450,6 +453,211 @@ wt_effective_jobs() {
 }
 
 # --------------------------------------------------------------------------
+# kind="docker" 的构建：**引擎驱动容器**（ADR-0025 §3 / ADR-0029）
+#
+# 项目只提供两份清单和"每一层装什么"的命令，生命周期全归引擎：
+#
+#   build/targets.tsv     <目标系统> <TAB> <基础镜像> [<TAB> 代号 [<TAB> glibc]]
+#   build/layers.tsv      <层名> <TAB> <父层> <TAB> <镜像名> <TAB> <容器里跑的命令>
+#   build/export.filter   导出时丢什么（可选，一行一个 tar --exclude 通配）
+#
+# 引擎对每一层做四件事（前两件就是 §5.1 那两条管道）：
+#   ① 镜像不在 docker 里 → 从父层起容器、跑命令、commit（在 → 跳过，这就是续跑）
+#   ② 存进 layer/<target>/（docker save | tar -x，ADR-024）
+#   ③ 从 layer/ 的顶层 blob 导出成 output/<target>/<层>/（过滤 + 扫 OWNED.tsv）
+#   ④ 每一步都可跳过 —— 重跑 wtool build 不重编已经编好的层
+#
+# 为什么容器要 `-d` 起、`exec -d` 跑、靠**日志文件里的 EXIT=** 判成败：
+# `docker exec` 不带 -t 时输出是块缓冲的，直接 exec 会"看起来卡住、什么都不吐"。
+# 这套做法是 astronvim 的 docker_in_build.sh 实测出来的，搬进引擎时原样保留。
+# --------------------------------------------------------------------------
+
+wt_docker_slug() { printf '%s' "$1" | tr '/.' '--' | tr -cd 'A-Za-z0-9_-'; }
+
+# 一层：容器生命周期 + 落 layer/ + 导出 output/
+#   $1=项目目录 $2=项目 id $3=target $4=基础镜像 $5=层名 $6=父层镜像引用
+#   $7=本层镜像引用（- = 占位层）$8=命令 $9=日志目录
+#   返回 0 = 这层好了（编的或跳过的）
+wt_docker_layer() {
+    _dl_dir=$1; _dl_pid=$2; _dl_t=$3; _dl_base=$4; _dl_layer=$5
+    _dl_pref=$6; _dl_ref=$7; _dl_cmd=$8; _dl_logdir=$9
+    _dl_lay=$(wt_layer_dir "$_dl_dir" "$_dl_t")
+    _dl_out="$_dl_dir/output/$_dl_t/$_dl_layer"
+
+    # 占位层（没有镜像）：只留一个空的 output 层，形状和别的层一样
+    if [ "$_dl_ref" = "-" ]; then
+        wt_run mkdir -p -- "$_dl_out/payload"
+        [ -f "$_dl_out/OWNED.tsv" ] || : > "$_dl_out/OWNED.tsv"
+        wt_step "$_dl_layer：占位层（清单里镜像名是 -），留空"
+        return 0
+    fi
+
+    _dl_have=0
+    "$(wt_docker)" image inspect "$_dl_ref" >/dev/null 2>&1 && _dl_have=1
+    # docker 里没有，但 **layer/ 里有** → 装回来（ADR-024 §7/§8：构建状态全在
+    # committed 的镜像里，docker 存储只是缓存、layer/ 才是项目的资产）。
+    # 这一条是"删掉镜像之后接着走"的关键：不先试它，就会把已经编好的层重编一遍。
+    if [ "$_dl_have" = 0 ] && [ -f "$_dl_lay/index.json" ]; then
+        _dl_inlay=$(wt_layer_entries "$_dl_lay" 2>/dev/null \
+                    | awk -F'\t' -v l="$_dl_layer" '$1==l{print "yes"; exit}')
+        if [ "$_dl_inlay" = yes ]; then
+            wt_info "  $_dl_layer 不在 docker 里，但 layer/$_dl_t/ 里有 → 装回来"
+            wt_layer_load "$_dl_dir" "$_dl_t" || wt_die "layer/$_dl_t/ 装不回 docker"
+            "$(wt_docker)" image inspect "$_dl_ref" >/dev/null 2>&1 && _dl_have=1
+        fi
+    fi
+    if [ "$_dl_have" = 0 ]; then
+        # 要从父层出发：父层镜像也必须在 docker 里（同样先试 layer/）
+        if [ "$_dl_pref" = "-" ]; then
+            _dl_from=$_dl_base
+        else
+            _dl_from=$_dl_pref
+            if ! "$(wt_docker)" image inspect "$_dl_from" >/dev/null 2>&1; then
+                [ -f "$_dl_lay/index.json" ] || wt_die "$_dl_layer 的父层 $_dl_from 不在 docker 里，
+  layer/$_dl_t/ 也还不存在 —— 没法从中间开始编"
+                wt_info "  父层 $_dl_from 不在 docker 里 → 从 layer/$_dl_t/ 装回来"
+                wt_layer_load "$_dl_dir" "$_dl_t" || wt_die "装不回 docker"
+                "$(wt_docker)" image inspect "$_dl_from" >/dev/null 2>&1 \
+                    || wt_die "layer/$_dl_t/ 里没有 $_dl_from"
+            fi
+        fi
+
+        _dl_cname="wtool-build-$(wt_docker_slug "$_dl_layer")-$(wt_docker_slug "$_dl_t")-$$"
+        _dl_log="$_dl_logdir/$(wt_docker_slug "$_dl_layer").log"
+        _dl_run="$_dl_logdir/$(wt_docker_slug "$_dl_layer").run"
+        wt_run mkdir -p -- "$_dl_logdir"
+        # 容器里跑的东西写成**文件**再喂给 sh，避免命令里的引号/变量在宿主的
+        # sh -c 里被展开（命令是项目数据，引擎不该替它解释）
+        {
+            printf '#!/bin/sh\n'
+            printf '# 由 wtool 生成 —— %s 这一层在容器里跑的东西（ADR-0029）\n' "$_dl_layer"
+            printf 'set -e\ncd /proj\n%s\n' "$_dl_cmd"
+        } > "$_dl_run"
+        : > "$_dl_log"
+
+        wt_info "  $_dl_layer ← $_dl_from（日志 $_dl_log）"
+        "$(wt_docker)" volume create "wtool-build-cache-$(wt_docker_slug "$(basename -- "$_dl_dir")")-$_dl_t" \
+            >/dev/null 2>&1 || true
+        wt_run "$(wt_docker)" rm -f "$_dl_cname" >/dev/null 2>&1 || true
+        # shellcheck disable=SC2086
+        "$(wt_docker)" run -d --name "$_dl_cname" --network=host \
+            -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \
+            -v "$_dl_dir:/proj:ro" -v "$_dl_logdir:/log" \
+            -v "wtool-build-cache-$(wt_docker_slug "$(basename -- "$_dl_dir")")-$_dl_t:/root/.cache" \
+            "$_dl_from" sleep infinity >/dev/null \
+            || wt_die "起容器失败（$_dl_from）"
+        wt_run "$(wt_docker)" exec -d "$_dl_cname" sh -c \
+            "sh /log/$(wt_docker_slug "$_dl_layer").run > /log/$(wt_docker_slug "$_dl_layer").log 2>&1; echo EXIT=\$? >> /log/$(wt_docker_slug "$_dl_layer").log"
+
+        # 等结果：容器不见了 = 它自己退了，那是失败（日志尾部贴出来）
+        while ! grep -q '^EXIT=' "$_dl_log" 2>/dev/null; do
+            if ! "$(wt_docker)" ps --format '{{.Names}}' 2>/dev/null | grep -qx "$_dl_cname"; then
+                wt_warn "$_dl_cname 不见了（容器自己退了）"
+                tail -12 -- "$_dl_log" 2>/dev/null | sed 's/^/    /' >&2 || true
+                wt_run "$(wt_docker)" rm -f "$_dl_cname" >/dev/null 2>&1 || true
+                return 1
+            fi
+            sleep 5
+        done
+        _dl_rc=$(sed -n 's/^EXIT=//p' "$_dl_log" | tail -1)
+        if [ "$_dl_rc" != 0 ]; then
+            wt_warn "$_dl_layer 构建失败（容器里退出码 $_dl_rc），日志尾部："
+            tail -12 -- "$_dl_log" 2>/dev/null | sed 's/^/    /' >&2 || true
+            wt_run "$(wt_docker)" rm -f "$_dl_cname" >/dev/null 2>&1 || true
+            return 1
+        fi
+        wt_run "$(wt_docker)" commit "$_dl_cname" "$_dl_ref" >/dev/null \
+            || { wt_run "$(wt_docker)" rm -f "$_dl_cname" >/dev/null 2>&1 || true
+                 wt_die "commit $_dl_ref 失败"; }
+        wt_run "$(wt_docker)" rm -f "$_dl_cname" >/dev/null 2>&1 || true
+        wt_step "$_dl_layer：容器里跑完了 → 固化 $_dl_ref"
+    else
+        wt_step "$_dl_layer：docker 里已经有 $_dl_ref，跳过构建"
+        [ -f "$_dl_lay/index.json" ] || wt_info "  它还没进 layer/$_dl_t/ → 存一份（这是项目的资产）"
+    fi
+
+    # ② 存进 layer/<target>/（已经存过就不重复 save —— GB 级的 I/O）
+    _dl_inlay=$(wt_layer_entries "$_dl_lay" 2>/dev/null \
+                | awk -F'\t' -v l="$_dl_layer" '$1==l{print "yes"; exit}')
+    if [ "$_dl_inlay" != yes ]; then
+        wt_layer_import "$_dl_dir" "$_dl_t" "$_dl_ref" "$_dl_layer" \
+            || wt_die "存不进 layer/$_dl_t/（$_dl_ref）"
+    fi
+
+    # ③ 导出成 output/<target>/<层>/ —— 每层只导自己的增量（ADR-025 第 4 条）
+    if [ -f "$_dl_out/OWNED.tsv" ]; then
+        wt_step "$_dl_layer：output/ 里已经有了，跳过导出"
+    else
+        wt_layer_export "$_dl_dir" "$_dl_t" "$_dl_layer" "$_dl_dir/output/$_dl_t" \
+            "$(wt_docker_export_filter "$_dl_dir")" >/dev/null \
+            || wt_die "$_dl_layer 导出失败"
+        wt_step "$_dl_layer → output/$_dl_t/$_dl_layer/（$(du -sh -- "$_dl_out" 2>/dev/null | cut -f1)）"
+    fi
+    return 0
+}
+
+wt_docker_export_filter() {   # <项目目录> → 过滤清单路径（没有就输出空）
+    _ef="$1/build/export.filter"
+    [ -f "$_ef" ] && printf '%s\n' "$_ef"
+}
+
+wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--dry-run]
+    _db_dir=$1; _db_pid=$2; _db_only=${3:-}
+    [ -d "$_db_dir/build" ] || wt_die "$_db_pid 声明了 kind=\"docker\"，但没有 build/ 目录
+  （要有 build/targets.tsv + build/layers.tsv，见 ADR-0029）"
+
+    _db_targets=$(python3 "$PY" docker-targets "$_db_dir") \
+        || wt_die "$_db_pid 的 build/targets.tsv 有问题（上面写了）"
+    if [ -n "$_db_only" ]; then
+        printf '%s\n' "$_db_targets" | awk -F'\t' -v w="$_db_only" '$1==w{found=1} END{exit !found}' \
+            || wt_die "$_db_pid 里没有目标 $_db_only（有 $(printf '%s\n' "$_db_targets" | cut -f1 | paste -sd, -)）"
+    fi
+    _db_logroot="$WTOOL_STATE/$(printf '%s' "$_db_pid" | tr '/' '_')/build-logs"
+
+    _db_n=0
+    while IFS='	' read -r _db_t _db_base; do
+        [ -n "$_db_t" ] || continue
+        [ -z "$_db_only" ] || [ "$_db_t" = "$_db_only" ] || continue
+        wt_info "── $_db_pid  目标 $_db_t（基础镜像 $_db_base）"
+        _db_plan=$(python3 "$PY" docker-plan "$_db_dir" --target="$_db_t") \
+            || wt_die "$_db_pid 的 build/layers.tsv 有问题（上面写了）"
+        _db_out="$_db_dir/output/$_db_t"
+        if wt_dry; then
+            printf '%s\n' "$_db_plan" | while IFS='	' read -r _l _p _r _c; do
+                [ -n "$_l" ] || continue
+                if [ "$_r" = "-" ]; then
+                    wt_step "[dry-run] $_l：占位层（留空）"
+                else
+                    wt_step "[dry-run] $_l ← ${_p:--} → $_r"
+                    [ "$_c" = "-" ] || wt_step "         容器里: $_c"
+                fi
+            done
+            _db_n=$((_db_n + 1))
+            continue
+        fi
+        wt_run mkdir -p -- "$_db_out" "$_db_logroot/$_db_t"
+        printf '%s\n' "$_db_plan" > "$_db_logroot/$_db_t/plan.tsv"
+        _db_ok=1
+        while IFS='	' read -r _db_l _db_p _db_r _db_c; do
+            [ -n "$_db_l" ] || continue
+            wt_docker_layer "$_db_dir" "$_db_pid" "$_db_t" "$_db_base" \
+                "$_db_l" "$_db_p" "$_db_r" "$_db_c" "$_db_logroot/$_db_t" || _db_ok=0
+            [ "$_db_ok" = 1 ] || break
+        done < "$_db_logroot/$_db_t/plan.tsv"
+        [ "$_db_ok" = 1 ] || {
+            wt_warn "$_db_pid 目标 $_db_t 没编完 —— 修好之后重跑 wtool build 会**接着走**"
+            return 1
+        }
+        _db_n=$((_db_n + 1))
+    done <<EOF
+$_db_targets
+EOF
+    [ "$_db_n" -gt 0 ] || wt_die "$_db_pid 一个目标都没编"
+    wt_info "$_db_pid：$_db_n 个目标就绪（层在 layer/，安装产物在 output/）"
+    return 0
+}
+
+# --------------------------------------------------------------------------
 # build：跑项目自己的 build.sh
 #
 # 「怎么构建」由项目在 `wtool.xml` 的 `<build kind="local|docker"/>` 里声明
@@ -458,15 +666,24 @@ wt_effective_jobs() {
 # 具体编什么、产物在哪，仍然是脚本自己的事。
 # --------------------------------------------------------------------------
 cmd_build() {
-    _targets=""
+    _targets=""; _build_target=""
     for arg in "$@"; do
         case $arg in
-            --dry-run) WTOOL_DRY_RUN=1 ;;
-            --force)   WTOOL_FORCE=1 ;;
-            -*)        wt_die "未知参数: $arg" ;;
-            *)         _targets="$_targets $arg" ;;
+            --dry-run)  WTOOL_DRY_RUN=1 ;;
+            --force)    WTOOL_FORCE=1 ;;
+            --target=*) _build_target=${arg#--target=} ;;
+            -*)         wt_die "未知参数: $arg" ;;
+            *)          _targets="$_targets $arg" ;;
         esac
     done
+    if [ -n "$_build_target" ]; then
+        for _bt in $_targets; do
+            [ "$_bt" = all ] && continue
+            if [ "$(wt_build_kind "$WTOOL_ROOT/$_bt" 2>/dev/null || echo local)" != docker ]; then
+                wt_warn "$_bt 不是 kind=\"docker\" 的项目 —— --target=（系统目标）对它没意义"
+            fi
+        done
+    fi
 
     if [ -z "$_targets" ]; then
         # 不带参数：只列出来，不动任何东西（要动手写 all）
@@ -497,14 +714,42 @@ EOF
         _path=$(printf '%s\n' "$_row" | cut -f3)
 
         wt_info "── $_pid"
-        if ! wt_project_script "$_path" build.sh >/dev/null; then
-            wt_warn "  没有 build.sh，这个项目不需要构建"
-            continue
-        fi
-        wt_info "  脚本 : scripts/build.sh"
         WTOOL_PROJECT_ID=$_pid
         _bkind=$(wt_build_kind "$_path")
         wt_info "  方式 : $_bkind（wtool.xml 的 <build kind=\"...\"/>，ADR-025）"
+
+        # kind=docker 且项目给了**层清单** → 引擎驱动容器（ADR-0029）。
+        # 没有层清单的项目仍然跑自己的 build.sh（它自己驱动容器）—— 那是迁移前的形态，
+        # 迁移完把 build.sh 删掉即可（ADR-0025 §3 的分工）。
+        if [ "$_bkind" = docker ] && [ -f "$_path/build/layers.tsv" ]; then
+            if ! wt_check_build_env "$_path" "$_pid"; then
+                wt_step "拿现成的包：wtool download-release $_pid && wtool unpack-release $_pid"
+                _failed=$((_failed + 1))
+                continue
+            fi
+            wt_record_action "$_pid" build
+            if wt_docker_build "$_path" "$_pid" "$_build_target"; then
+                _done=$((_done + 1))
+            else
+                _failed=$((_failed + 1))
+            fi
+            continue
+        fi
+
+        if ! wt_project_script "$_path" build.sh >/dev/null; then
+            if [ "$_bkind" = docker ]; then
+                # 声明了要容器、却既没有层清单也没有 build.sh —— 这不是"不需要构建"，
+                # 是**这个项目编不了**：算失败，别让 `wtool build all` 静默成功。
+                wt_warn "  既没有 build/layers.tsv（引擎驱动），也没有 scripts/build.sh —— 没法编"
+                wt_step "  要么按 ADR-0029 加 build/targets.tsv + build/layers.tsv，"
+                wt_step "  要么保留 scripts/build.sh 自己驱动容器"
+                _failed=$((_failed + 1))
+            else
+                wt_warn "  没有 build.sh，这个项目不需要构建"
+            fi
+            continue
+        fi
+        wt_info "  脚本 : scripts/build.sh（自己驱动构建；层清单迁好之后可以删掉）"
         if [ "$_bkind" = docker ] && ! wt_have_docker; then
             # 需求 4 的机制化：声明是 docker 的构建，本机没有 docker = 编不了。
             # 不等脚本跑到一半才 die，也不装傻继续。
@@ -3009,6 +3254,48 @@ cmd_push_layer() {
     wt_info "push-layer 完成（$_done 个项目）"
 }
 
+# 从 layer/<target>/ 里把**某一层**的顶层 blob 解成 output/<target>/<层>/{payload,OWNED.tsv}。
+#   $1=项目目录  $2=target  $3=层名（空=layout 里只有一个就用它）  $4=输出根（默认 output/<target>）
+#   $5=过滤清单（可选，tar --exclude-from 的形状；空=只用默认的 .wh. 过滤）
+# 三个消费者：unpack-layer（人来解一层）、push/pull 之后的验证、**kind=docker 的 build**
+# （每编完一层立刻导出 —— 这就是 ADR-025 第 4 条"一层镜像对一层 output"）。
+wt_layer_export() {
+    _le_dir=$1; _le_t=$2; _le_layer=$3; _le_root=$4; _le_filter=${5:-}
+    _le_lay=$(wt_layer_dir "$_le_dir" "$_le_t")
+    [ -f "$_le_lay/index.json" ] || wt_die "没有 $_le_lay —— 先 wtool layer-save（或 pull-layer）"
+    _blobinfo=$(wt_layer_last_blob "$_le_lay" "$_le_layer") \
+        || wt_die "$(wt_layer_last_blob "$_le_lay" "$_le_layer" 2>&1 >/dev/null)"
+    _le_blob=$(printf '%s\n' "$_blobinfo" | sed -n 1p)
+    _le_name=$(printf '%s\n' "$_blobinfo" | sed -n 2p)
+    [ -n "$_le_name" ] || _le_name=$(basename -- "$_le_blob")
+    _le_dst="$_le_root/$_le_name"
+    [ -f "$_le_blob" ] || wt_die "blob 不在: $_le_blob"
+    wt_run rm -rf -- "$_le_dst"
+    wt_run mkdir -p -- "$_le_dst/payload"
+    # 层里的形状是容器内绝对路径（root/.wtool/…），payload 要的是**相对影子 $HOME**
+    # 的形状 —— 剥掉前两节。剥不干净就是"装上去路径全错"（症状：装完了敲命令找不到）。
+    chmod +x "$_le_dst/payload" 2>/dev/null || true
+    # 项目自己的导出过滤（build/export.filter）：决定"什么会被发到别人机器上"，
+    # 所以它必须是显式文件，不能藏在脚本的 find | grep -v 里（ADR-025 §5）。
+    _le_ex=""
+    if [ -n "$_le_filter" ] && [ -f "$_le_filter" ]; then
+        _le_ex=$(mktemp "${TMPDIR:-/tmp}/wtool-excl.XXXXXX")
+        grep -v '^[[:space:]]*#' "$_le_filter" 2>/dev/null | grep -v '^[[:space:]]*$' > "$_le_ex" || true
+    fi
+    if [ -n "$_le_ex" ]; then
+        tar -xf "$_le_blob" -C "$_le_dst/payload" --strip-components=2 \
+            --wildcards 'root/.wtool/*' --exclude='*/.wh.*' --exclude-from="$_le_ex" 2>/dev/null || true
+        rm -f -- "$_le_ex"
+    else
+        tar -xf "$_le_blob" -C "$_le_dst/payload" --strip-components=2 \
+            --wildcards 'root/.wtool/*' --exclude='*/.wh.*' 2>/dev/null || true
+    fi
+    chmod -R a+rX "$_le_dst/payload" 2>/dev/null || true
+    wt_owned_scan "$_le_dst/payload" "$_le_name" "$_le_dst/OWNED.tsv" \
+        || wt_die "$_le_name 这一层不能用（上面列了原因）"
+    printf '%s\n' "$_le_dst"
+}
+
 cmd_unpack_layer() {
     _targets=""; _t=""; _layer=""; _outdir=""
     for arg in "$@"; do
@@ -3042,29 +3329,14 @@ cmd_unpack_layer() {
         [ -n "$_t" ] || wt_die "$_pid 没有 output 目标，用 --target= 指定"
         _lay=$(wt_layer_dir "$_path" "$_t")
         [ -f "$_lay/index.json" ] || wt_die "没有 $_lay —— 先 wtool layer-save（或 pull-layer）"
-
-        _blobinfo=$(wt_layer_last_blob "$_lay" "$_layer") || wt_die "$(wt_layer_last_blob "$_lay" "$_layer" 2>&1 >/dev/null)"
-        _blob=$(printf '%s\n' "$_blobinfo" | sed -n 1p)
-        _name=$(printf '%s\n' "$_blobinfo" | sed -n 2p)
-        [ -n "$_name" ] || _name=$(basename -- "$_blob")
-        _dst=${_outdir:-"$_path/output/$_t"}/$_name
-        wt_info "── $_pid  layer/$_t/$_name → ${_dst#$WTOOL_ROOT/}"
+        _name=$(wt_layer_last_blob "$_lay" "$_layer" 2>/dev/null | sed -n 2p)
+        wt_info "── $_pid  layer/$_t/${_name:-?} → ${_outdir:-"$_path/output/$_t"}/"
 
         if wt_dry; then
-            wt_step "[dry-run] 读 $(basename -- "$_blob") → payload/ + OWNED.tsv"
+            wt_step "[dry-run] 读顶层 blob → payload/ + OWNED.tsv"
             continue
         fi
-        [ -f "$_blob" ] || wt_die "blob 不在: $_blob"
-        wt_run rm -rf -- "$_dst"
-        wt_run mkdir -p -- "$_dst/payload"
-        # 层里的形状是容器内绝对路径（root/.wtool/…），payload 要的是**相对影子 $HOME**
-        # 的形状 —— 剥掉前两节。剥不干净就是"装上去路径全错"（症状：装完了敲命令找不到）。
-        chmod +x "$_dst/payload" 2>/dev/null || true
-        tar -xf "$_blob" -C "$_dst/payload" --strip-components=2 \
-            --wildcards 'root/.wtool/*' --exclude='*/.wh.*' 2>/dev/null || true
-        chmod -R a+rX "$_dst/payload" 2>/dev/null || true
-        wt_owned_scan "$_dst/payload" "$_name" "$_dst/OWNED.tsv" \
-            || wt_die "$_name 这一层不能用（上面列了原因）"
+        _dst=$(wt_layer_export "$_path" "$_t" "$_layer" "${_outdir:-"$_path/output/$_t"}" "${WTOOL_EXPORT_FILTER:-}")
         wt_step "解完：$(du -sh -- "$_dst" 2>/dev/null | cut -f1)（$(awk 'END{print NR}' "$_dst/OWNED.tsv") 个文件）"
     done
 }

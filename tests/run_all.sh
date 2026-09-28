@@ -7,27 +7,30 @@
 #   tests/release_copy_test.sh 从发布包解压出来的工作区（没有 .git 也没有 repo 客户端）（17 条）
 #   tests/release_test.sh     pack-release / unpack-release / download-release（62 条）
 #   tests/contract_test.sh    新契约：新标签、两跳软链、执行顺序、check/repair、kill（69 条）
-#   tests/layer_test.sh       layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（38 条）
+#   tests/layer_test.sh       layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（39 条）
+#   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）（33 条）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）
 #   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）
 #   tests/e2e_repo_sync_test.sh  repo sync 全流程（用本地裸仓，较慢）
 set -eu
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 
-printf '########## 1/8 pairing（install/uninstall）##########\n'
+printf '########## 1/9 pairing（install/uninstall）##########\n'
 sh "$here/pairing_test.sh"
-printf '\n########## 2/8 sudo-install（系统文件/source/task）##########\n'
+printf '\n########## 2/9 sudo-install（系统文件/source/task）##########\n'
 sh "$here/provision_test.sh"
-printf '\n########## 3/8 publish-release（只上传 + release.json）##########\n'
+printf '\n########## 3/9 publish-release（只上传 + release.json）##########\n'
 sh "$here/publish_test.sh"
-printf '\n########## 4/8 table（能力表格）##########\n'
+printf '\n########## 4/9 table（能力表格）##########\n'
 sh "$here/table_test.sh"
-printf '\n########## 5/8 release-copy（解压出来的工作区）##########\n'
+printf '\n########## 5/9 release-copy（解压出来的工作区）##########\n'
 sh "$here/release_copy_test.sh"
-printf '\n########## 6/8 pack-release / unpack-release / download-release ##########\n'
+printf '\n########## 6/9 pack-release / unpack-release / download-release ##########\n'
 sh "$here/release_test.sh"
-printf '\n########## 7/8 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
+printf '\n########## 7/9 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
 sh "$here/contract_test.sh"
-printf '\n########## 8/8 layer/（OCI 镜像目录）##########\n'
+printf '\n########## 8/9 layer/（OCI 镜像目录）##########\n'
 sh "$here/layer_test.sh"
+printf '\n########## 9/9 引擎驱动容器构建（kind=docker）##########\n'
+sh "$here/docker_build_test.sh"
 printf '\n全部通过。\n'

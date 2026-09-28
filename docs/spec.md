@@ -339,12 +339,13 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
 | contract | `tests/contract_test.sh` | 97 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
+| docker-build | `tests/docker_build_test.sh` | 33 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 39 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **431** 条断言：
+共 **464** 条断言：
 
 ```sh
-./tests/run_all.sh            # 8 组全跑
+./tests/run_all.sh            # 9 组全跑
 ./tests/contract_test.sh      # 只跑这一组
 ```
 
@@ -503,7 +504,7 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 ---
 
-## 13. 构建层：`<build kind>` 决定形状（ADR-025）
+## 13. 构建层：`<build kind>` 决定形状与驱动方式（ADR-025 / ADR-0029）
 
 `wtool build` 只做三件事：找 `scripts/build.sh`、**判断这台机器够不够**、把环境喂好跑它。
 
@@ -523,6 +524,25 @@ apt-get update && apt-get install -y --no-install-recommends \
   （`local` → 空；`docker` → `output/*/` 的目录名）。`local` 项目就算 `output/` 下有
   `bin/`、`main/` 这样的目录，也不会被当成"发行版"
 - `WTOOL_DOCKER=<路径>` 可以指定 docker 二进制（和 `WTOOL_SKOPEO` 一个路子）
+
+### `kind="docker"`：引擎驱动容器（ADR-0029）
+
+项目提供三份约定文件，**容器生命周期全归引擎**：
+
+| 文件 | 内容 |
+|---|---|
+| `build/targets.tsv` | `<目标系统> <TAB> <基础镜像> [<TAB> 代号 [<TAB> glibc]]` |
+| `build/layers.tsv` | `<层名> <TAB> <父层> <TAB> <镜像名> <TAB> <容器里跑的命令>`；父层 `-` = 从基础镜像出发，镜像名 `-` = 占位层（留一个空 output 层），命令里的 `{target}` 由引擎替换 |
+| `build/export.filter` | 可选。导出时丢什么，一行一个 `tar --exclude` 通配，`#` 注释 |
+
+引擎对每一层：**没有镜像就起容器 commit → 存进 `layer/<target>/` → 从顶层 blob 导出
+`output/<target>/<层>/`**。三步的判据都是"磁盘上有没有"，所以重跑 `wtool build`
+**接着走、不重编**；`docker` 存储被 prune 掉也能从 `layer/` 装回来。
+
+谁驱动看**层清单在不在**：`kind=docker` 且有 `build/layers.tsv` → 引擎驱动；
+只有 `build.sh` → 跑它（迁移前的形态）；两个都没有 → 拒绝（退出码非 0）。
+`wtool build` 对 `docker` 项目多认 `--target=<目标系统>`。
+顺序执行；按层并行还没做（BL-34）。
 
 ---
 

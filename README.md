@@ -30,9 +30,10 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 8 组 / 431 条断言
+./tests/run_all.sh                    # 9 组 / 464 条断言
                                       # pairing 35 / sudo-install 24 / publish 114 / table 43
                                       # release-copy 17 / release 62 / contract 97 / layer 39
+                                      # docker-build 33（kind=docker 的引擎驱动构建）
 ```
 
 ---
@@ -108,6 +109,12 @@ wtool doctor
 判断这台机器行不行 —— `kind="docker"` 而没有 docker 时 `wtool build` 直接拒绝并指路
 `download-release`（退出码非 0），kind 还决定 `output/` 有没有 `<os>_<ver>/` 那一层。
 `WTOOL_DOCKER=<路径>` 可以指定 docker 二进制。
+
+**`kind="docker"` 的容器生命周期归引擎**（ADR-0029）：项目给
+`build/targets.tsv`（目标系统 → 基础镜像）、`build/layers.tsv`（层名/父层/镜像名/
+容器里跑的命令）、`build/export.filter`（导出丢什么），引擎负责起容器、`commit`、
+落 `layer/<target>/`、导出 `output/<target>/<层>/` —— **一层镜像对一层 output**，
+每步都能跳过（重跑接着走，`docker` 存储被清也能从 `layer/` 装回来）。
 
 ## 当前状态
 

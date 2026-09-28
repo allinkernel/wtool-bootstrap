@@ -71,8 +71,11 @@
    （`local` → 空；`docker` → `output/*/` 的目录名）。所以 `local` 项目的
    `output/` 里就算有 `bin/`、`main/` 这种目录，也不会被当成"发行版"。
 
-> 只声明 kind，**targets 和层清单不进 XML** —— 那是项目数据（住项目自己的清单文件），
-> XML 是给引擎看的声明面。见 `harness/docs/adr/0025`。
+> 只声明 kind，**targets 和层清单不进 XML** —— 那是项目数据，住项目里固定路径的文件：
+> `build/targets.tsv`（目标系统 → 基础镜像）、`build/layers.tsv`（层名 / 父层 / 镜像名 /
+> 容器里跑的命令）、`build/export.filter`（导出时丢什么）。见 `harness/docs/adr/0029`。
+> 有 `build/layers.tsv` 时**引擎驱动容器**（起容器 / commit / 落 `layer/` / 导 `output/`）；
+> 只有 `scripts/build.sh` 时仍然跑脚本（迁移前的形态）；两个都没有就拒绝构建。
 
 ---
 

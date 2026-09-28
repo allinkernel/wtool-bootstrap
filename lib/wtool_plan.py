@@ -2456,6 +2456,130 @@ def _downloadable_rows(rows):
     return out
 
 
+# --------------------------------------------------------------------------
+# 容器构建（kind="docker"）的清单：build/targets.tsv + build/layers.tsv
+#
+# ADR-0025 说"引擎管生命周期，项目管每一层装什么"；ADR-0029 把这句话落成两个约定文件 ——
+# 只有 **kind** 进 wtool.xml，清单住项目目录（形状固定，不用在 XML 里再声明路径）。
+#
+# 这里的三个函数**只算不写**：解析、校验、排序、把 {target} 替换掉，
+# 真正起容器 / commit / 导出的是 wtool.sh（wt_docker_build）。
+# --------------------------------------------------------------------------
+
+DOCKER_BUILD_DIR = "build"
+DOCKER_TARGETS_FILE = "targets.tsv"
+DOCKER_LAYERS_FILE = "layers.tsv"
+DOCKER_EXPORT_FILTER = "export.filter"
+
+
+def _tsv_rows(path):
+    """读一张两列以上的 TSV：跳空行和 `#` 注释，返回 [[字段...], ...]。"""
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for lineno, raw in enumerate(fh, 1):
+                line = raw.rstrip("\n")
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                rows.append([f.strip() for f in line.split("\t")])
+    except OSError:
+        return None
+    return rows
+
+
+def docker_manifest_paths(project_dir):
+    base = os.path.join(os.path.abspath(project_dir), DOCKER_BUILD_DIR)
+    return (os.path.join(base, DOCKER_TARGETS_FILE),
+            os.path.join(base, DOCKER_LAYERS_FILE),
+            os.path.join(base, DOCKER_EXPORT_FILTER))
+
+
+def docker_targets(project_dir):
+    """`build/targets.tsv` → [(target, image), ...]；文件不在/坏了就抛 ValueError。"""
+    tpath, _lpath, _fpath = docker_manifest_paths(project_dir)
+    rows = _tsv_rows(tpath)
+    if rows is None:
+        raise ValueError("没有 %s —— kind=\"docker\" 的项目要有它和 %s（ADR-0029）"
+                         % (os.path.relpath(tpath, project_dir),
+                            DOCKER_LAYERS_FILE))
+    out = []
+    for i, row in enumerate(rows, 1):
+        if len(row) < 2 or not row[0] or not row[1]:
+            raise ValueError("%s 第 %d 行要至少两列：<target>\\t<docker 镜像>"
+                             % (DOCKER_TARGETS_FILE, i))
+        out.append((row[0], row[1]))
+    if not out:
+        raise ValueError("%s 里一个目标都没有" % DOCKER_TARGETS_FILE)
+    return out
+
+
+def docker_layers(project_dir):
+    """`build/layers.tsv` → [(层名, 父层, 镜像名, 命令), ...]，按**文件顺序**。
+
+    四列：`层名 \t 父层 \t 镜像名 \t 容器里跑的命令`
+      · 父层 `-`      = 从目标系统的基础镜像出发（第一层）
+      · 镜像名 `-`    = 占位层：不构建，只留一个空的 output 层
+      · 命令里的 `{target}` 会被替换成当前目标（引擎替换，这里只校验）
+    """
+    _tpath, lpath, _fpath = docker_manifest_paths(project_dir)
+    rows = _tsv_rows(lpath)
+    if rows is None:
+        raise ValueError("没有 %s（kind=\"docker\" 的层清单，见 ADR-0029）"
+                         % os.path.relpath(lpath, project_dir))
+    out = []
+    seen = set()
+    for i, row in enumerate(rows, 1):
+        if len(row) < 4 or not row[0]:
+            raise ValueError("%s 第 %d 行要四列：<层名>\\t<父层>\\t<镜像名>\\t<命令>"
+                             % (DOCKER_LAYERS_FILE, i))
+        layer, parent, image, cmd = row[0], row[1], row[2], row[3]
+        if layer in seen:
+            raise ValueError("%s 第 %d 行：层名 %r 重复" % (DOCKER_LAYERS_FILE, i, layer))
+        seen.add(layer)
+        if parent not in ("-", "") and parent not in [r[0] for r in out] +                 [r[0] for r in rows]:
+            raise ValueError("%s 第 %d 行：父层 %r 不在清单里"
+                             % (DOCKER_LAYERS_FILE, i, parent))
+        if image == "-" and cmd != "-":
+            raise ValueError("%s 第 %d 行：镜像名是 `-`（占位层）时命令也得是 `-`"
+                             % (DOCKER_LAYERS_FILE, i))
+        if parent not in ("-", "") and image != "-":
+            _pimg = dict((r[0], r[2]) for r in out).get(parent)
+            if _pimg == "-":
+                raise ValueError("%s 第 %d 行：层 %r 的父层 %r 是个占位层（没有镜像），"
+                                 "子层没有出发点" % (DOCKER_LAYERS_FILE, i, layer, parent))
+        if image != "-" and cmd == "-":
+            raise ValueError("%s 第 %d 行：层 %r 有镜像名却没有命令 —— 这一层装什么？"
+                             % (DOCKER_LAYERS_FILE, i, layer))
+        out.append((layer, parent if parent else "-", image, cmd))
+    if not out:
+        raise ValueError("%s 里一层都没有" % DOCKER_LAYERS_FILE)
+    return out
+
+
+def docker_plan_order(layers):
+    """按依赖排执行顺序：父层必须在子层前面。
+
+    **稳定**：同一批"父层已就绪"的层按清单里的先后走（不用字典序，
+    免得"某个语言先编"这种顺序变化让人以为行为变了）。
+    有环 → ValueError（清单写错了，不能猜）。
+    """
+    done, order = set(), []
+    pending = list(layers)
+    while pending:
+        progressed = False
+        for item in list(pending):
+            _layer, parent, _image, _cmd = item
+            if parent == "-" or parent in done:
+                order.append(item)
+                done.add(_layer)
+                pending.remove(item)
+                progressed = True
+        if not progressed:
+            raise ValueError("层清单里有环（或者父层不存在）：%s"
+                             % ", ".join(i[0] for i in pending))
+    return order
+
+
 def release_targets(project_dir):
     """`release.json` 的 `targets[]` —— **形状由声明决定，引擎不嗅探**（ADR-025）。
 
@@ -2910,6 +3034,13 @@ def build_parser():
     rt = sub.add_parser("release-targets")
     rt.add_argument("project_dir")
 
+    dt = sub.add_parser("docker-targets")
+    dt.add_argument("project_dir")
+
+    dp = sub.add_parser("docker-plan")
+    dp.add_argument("project_dir")
+    dp.add_argument("--target", default="")
+
     rj = sub.add_parser("release-json")
     rj.add_argument("--release-dir", required=True)
     rj.add_argument("--dist", default="")
@@ -3010,6 +3141,37 @@ def main(argv):
                   % (args.out, len(dist["files"]), len(dist["volumes"])))
         elif args.cmd == "release-targets":
             print(release_targets(args.project_dir))
+        elif args.cmd == "docker-targets":
+            try:
+                for tgt, img in docker_targets(args.project_dir):
+                    print("%s\t%s" % (tgt, img))
+            except ValueError as exc:
+                sys.stderr.write("error: %s\n" % exc)
+                return 1
+        elif args.cmd == "docker-plan":
+            try:
+                names = [t for t, _ in docker_targets(args.project_dir)]
+                if not args.target:
+                    sys.stderr.write("error: 要 --target=<目标>；这个项目声明了: %s\n"
+                                     % ", ".join(names))
+                    return 1
+                if args.target not in names:
+                    sys.stderr.write("error: 没有这个目标: %s（有 %s）\n"
+                                     % (args.target, ", ".join(names)))
+                    return 1
+                layers = docker_layers(args.project_dir)
+                imgs = dict((l, img) for l, _p, img, _c in layers)
+                for layer, parent, image, cmd in docker_plan_order(layers):
+                    ref = "-" if image == "-" else "%s:%s" % (image, args.target)
+                    # 父层给的是**镜像引用** —— 引擎要用它起容器。
+                    # 父层 `-` 的空格留给引擎填目标的基础镜像。
+                    pref = "-" if parent == "-" else "%s:%s" % (imgs.get(parent, "-"),
+                                                               args.target)
+                    print("%s\t%s\t%s\t%s" % (layer, pref, ref,
+                                                cmd.replace("{target}", args.target)))
+            except ValueError as exc:
+                sys.stderr.write("error: %s\n" % exc)
+                return 1
         elif args.cmd == "release-json":
             release_json(args)
         elif args.cmd == "download-doc":
