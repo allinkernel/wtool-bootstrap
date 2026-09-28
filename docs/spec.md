@@ -340,9 +340,9 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
 | contract | `tests/contract_test.sh` | 97 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
-| layer | `tests/layer_test.sh` | 41 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
+| layer | `tests/layer_test.sh` | 46 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **477** 条断言：
+共 **482** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 9 组全跑
@@ -534,6 +534,7 @@ apt-get update && apt-get install -y --no-install-recommends \
 | `build/targets.tsv` | `<目标系统> <TAB> <基础镜像> [<TAB> 代号 [<TAB> glibc]]` |
 | `build/layers.tsv` | `<层名> <TAB> <父层> <TAB> <镜像名> <TAB> <容器里跑的命令>`；父层 `-` = 从基础镜像出发，镜像名 `-` = 占位层（留一个空 output 层），命令里的 `{target}` 由引擎替换 |
 | `build/export.filter` | 可选。导出时丢什么，一行一个 `tar --exclude` 通配，`#` 注释 |
+| `build/system-paths` | 可选。**允许层里的软链指向包外面**的系统路径（ADR-0030）：按**路径分量**比（`/usr/bin/python` 不放行 `/usr/bin/python3`），放行了哪些记进产出事实的 `allowed_escaping`。不写 = 一条都不放行 |
 
 引擎对每一层：**没有镜像就起容器 commit → 存进 `layer/<target>/` → 从顶层 blob 导出
 `output/<target>/<层>/`**。三步的判据都是"磁盘上有没有"，所以重跑 `wtool build`

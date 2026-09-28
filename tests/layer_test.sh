@@ -301,6 +301,58 @@ chk "--layer= 只拉那一个" "1" "$(grep -c '^copy ' "$T/skopeo.log")"
 chk "--layer= 比的是还原后的层名（main）" "1" \
     "$(grep -c '^copy --all docker://reg.example.com/ns/demo:main-ubuntu_24.04' "$T/skopeo.log")"
 
+printf '\n== 9b. build/system-paths：项目声明的系统路径放行（ADR-0030）==\n'
+#   指向包外的软链默认拒收（上面第 7 节）。但项目可以声明"这些系统路径目标机上一定有"
+#   —— astronvim 的 mason venv 里就有 venv/bin/python3 -> /usr/bin/python3（任何
+#   Ubuntu 都有，而且它的系统层本来就会装 python3）。
+_mkblob() {   # $1=yes/no —— 造一层"镜像形状"的 tar（root/.wtool/…）
+    rm -rf "$T/real2"; mkdir -p "$T/real2/root/.wtool/usr/bin"
+    printf 'x\n' > "$T/real2/root/.wtool/usr/bin/demo"
+    [ "$1" = yes ] && ln -s /usr/bin/python3 "$T/real2/root/.wtool/usr/bin/py3"
+    ( cd "$T/real2" && tar -czf "$T/blob2.tgz" root )
+}
+_addblob() {   # $1=层名 —— 把 blob2 挂进 layout（复用第 6 节那套手搓 index 的办法）
+    _sha=$(sha256sum "$T/blob2.tgz" | cut -d' ' -f1)
+    cp "$T/blob2.tgz" "$L2/blobs/sha256/$_sha"
+    printf '{"layers":[{"digest":"sha256:%s"}]}\n' "$_sha" > "$T/mf.$1.json"
+    _msha=$(sha256sum "$T/mf.$1.json" | cut -d' ' -f1)
+    cp "$T/mf.$1.json" "$L2/blobs/sha256/$_msha"
+    python3 -c '
+import json,sys
+p=sys.argv[1]
+d=json.load(open(p,encoding="utf-8"))
+d["manifests"].append({"mediaType":"application/vnd.oci.image.manifest.v1+json",
+                       "digest":"sha256:"+sys.argv[2],"size":100,
+                       "annotations":{"io.wtool.layer":sys.argv[3],
+                                      "io.wtool.target":"ubuntu_24.04"}})
+json.dump(d,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)' "$L2/index.json" "$_msha" "$1"
+}
+# 重起一棵干净的 layout（第 4 节删过、第 6/7 节又重建过，状态不干净）
+rm -rf "$P/layer/ubuntu_24.04" "$P/output/ubuntu_24.04"
+# output/ 和 layer/ 都被前面的小节删过了 → target 猜不出来，明确指一个
+"$WT" layer-save terminal/demo --image=imgA --target=ubuntu_24.04 >/dev/null 2>&1
+L2="$P/layer/ubuntu_24.04"
+_mkblob yes; _addblob esc
+_rc=0
+"$WT" unpack-layer terminal/demo --layer=esc > "$T/esc1.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "没声明白名单：指向 /usr/bin/python3 的软链照样让这一层失败" \
+    || bad "没声明也放行了（默认变宽了）" "$(cat "$T/esc1.log")"
+grep -q '/usr/bin/python3' "$T/esc1.log" && ok "拒收时把那个软链列了出来" || bad "没说清是哪个软链"
+# 声明白名单 → 放行
+mkdir -p "$P/build"; printf '# 目标机上一定有\n/usr/bin/python3\n' > "$P/build/system-paths"
+_rc=0
+"$WT" unpack-layer terminal/demo --layer=esc > "$T/esc2.log" 2>&1 || _rc=$?
+chk "声明了 /usr/bin/python3 就放行" "$_rc" "0"
+chk "放行后记的还是软链原值（不是跟随目标算 sha256）" "L:/usr/bin/python3" \
+    "$(awk -F'\t' '$1=="usr/bin/py3"{print $2}' "$P/output/ubuntu_24.04/esc/OWNED.tsv")"
+# 白名单只放行它列的那条：换一条别的路径仍然拒
+printf '/usr/bin/python\n' > "$P/build/system-paths"
+_rc=0
+"$WT" unpack-layer terminal/demo --layer=esc > "$T/esc3.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "★白名单按**路径分量**比：/usr/bin/python 不放行 /usr/bin/python3" \
+    || bad "字符串前缀把 python3 误放行了"
+rm -f "$P/build/system-paths"
+
 printf '\n== 10. 老名字 push-layers / pull-layers：die + 指路 ==\n'
 for _old in push-layers pull-layers; do
     _rc=0

@@ -745,6 +745,16 @@ doc["produced"] = {
     # 逐文件比对 sha256 是**装到目标机时** install.sh 干的活（这儿再读一遍 GB 级目录不值得）。
     "verified": "structure",
 }
+# 放行过"指向包外的软链"吗？放了哪些路径 —— 记下来（ADR-0030：这是项目声明的，
+# 不是引擎偷偷放宽的）
+_allow_f = os.path.join(proj, "build", "system-paths")
+if os.path.isfile(_allow_f):
+    try:
+        doc["produced"]["allowed_escaping"] = [
+            l.strip() for l in open(_allow_f, encoding="utf-8")
+            if l.strip() and not l.lstrip().startswith("#")]
+    except OSError:
+        pass
 tmp = dst + ".new"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(doc, fh, ensure_ascii=False, indent=2)
@@ -3324,8 +3334,8 @@ INNER_PY
 #    把"目标的内容"记成"这个文件的内容"（2026-09-26 实测踩过：
 #    发布出去的包在干净机器上因此根本装不上）。
 # ⚠️ 指向 payload **外面**的软链换台机器必然是断的 —— 这一层不能用，直接失败。
-wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径>
-    _os_pay=$1; _os_name=$2; _os_out=$3
+wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径> [允许指向的系统路径文件]
+    _os_pay=$1; _os_name=$2; _os_out=$3; _os_allow=${4:-}
     # ‼️ 这个临时文件必须放在 **payload 外面**：放在里面的话，下面那条 find 会把
     #    **它自己**也扫进去 —— 于是每一层的 OWNED.tsv 都多出一条
     #    `.escaping-links.<pid>`，而那个文件扫完就被删了。后果不只是脏数据：
@@ -3345,6 +3355,19 @@ wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径>
                         *)            _os_out2=1 ;;
                     esac ;;
             esac
+            # 指向包外**不等于**这一层不能用：项目可以在 build/system-paths 里声明
+            # "这些系统路径在目标机上一定有"（例如 /usr/bin/python3 —— 任何 Ubuntu
+            # 都有，而且项目的系统层本来就会装它）。声明过的放行，其余照旧拒收。
+            # 判据是"目标 == 白名单里那条，或者在那条**下面**"（按路径分量比，
+            # 不是字符串前缀 —— 否则 /usr/bin/python 会误放行 /usr/bin/python3.12）。
+            if [ "$_os_out2" = 1 ] && [ -n "$_os_allow" ] && [ -f "$_os_allow" ]; then
+                while IFS= read -r _os_a; do
+                    case $_os_a in ''|'#'*) continue ;; esac
+                    case $_os_t in
+                        "$_os_a"|"$_os_a"/*) _os_out2=0 ;;
+                    esac
+                done < "$_os_allow"
+            fi
             [ "$_os_out2" = 1 ] && printf '%s -> %s\n' "$_os_f" "$_os_t" >> "$_os_esc"
             printf '%s\tL:%s\t%s\n' "$_os_f" "$_os_t" "$_os_name"
         else
@@ -3589,6 +3612,7 @@ wt_layer_export() {
     fi
     chmod -R a+rX "$_le_dst/payload" 2>/dev/null || true
     wt_owned_scan "$_le_dst/payload" "$_le_name" "$_le_dst/OWNED.tsv" \
+        "$_le_dir/build/system-paths" \
         || wt_die "$_le_name 这一层不能用（上面列了原因）"
     printf '%s\n' "$_le_dst"
 }
