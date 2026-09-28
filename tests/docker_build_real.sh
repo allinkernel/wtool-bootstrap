@@ -88,7 +88,9 @@ chk "产出事实跟着层走" "yes" \
 echo "== 续跑：第二次不该再起容器 =="
 _ctr_before=$(docker ps -a --format '{{.Names}}' | grep -c '^wtool-build-' || true)
 "$WT" build demo --target="$TARGET" > "$T/real2.log" 2>&1 || bad "第二次 build" "$(cat "$T/real2.log")"
-grep -q '跳过构建' "$T/real2.log" && ok "第二次说了"跳过构建"" \
+# 引擎在多了一层调度之后，把"到底编了没有"写进**每一层自己的日志**，
+# 顶层只印 `✓ <层>（docker 里已有，跳过）`
+grep -q '跳过' "$T/real2.log" && ok "第二次说了跳过（✓ 层（docker 里已有，跳过））" \
     || bad "第二次没跳过" "$(tail -5 "$T/real2.log")"
 _ctr_after=$(docker ps -a --format '{{.Names}}' | grep -c '^wtool-build-' || true)
 chk "没留下容器" "$_ctr_before" "$_ctr_after"
@@ -97,7 +99,8 @@ echo "== 删掉 docker 里的镜像 → 从 layer/ 装回来 =="
 docker rmi -f "$TAG:$TARGET" >/dev/null 2>&1 || true
 rm -rf "$P/output/$TARGET/one"
 "$WT" build demo --target="$TARGET" > "$T/real3.log" 2>&1 || bad "从 layer/ 恢复" "$(cat "$T/real3.log")"
-grep -q '装回来' "$T/real3.log" && ok "从 layer/ 装回来了" || bad "没走恢复" "$(tail -5 "$T/real3.log")"
+grep -q '从 layer/ 恢复' "$T/real3.log" && ok "从 layer/ 装回来了" \
+    || bad "没走恢复" "$(tail -5 "$T/real3.log")"
 chk "payload 又回来了" "hello from a real container" \
     "$(cat "$P/output/$TARGET/one/payload/usr/share/wtool-smoke/hello.txt" 2>/dev/null || echo 缺失)"
 

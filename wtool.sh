@@ -753,13 +753,124 @@ os.replace(tmp, dst)
 PYFACTS
 }
 
+# 一个 target 的**层调度**：父层就绪的层可以并行开跑，上限 $7。
+# 为什么要有它：astronvim 的 7 个语言层彼此独立（同一父层），串行跑等于把
+# 下载时间乘以 7 —— 它自己的 build.sh 里本来就有这一层并行（`--jobs`），
+# 引擎驱动之后必须补上（BL-34），否则迁移过去就是"变慢"。
+#
+# 实现是"后台起 + 轮询状态文件"，不用 `wait -n`（dash 没有）：
+#   每个层把 wt_docker_layer 的退出码写进 <logdir>/<层>.status，父进程轮询它。
+#   一个层失败 → **不再开新的**，等在跑的那几个落地，然后整批失败
+#   （"这一批别越跑越远"比"多榨一点并行"重要）。
+wt_docker_run_plan() {   # <项目目录> <项目 id> <target> <基础镜像> <plan 文件> <logdir> <并行上限>
+    _dp_dir=$1; _dp_pid=$2; _dp_t=$3; _dp_base=$4; _dp_plan=$5; _dp_logdir=$6; _dp_jobs=$7
+    _dp_pending=$(mktemp "${TMPDIR:-/tmp}/wtool-pend.XXXXXX")
+    _dp_done=$(mktemp "${TMPDIR:-/tmp}/wtool-done.XXXXXX")
+    cp -- "$_dp_plan" "$_dp_pending"
+    : > "$_dp_done"
+
+    _dp_running=0
+    _dp_failed=0
+    while [ -s "$_dp_pending" ] || [ "$_dp_running" -gt 0 ]; do
+        _dp_started=0
+        if [ "$_dp_failed" = 0 ]; then
+            while IFS='	' read -r _dp_l _dp_p _dp_r _dp_c; do
+                [ -n "$_dp_l" ] || continue
+                [ "$_dp_running" -lt "$_dp_jobs" ] || break
+                # 父层跑完了吗（`-` = 从基础镜像出发，随时可以开）
+                if [ "$_dp_p" != "-" ]; then
+                    # 父层"跑完了吗"的判据：它那一步的**镜像引用**在 done 里
+                    # （plan 第 2 列给的就是父层的完整引用，和父层那行的第 3 列同值）
+                    grep -qxF -- "$_dp_p" "$_dp_done" || continue
+                fi
+                _dp_slug=$(wt_docker_slug "$_dp_l")
+                : > "$_dp_logdir/$_dp_slug.status"
+                wt_step "开跑 $_dp_l（并行 $_dp_running/$_dp_jobs）"
+                (
+                    # ‼️ 先**卸掉继承来的 EXIT/INT/TERM trap**：POSIX sh 的子 shell 退出时
+                    #    会跑父 shell 的 EXIT trap —— 调用方（测试、脚本）常写
+                    #    `trap 'rm -rf "$T"' EXIT`，那每个后台层跑完都会去删一遍临时目录。
+                    #    实测踩过：整个 $T 在第一次收割之后就没了，后面全是"文件不存在"。
+                    trap - EXIT INT TERM
+                    wt_docker_layer "$_dp_dir" "$_dp_pid" "$_dp_t" "$_dp_base" \
+                        "$_dp_l" "$_dp_p" "$_dp_r" "$_dp_c" "$_dp_logdir" \
+                        > "$_dp_logdir/$_dp_slug.wtool.log" 2>&1
+                    printf '%s\n' "$?" > "$_dp_logdir/$_dp_slug.status"
+                ) &
+                printf '%s\n' "$!" > "$_dp_logdir/$_dp_slug.pid"
+                grep -vxF -- "$(printf '%s\t%s\t%s\t%s' "$_dp_l" "$_dp_p" "$_dp_r" "$_dp_c")" \
+                    "$_dp_pending" > "$_dp_pending.new" || true
+                mv -f -- "$_dp_pending.new" "$_dp_pending"
+                _dp_running=$((_dp_running + 1))
+                _dp_started=1
+            done < "$_dp_pending"
+        fi
+        [ "$_dp_running" -gt 0 ] || {
+            [ "$_dp_failed" = 1 ] && break
+            [ "$_dp_started" = 1 ] && continue
+            wt_warn "层清单里有谁都跑不了的层（父层没成功？）：$(cut -f1 "$_dp_pending" | paste -sd, -)"
+            _dp_failed=1; break
+        }
+        # 收割：谁的状态文件里已经有退出码了
+        _dp_reaped=0
+        while IFS='	' read -r _dp_l _dp_p _dp_r _dp_c; do
+            [ -n "$_dp_l" ] || continue
+            _dp_slug=$(wt_docker_slug "$_dp_l")
+            # ‼️ 要 `-s`（有内容）不是 `-f`：进队列时先 `: > …status` 占位，
+            # 只看"文件在不在"会在开跑的瞬间就当它跑完了（实测：退出码读成空）
+            if [ -s "$_dp_logdir/$_dp_slug.status" ]; then
+                _dp_rc=$(cat "$_dp_logdir/$_dp_slug.status" 2>/dev/null || echo 1)
+            else
+                # 状态文件还没内容 —— 但 worker 进程**已经没了**也算失败：
+                # 只等状态文件的话，worker 被信号打死时父进程会一直等到天荒地老
+                # （实测：timeout 杀测试脚本时挂在这儿）。
+                _dp_wpid=$(cat "$_dp_logdir/$_dp_slug.pid" 2>/dev/null || echo "")
+                if [ -n "$_dp_wpid" ] && ! kill -0 "$_dp_wpid" 2>/dev/null; then
+                    _dp_rc=1
+                    wt_warn "$_dp_l 中途退出了（没留下退出码 —— 多半是某一步 die 了）"
+                else
+                    continue
+                fi
+            fi
+            _dp_running=$((_dp_running - 1))
+            _dp_reaped=1
+            if [ "$_dp_rc" = 0 ]; then
+                printf '%s\n' "$_dp_r" >> "$_dp_done"
+                # 这一层"编了"还是"跳过了/从 layer 装回来的"，从它的日志里读一句出来 ——
+                # 否则用户只看到"✓"，不知道到底干了活没有（细节仍在那一层的日志里）
+                _dp_note=""
+                grep -q '跳过构建' "$_dp_logdir/$_dp_slug.wtool.log" 2>/dev/null && _dp_note="（docker 里已有，跳过）"
+                grep -q '装回来' "$_dp_logdir/$_dp_slug.wtool.log" 2>/dev/null && _dp_note="（从 layer/ 恢复）"
+                wt_step "✓ $_dp_l$_dp_note"
+            else
+                wt_warn "✗ $_dp_l（退出码 $_dp_rc），它的日志："
+                tail -12 -- "$_dp_logdir/$_dp_slug.wtool.log" 2>/dev/null | sed 's/^/    /' >&2 || true
+                _dp_failed=1
+            fi
+            rm -f -- "$_dp_logdir/$_dp_slug.status" "$_dp_logdir/$_dp_slug.pid"
+        done < "$_dp_plan"
+        [ "$_dp_reaped" = 1 ] || sleep 2
+    done
+    # 收尾：还有在跑的等它们落地（失败时也要等，别留下野生容器）
+    wait
+    rm -f -- "$_dp_pending" "$_dp_done"
+    [ "$_dp_failed" = 0 ] || return 1
+    # 每个层自己的日志留着（出问题时看这一层的）
+    return 0
+}
+
 wt_docker_export_filter() {   # <项目目录> → 过滤清单路径（没有就输出空）
     _ef="$1/build/export.filter"
     [ -f "$_ef" ] && printf '%s\n' "$_ef"
 }
 
-wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--dry-run]
-    _db_dir=$1; _db_pid=$2; _db_only=${3:-}
+wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--jobs=N] [--dry-run]
+    # 并行上限：`--jobs=N` > `$WTOOL_LAYER_JOBS` > 2。
+    # ⚠️ **不用 `$WTOOL_JOBS`**：那是"这台机器几个核"（引擎给项目脚本的），
+    # 32 核机器上会变成"一次开 32 个容器"——层是整容器级的，不是编译进程。
+    _db_dir=$1; _db_pid=$2; _db_only=${3:-}; _db_jobs=${4:-${WTOOL_LAYER_JOBS:-2}}
+    case $_db_jobs in ''|*[!0-9]*) _db_jobs=2 ;; esac
+    [ "$_db_jobs" -ge 1 ] || _db_jobs=1
     [ -d "$_db_dir/build" ] || wt_die "$_db_pid 声明了 kind=\"docker\"，但没有 build/ 目录
   （要有 build/targets.tsv + build/layers.tsv，见 ADR-0029）"
 
@@ -795,12 +906,8 @@ wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--dry-ru
         wt_run mkdir -p -- "$_db_out" "$_db_logroot/$_db_t"
         printf '%s\n' "$_db_plan" > "$_db_logroot/$_db_t/plan.tsv"
         _db_ok=1
-        while IFS='	' read -r _db_l _db_p _db_r _db_c; do
-            [ -n "$_db_l" ] || continue
-            wt_docker_layer "$_db_dir" "$_db_pid" "$_db_t" "$_db_base" \
-                "$_db_l" "$_db_p" "$_db_r" "$_db_c" "$_db_logroot/$_db_t" || _db_ok=0
-            [ "$_db_ok" = 1 ] || break
-        done < "$_db_logroot/$_db_t/plan.tsv"
+        wt_docker_run_plan "$_db_dir" "$_db_pid" "$_db_t" "$_db_base" \
+            "$_db_logroot/$_db_t/plan.tsv" "$_db_logroot/$_db_t" "$_db_jobs" || _db_ok=0
         [ "$_db_ok" = 1 ] || {
             wt_warn "$_db_pid 目标 $_db_t 没编完 —— 修好之后重跑 wtool build 会**接着走**"
             return 1
@@ -823,12 +930,13 @@ EOF
 # 具体编什么、产物在哪，仍然是脚本自己的事。
 # --------------------------------------------------------------------------
 cmd_build() {
-    _targets=""; _build_target=""
+    _targets=""; _build_target=""; _build_jobs=""
     for arg in "$@"; do
         case $arg in
             --dry-run)  WTOOL_DRY_RUN=1 ;;
             --force)    WTOOL_FORCE=1 ;;
             --target=*) _build_target=${arg#--target=} ;;
+            --jobs=*)   _build_jobs=${arg#--jobs=} ;;
             -*)         wt_die "未知参数: $arg" ;;
             *)          _targets="$_targets $arg" ;;
         esac
@@ -885,7 +993,7 @@ EOF
                 continue
             fi
             wt_record_action "$_pid" build
-            if wt_docker_build "$_path" "$_pid" "$_build_target"; then
+            if wt_docker_build "$_path" "$_pid" "$_build_target" "$_build_jobs"; then
                 _done=$((_done + 1))
             else
                 _failed=$((_failed + 1))
@@ -3035,6 +3143,30 @@ wt_need_skopeo() {
 
 wt_layer_dir() { printf '%s/layer/%s\n' "$1" "$2"; }   # <项目目录> <target>
 
+# 一把"目录当锁"的互斥锁。为什么要它：`--jobs` 并行跑层时，两个层会**同时**
+# 往同一棵 `layer/<target>/` 写 index.json —— 各自读旧的、各写各的，最后一个
+# 覆盖前一个，前一个层的条目就**丢了**（实测：three 导不出来，报"找不到层 three，
+# layout 里有 3 个镜像"）。
+#   · 用 mkdir：POSIX、原子、不用外部命令
+#   · 锁里记 pid：占用者半路死了（wt_die / 被 kill）也**不会永久卡住**，后来者抢过来
+wt_lock() {   # <锁目录> [超时秒]
+    _lk_dir=$1; _lk_to=${2:-120}; _lk_n=0
+    while ! mkdir -- "$_lk_dir" 2>/dev/null; do
+        _lk_owner=$(cat "$_lk_dir/pid" 2>/dev/null || echo "")
+        if [ -n "$_lk_owner" ] && ! kill -0 "$_lk_owner" 2>/dev/null; then
+            rm -rf -- "$_lk_dir"        # 占用者已经不在了 → 抢过来
+            continue
+        fi
+        _lk_n=$((_lk_n + 1))
+        [ "$_lk_n" -lt "$((_lk_to * 5))" ] \
+            || wt_die "等锁超时：$_lk_dir（占用者 pid ${_lk_owner:-?}）"
+        sleep 0.2
+    done
+    printf '%s\n' "$$" > "$_lk_dir/pid"
+    return 0
+}
+wt_unlock() { rm -rf -- "$1"; }
+
 # 把一个 docker 镜像写进 layer/<target>/。同一棵 layout 里的 index.json 要**合并**
 # —— 直接把后一个 save 的 index.json 覆盖上去，前一个镜像的条目就没了（实测过）。
 wt_layer_import() {   # <项目目录> <target> <镜像> <层名>
@@ -3055,8 +3187,11 @@ wt_layer_import() {   # <项目目录> <target> <镜像> <层名>
     cp -an -- "$_li_tmp/blobs/sha256/." "$_li_dir/blobs/sha256/" 2>/dev/null || \
         cp -a -- "$_li_tmp/blobs/sha256/." "$_li_dir/blobs/sha256/" || {
             rm -rf -- "$_li_tmp"; wt_die "blob 拷不进 $_li_dir/blobs/sha256"; }
+    # ‼️ index.json 的"读—改—写"必须互斥：并行跑层时两个层会同时进来（见 wt_lock）
+    _li_lock="$_li_dir/.wtool-lock"
+    wt_lock "$_li_lock" 300
     python3 - "$_li_dir/index.json" "$_li_tmp/index.json" "$_li_name" "$2" "$_li_img" \
-        > "$_li_dir/index.json.new" <<'PY' || { rm -rf -- "$_li_tmp"; return 1; }
+        > "$_li_dir/index.json.new" <<'PY' || { wt_unlock "$_li_lock"; rm -rf -- "$_li_tmp"; return 1; }
 import json, sys
 cur_p, new_p, layer, target = sys.argv[1:5]
 image = sys.argv[5] if len(sys.argv) > 5 else ""
@@ -3083,6 +3218,7 @@ print(json.dumps({"schemaVersion": 2,
                   "manifests": entries}, ensure_ascii=False, indent=2))
 PY
     mv -f -- "$_li_dir/index.json.new" "$_li_dir/index.json"
+    wt_unlock "$_li_lock"
     rm -rf -- "$_li_tmp"
     wt_info "  已存进 layer/$2/（层名 $_li_name）"
 }

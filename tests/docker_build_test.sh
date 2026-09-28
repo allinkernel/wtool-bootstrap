@@ -21,6 +21,7 @@
 #   6. 占位层（镜像名 -）留一个空的 output 层
 #   7. build/export.filter 真的过滤掉了东西
 #   8. --dry-run 一个字节不写
+#   9. 并行：父层就绪的兄弟层同时跑（BL-34）
 set -eu
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -68,6 +69,8 @@ cat > "$P/scripts/layer.sh" <<'EOF'
 #!/bin/sh
 set -e
 L=$1
+# 兄弟层（three / other 都挂在 two 下面）慢一点 —— 量"有没有真的并行"
+if [ "${WTOOL_TEST_SLOW:-}" = 1 ]; then sleep 2; fi
 D="$WTOOL_TEST_ROOT/root/.wtool/usr/share/$L"
 mkdir -p "$D"
 printf '%s\n' "$L" > "$D/file.txt"
@@ -100,6 +103,18 @@ case "$1" in
         fi
         grep -qx -- "$_ref" "$DOCKER_IMAGES" 2>/dev/null && exit 0 || exit 1 ;;
     volume) exit 0 ;;
+    load)
+        # 引擎是 `tar -c -C 布局 . | docker load`：真 load 会把布局里的镜像装回来，
+        # 桩也得这么干 —— 否则"从 layer/ 恢复"那条路会退化成"重编一遍"（测不到真东西）
+        cat > "$DOCKER_TMP/loaded.tar"
+        tar -xOf "$DOCKER_TMP/loaded.tar" ./index.json 2>/dev/null \
+          | python3 -c '
+import json,sys
+for m in json.load(sys.stdin).get("manifests", []):
+    ref = (m.get("annotations") or {}).get("org.opencontainers.image.ref.name")
+    if ref:
+        print(ref)' >> "$DOCKER_IMAGES" 2>/dev/null || true
+        exit 0 ;;
     ps)     cat "$DOCKER_PS" 2>/dev/null; exit 0 ;;
     run)
         _name=""
@@ -119,17 +134,23 @@ case "$1" in
         # 把包装脚本里的 `cd /proj` 换成本机上的项目目录 —— 桩没有容器
         # 容器里的 /proj 是挂载点、/log 也是挂载点、/wtool-layer 是层里的。
         # 桩在宿主机上，把这三个都换成本机路径（等价于"容器真的这么跑"）
+        # ⚠️ 每容器一份：并行时两个 exec 会同时在跑，共用一个文件名会互相踩
+        #    （实测：diff 被对方清掉 → 有一层的 payload 是空的）
+        _fake="$DOCKER_TMP/fake.$_ctr.run"
         sed -e "s|/wtool-layer|$WTOOL_TEST_ROOT/wtool-layer|g" \
             -e "s|/log|$LOG_DIR|g" \
-            -e "s|/proj|$DOCKER_PROJ|g" "$_run" > "$T_FAKE_RUN"
+            -e "s|/proj|$DOCKER_PROJ|g" "$_run" > "$_fake"
+        _before="$DOCKER_TMP/before.$_ctr"; _after="$DOCKER_TMP/after.$_ctr"
         ( cd "$WTOOL_TEST_ROOT" && find . \( -type f -o -type l \) 2>/dev/null |
-              sed 's|^\./||' | LC_ALL=C sort ) > "$T_BEFORE"
+              sed 's|^\./||' | LC_ALL=C sort ) > "$_before"
         _rc=0
-        WTOOL_TEST_ROOT="$WTOOL_TEST_ROOT" sh "$T_FAKE_RUN" >> "$_out" 2>&1 || _rc=$?
+        printf '%s\t%s\n' "start" "$(basename "$_run" .run)" >> "$DOCKER_TIMELINE"
+        WTOOL_TEST_ROOT="$WTOOL_TEST_ROOT" sh "$_fake" >> "$_out" 2>&1 || _rc=$?
+        printf '%s\t%s\n' "end" "$(basename "$_run" .run)" >> "$DOCKER_TIMELINE"
         ( cd "$WTOOL_TEST_ROOT" && find . \( -type f -o -type l \) 2>/dev/null |
-              sed 's|^\./||' | LC_ALL=C sort ) > "$T_AFTER"
+              sed 's|^\./||' | LC_ALL=C sort ) > "$_after"
         printf 'EXIT=%s\n' "$_rc" >> "$_out"
-        comm -13 "$T_BEFORE" "$T_AFTER" > "$DOCKER_DIFF/$_ctr"
+        comm -13 "$_before" "$_after" > "$DOCKER_DIFF/$_ctr"
         exit 0 ;;
     commit)
         # 照这一层跑出来的增量，打一份 docker save 形状的 tar（顶层 blob = 这一层）
@@ -160,8 +181,10 @@ chmod +x "$T/bin/docker"
 PATH="$T/bin:$PATH"; export PATH
 export DOCKER_LOG="$T/docker.log" DOCKER_IMAGES="$T/images.txt" DOCKER_PS="$T/ps.txt"
 export DOCKER_FIX="$T/fix" DOCKER_DIFF="$T/diff" DOCKER_PROJ="$P" DOCKER_TAR="$T/save.tar"
-export T_FAKE_RUN="$T/fake.run" T_BEFORE="$T/before.txt" T_AFTER="$T/after.txt"
-export LOG_DIR="$T/state/editor_demo/build-logs/ubuntu_24.04"
+export WTOOL_TEST_SLOW="${WTOOL_TEST_SLOW:-}"
+export LOG_DIR="$T/state/editor_demo/build-logs/ubuntu_24.04" DOCKER_TIMELINE="$T/timeline.tsv"
+# 桩是子进程，只认导出的变量 —— $T 是测试里的局部变量，桩里读不到（踩过：路径变成 /fake…）
+export DOCKER_TMP="$T"
 export WTOOL_TEST_ROOT="$T/fakeroot"
 : > "$DOCKER_LOG"; : > "$DOCKER_IMAGES"; : > "$DOCKER_PS"
 
@@ -240,19 +263,48 @@ chk "喂给 docker load 的 tar 里带着它（多出来的文件 docker 会忽�
     "$(tar -tf "$_tar_probe" | grep -qx './one.json' && echo yes || echo no)"
 rm -f "$_tar_probe"
 
+echo "== 2c. 并行：父层就绪的兄弟层同时跑（BL-34）=="
+#   three 和 other 都挂在 two 下面 —— 它们应该**重叠**跑，而不是一个接一个。
+#   量法：桩把每层的 start/end 记进时间线，看有没有交叠（有层在跑时又开了新层）。
+: > "$DOCKER_TIMELINE"
+rm -rf "$P/output/ubuntu_24.04" "$P/layer"
+: > "$DOCKER_IMAGES"
+# 假根也要清：镜像都没了 = 下一轮容器从基础镜像新起，之前那些文件本来就不该在
+# （不清的话层脚本写的文件"早就有了"，桩算出来的增量是空的 —— 实测四层 blob 全 54 字节）
+rm -rf "$WTOOL_TEST_ROOT"; mkdir -p "$WTOOL_TEST_ROOT"
+WTOOL_TEST_SLOW=1 "$WT" build editor/demo --jobs=2 > "$T/par.log" 2>&1 \
+    || bad "并行 build" "$(cat "$T/par.log")"
+_overlap=$(python3 - "$DOCKER_TIMELINE" <<'PYOV'
+import sys
+rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+open_layers, seen = set(), False
+for ev, layer in rows:
+    if ev == "start":
+        if open_layers:
+            seen = True
+        open_layers.add(layer)
+    else:
+        open_layers.discard(layer)
+print("yes" if seen else "no")
+PYOV
+)
+chk "★兄弟层真的重叠跑了（父层就绪就同时开）" "$_overlap" "yes"
+grep -q '开跑' "$T/par.log" && ok "打了『开跑 X（并行 n/N）』" || bad "没有并行日志" "$(head -6 "$T/par.log")"
+
 echo "== 3. 续跑：什么都不用重做 =="
 : > "$DOCKER_LOG"
 "$WT" build editor/demo > "$T/build2.log" 2>&1 || bad "第二次 build" "$(cat "$T/build2.log")"
 chk "★第二次一次容器都没起" "$(grep -c '^run -d' "$DOCKER_LOG" || true)" "0"
 chk "★也没有再 docker save（layout 里已经有了）" "$(grep -c '^save ' "$DOCKER_LOG" || true)" "0"
-grep -q '跳过构建' "$T/build2.log" && ok "说了跳过构建" || bad "没说跳过" "$(cat "$T/build2.log")"
+grep -q '跳过' "$T/build2.log" && ok "说了跳过（✓ X（docker 里已有，跳过））" \
+    || bad "没说跳过" "$(cat "$T/build2.log")"
 
 echo "== 4. 删掉 docker 里的镜像 → 从 layer/ 装回来接着走 =="
 : > "$DOCKER_IMAGES"; : > "$DOCKER_LOG"         # docker 存储被 prune 了
 rm -rf "$P/output/ubuntu_24.04/other"           # 顺手让最后一层需要重新导出
 "$WT" build editor/demo > "$T/build3.log" 2>&1 || bad "docker 里没镜像时 build" "$(cat "$T/build3.log")"
-grep -q 'layer/ubuntu_24.04/ 里有 → 装回来' "$T/build3.log" \
-    && ok "父层不在 docker 里 → 从 layer/ 装回来" || bad "没走 layer/ 恢复那条路" "$(cat "$T/build3.log")"
+grep -q '从 layer/ 恢复' "$T/build3.log" \
+    && ok "镜像不在 docker 里 → 从 layer/ 装回来" || bad "没走 layer/ 恢复那条路" "$(cat "$T/build3.log")"
 grep -q '^load' "$DOCKER_LOG" && ok "用的是 docker load（tar 当管道）" || bad "没调 docker load" "$(cat "$DOCKER_LOG")"
 [ -f "$P/output/ubuntu_24.04/other/payload/usr/share/other/file.txt" ] \
     && ok "缺的那层重新导出了" || bad "缺的那层没补回来"
