@@ -72,9 +72,12 @@ export PATH="$WTOOL_PROJECT_DIR/bin:$PATH" # 项目自己的 bin/
 它最后进哪儿：
 
 ```
-env.zsh  的内容 ──► ~/.wtool/.zshrc  ──┐
-                                       ├── 用户 rc 里**一个** loader 块 source 它们
-env.bash 的内容 ──► ~/.wtool/.bashrc ──┘   （全局的，不属于任何项目）
+env.zsh  的内容 ──► ~/.wtool/.zshrc   ──► ~/.zshrc  里一个 loader 块 source 它
+env.bash 的内容 ──► ~/.wtool/.bashrc  ──► ~/.bashrc 里一个 loader 块 source 它
+
+每个 shell 一条**独立**的链：env.zsh 是给 zsh 用的，env.bash 是给 bash 用的（两份内容
+等价，各自服务一个 shell）。汇总文件是所有项目共用的；rc 里的 loader 块是全局的、
+不属于任何项目。只用 bash 的人靠的就是 env.bash 这条链。
 ```
 
 `eval "$(wtool doctor --quiet)"` 能把同一批变量直接灌进当前 shell。
