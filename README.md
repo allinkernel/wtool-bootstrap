@@ -12,11 +12,12 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh sudo-uninstall <项目>|all   # /etc 还原 + 卸掉这次装进来的 apt 包
 ./wtool.sh sudo-bootstrap              # 所有项目的 sudo-install
 
-# 产物与发布
-./wtool.sh build|download <项目>|all   # 跑项目自己的 scripts/build.sh / download.sh
-./wtool.sh pack-release   <项目>       # → <项目>/release/（源码.zip / release.zip / 分卷 / dist.json）
+# 产物与发布（release 四条边：pack/unpack 本地一对，publish/download 远端一对）
+./wtool.sh build          <项目>|all   # 跑项目自己的 scripts/build.sh → output/
+./wtool.sh pack-release   <项目>       # output/ → release/（源码.zip / release.zip / 分卷 / dist.json）
+./wtool.sh publish-release [<项目>]    # release/ → GitHub（**只上传**），成功后写 scripts/release.json
+./wtool.sh download-release <项目>|all # 读提交在项目里的 scripts/release.json → release/（**只下载**）
 ./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 output/
-./wtool.sh publish        [<项目>]     # pack-release + 上传（有 scripts/publish.sh 的走那个脚本）
 
 # 层（第二条通道：容器镜像仓库）
 ./wtool.sh push-layers  <项目>         # output/ 的层 → 镜像仓库（docker push，构建机上跑）
@@ -28,7 +29,9 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 7 组 / 273 条断言
+./tests/run_all.sh                    # 7 组 / 364 条断言
+                                      # pairing 35 / sudo-install 24 / publish 114 / table 43
+                                      # release-copy 17 / release 62 / contract 69
 ```
 
 ---
@@ -49,7 +52,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 | `docs/spec.md` | **接口契约**（改代码前先看） |
 | `docs/manifest-schema.md` | `wtool.xml` 完整字段表 |
 | `docs/roadmap.md` | 只剩一个指针 —— 内容已并入 `harness/BACKLOG.md` |
-| `templates/*.tpl` | 项目脚本模板（`wtool init --all` 用） |
+| `templates/*.tpl` | 项目脚本模板（`wtool init --with-build` / `--with-install` 用；只有这两种） |
 | `lib/wtool_os.sh` | 系统探测 + sudo 层（`/etc`、apt、任务） |
 
 ## 环境变量
@@ -105,7 +108,7 @@ wtool doctor
 引擎 `1.0.0`，schema `1`。
 
 **已实现**：`install` / `uninstall` / `sudo-install` / `sudo-uninstall` / `sudo-bootstrap` /
-`bootstrap` / `build` / `download` / `pack-release` / `unpack-release` / `publish` /
+`bootstrap` / `build` / `pack-release` / `publish-release` / `download-release` / `unpack-release` /
 `pull-layers` / `push-layers` / `pack-layer` / `unpack-layer` /
 `check` / `repair` / `status` / `doctor` / `validate` / `init` / `kill-self-forever` /
 `version`，加 `--dry-run` / `--force`。另外有三个**帮助里没写**的隐藏入口：
@@ -116,20 +119,30 @@ wtool doctor
 
 | 删掉的 | 现在用什么 |
 |---|---|
+| `download` | `download-release` + `unpack-release`（**语义变了**：只下到 `release/`，不解包） |
+| `publish` | `pack-release` + `publish-release`（**语义变了**：只上传，不打包） |
 | `provision` | `sudo-install`（`--with-system` 一并删掉） |
 | `table` | 裸跑 `wtool` |
 | `list` | `wtool status`（登记表并进去了） |
 | `env` | `wtool doctor`（`doctor --quiet` 只输出 export 行） |
 | `scaffold` | `wtool init <目录>`（**整个删掉**，不是改名） |
 
-**还在、但新项目别再用**：`<publish>` / `<sub>` / `<target>` —— 它们**没有被删除**，
-引擎照旧完整解析校验，只加一条警告；两者甚至都还有活的消费者：
-`<sub>` 替没有 `wtool.xml` 的上游子树（如 `neovim/neovim`）声明发布方式，
-`<target>` 被项目自己的 `scripts/publish.sh` **直接从 XML 读**成目标系统矩阵
-（`editor/astronvim_v5/scripts/publish.sh:229-247`）。新项目的能力一律由文件声明：
-有 `scripts/publish.sh` 就是脚本型发布。同理，旧标签（`<env>` / `<link src= dest=>` /
-`<provision>` / `<system-file>`）也仍然认，但 `wtool validate` 和每次解析都会警告 ——
-等项目都迁到新标签（`<zshrc>` / `<bashrc>` / 三段 `<link>` / `<sudo-install>`）就删掉兼容分支。
+前两条**故意不留兼容窗口**（ADR-023）：名字一样、语义不一样，静默兼容会做出错误的事
+（让人以为东西在 `output/` 里，其实在 `release/`）。
+
+**项目脚本只剩两种**：`scripts/build.sh`（怎么编，产物进 `output/`）和
+`scripts/install.sh`（怎么铺，`output/` → `~/.wtool/usr`）。
+`download.sh` / `publish.sh` / `extract.sh` 全部退休 —— 下载和发布全项目走同一条引擎的路。
+`wtool init --with-download` / `--with-publish` 同理取消（只剩 `--with-build` / `--with-install`）。
+**"文件存在即能力声明"不变，但只有这两种**；项目表的能力列因此是 `build` / `install` 两列。
+
+**`<publish>` 还在**：`kind="source"`（默认）/ `kind="none"`（不发布）/ `to="owner/repo"`
+（推到别的仓）都仍然有效，`<sub>`（替没有 `wtool.xml` 的上游子树表态）和 `<target>`
+（目标系统矩阵）也照旧解析。只有 **`kind="script"` 和 `script=` 取消了**：
+写它们是清单错误，`wtool validate` 会拒绝并提示"发布不再调项目脚本，构建逻辑放
+`scripts/build.sh`"。旧标签（`<env>` / `<link src= dest=>` / `<provision>` / `<system-file>`）
+仍然认，但 `wtool validate` 和每次解析都会警告 —— 等项目都迁到新标签
+（`<zshrc>` / `<bashrc>` / 三段 `<link>` / `<sudo-install>`）就删掉兼容分支。
 
 **还没做**（见 `harness/BACKLOG.md`）：
 `check --json`、`--prune`、`--exact`、并发锁、fish 支持。

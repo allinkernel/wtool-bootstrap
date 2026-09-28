@@ -8,7 +8,8 @@
 #   2. release.zip 带声明面（wtool.xml + env 文件），只下它也能 wtool install
 #   3. dist.json：每卷的名字 / sha256 / 大小，按顺序逐个声明
 #   4. 大包切分卷；分卷后原始大文件不留在 release/
-#   5. scripts/downloads.sh（wt_dl_add 清单）和 docs/download.md 都是文本
+#   5. pack-release **不再写** scripts/downloads.sh（那份清单归 scripts/release.json，
+#      见 harness/docs/adr/0026）；docs/download.md 仍然是文本、进 Git
 #   6. pack-release → unpack-release 往返：output/ 逐字节回来，声明面回到项目根
 #   7. 卷坏了 / 缺卷 → 拒绝解开（不许装上一个半成品）
 set -eu
@@ -78,8 +79,11 @@ git -C "$P" -c user.name=t -c user.email=t@t commit -qm init
 for f in 源码.zip release.zip dist.json 源码-hash.txt release-hash.txt; do
     [ -f "$P/release/$f" ] && ok "release/$f 产出了" || bad "release/$f 没产出"
 done
-[ -f "$P/scripts/downloads.sh" ] && ok "scripts/downloads.sh 产出了" || bad "scripts/downloads.sh 没产出"
+[ -f "$P/scripts/downloads.sh" ] && bad "scripts/downloads.sh 又出现了（ADR-026 已经删掉它）" \
+    || ok "scripts/downloads.sh 不再生成（清单归 scripts/release.json）"
 [ -f "$P/docs/download.md" ] && ok "docs/download.md 产出了" || bad "docs/download.md 没产出"
+check "release/.source 记了来源是本地打包" "packed" \
+    "$(cut -f1 < "$P/release/.source" 2>/dev/null || echo 无)"
 
 # 1) 源码包：.gitignore 生效
 SRC="$P/release/源码.zip"
@@ -129,17 +133,11 @@ check "dist.json 里 release.zip 的 role 是 release" "release" \
 d=json.load(open(sys.argv[1]))
 print([f["role"] for f in d["files"] if f["name"]=="release.zip"][0])' "$D")"
 
-# 4) downloads.sh / download.md
-grep -q "wt_dl_add 'release.zip'" "$P/scripts/downloads.sh" \
-    && ok "downloads.sh 里有 wt_dl_add" || bad "downloads.sh 里没有 wt_dl_add" "$(cat "$P/scripts/downloads.sh")"
-grep -q "WT_DL_TAG='v1.0'" "$P/scripts/downloads.sh" && ok "downloads.sh 记了 tag" \
-    || bad "downloads.sh 没记 tag"
+# 4) download.md（给人看的）
 grep -q 'releases/download/v1.0/release.zip' "$P/docs/download.md" \
     && ok "download.md 里有直链" || bad "download.md 里没有直链"
 grep -q 'wtool unpack-release terminal/tmux' "$P/docs/download.md" \
     && ok "download.md 里写了要敲哪条命令" || bad "download.md 没写命令"
-grep -q "$(zsha "$REL")" "$P/scripts/downloads.sh" && ok "downloads.sh 里的 sha256 对" \
-    || bad "downloads.sh 里的 sha256 不对"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 2：切分卷 + unpack-release 往返 ==\n'
@@ -163,11 +161,11 @@ check "分卷的 sha256 和磁盘一致" "$(zsha "$P/release/release.zip-vol01")
     "$(py -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 print([v["sha256"] for v in d["volumes"] if v["name"]=="release.zip-vol01"][0])' "$D")"
-grep -q "release.zip-vol01" "$P/scripts/downloads.sh" && ok "downloads.sh 列了分卷" \
-    || bad "downloads.sh 没列分卷"
-grep -q "^wt_dl_add 'release.zip'" "$P/scripts/downloads.sh" \
-    && bad "downloads.sh 列了传不上去的原始大文件" \
-    || ok "downloads.sh 不列被切开的原始大文件"
+# 分卷信息现在只在 dist.json 里（downloads.sh 已删）
+py -c 'import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+print(",".join(sorted(v["name"] for v in d["volumes"] if v["of"]=="release.zip"))[:40])' "$D" \
+    | grep -q "release.zip-vol01" && ok "dist.json 列了分卷" || bad "dist.json 没列分卷"
 
 # 模拟"另一台只有浏览器的机器"：把 dist.json + 所有分卷放进一个新项目目录
 P2="$T/ws2/terminal/tmux"
@@ -306,8 +304,83 @@ git -C "$P7" init -q && git -C "$P7" add -A \
     || bad "dry-run 执行" "$(cat "$T/pack7.log")"
 [ ! -d "$P7/release" ] && ok "dry-run 不建 release/" || bad "dry-run 建了 release/"
 grep -q 'dry-run' "$T/pack7.log" && ok "dry-run 输出了计划" || bad "dry-run 没输出计划"
-[ ! -f "$P7/scripts/downloads.sh" ] && ok "dry-run 不写 downloads.sh" \
+[ ! -f "$P7/scripts/downloads.sh" ] && ok "dry-run 不写 downloads.sh（它本来也不该存在）" \
     || bad "dry-run 写了 downloads.sh"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 6：download-release 读**提交的** release.json 把包下回来（不联网）==\n'
+#   这是"另一台机器"那条路：仓库里有 scripts/release.json（提交过的声明），
+#   release/ 和 output/ 都还没有。把 base_url 指到本地目录，用 file:// 假装发布页
+#   —— 全程不联网，但走的是同一段"下载 + sha256 校验"的代码。
+P8="$T/ws8/terminal/tmux"
+mkdir -p "$P8/scripts" "$P8/output/ubuntu_24.04/bin" "$T/pub8"
+printf 'bin\n' > "$P8/output/ubuntu_24.04/bin/tmux"
+chmod +x "$P8/output/ubuntu_24.04/bin/tmux"
+printf 'set -g mouse on\n' > "$P8/tmux.conf"
+printf 'export DEMO=1\n' > "$P8/env.zsh"
+printf 'export DEMO=1\n' > "$P8/env.bash"
+cat > "$P8/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="terminal/tmux" priority="50"/>
+EOF
+printf 'output/\nrelease/\n' > "$P8/.gitignore"
+printf '#!/bin/sh\ntrue\n' > "$P8/scripts/build.sh"
+git -C "$P8" init -q && git -C "$P8" add -A \
+    && git -C "$P8" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" pack-release "$P8" --tag=v8 --repo=fakeowner/tmux > "$T/pack8.log" 2>&1 \
+    || bad "场景 6 的 pack-release" "$(cat "$T/pack8.log")"
+# 假装那些资产已经挂在发布页上
+cp -f "$P8"/release/*.zip "$P8"/release/dist.json "$P8"/release/*-hash.txt "$T/pub8/" 2>/dev/null || true
+# 生成"提交进仓库"的声明（真流程里由 publish-release 写），再把 base_url 指到本地
+py "$boot/lib/wtool_plan.py" release-json --release-dir "$P8/release" \
+    --dist "$P8/release/dist.json" --project-id terminal/tmux --engine 1.0.0 \
+    --at 2026-01-01T00:00:00+0800 --dirty 0 --targets ubuntu_24.04 > "$P8/scripts/release.json" \
+    || bad "生成 release.json"
+py - "$P8/scripts/release.json" "$T/pub8" <<'PY'
+import json, sys
+p, base = sys.argv[1], sys.argv[2]
+d = json.load(open(p, encoding="utf-8"))
+d["base_url"] = "file://" + base
+json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+git -C "$P8" add -A && git -C "$P8" -c user.name=t -c user.email=t@t commit -qm 'release.json'
+
+# ★ 新机器：产物和包都没有
+rm -rf "$P8/release" "$P8/output"
+_rc=0
+"$WT" download-release "$P8" > "$T/dl8.log" 2>&1 || _rc=$?
+chk "download-release 执行成功" "$_rc" "0"
+[ -f "$P8/release/release.zip" ] && ok "release.zip 下回来了" \
+    || bad "release.zip 没下来" "$(tail -5 "$T/dl8.log")"
+[ -f "$P8/release/dist.json" ] && ok "dist.json 也下回来了（unpack 要用它）" || bad "dist.json 没下来"
+check "release/.source 标成 downloaded（publish-release 靠它拒收）" "downloaded" \
+    "$(cut -f1 < "$P8/release/.source" 2>/dev/null || echo 无)"
+chk "下回来的 release.zip 逐字节一致" "$(zsha "$P8/release/release.zip")" "$(zsha "$T/pub8/release.zip")"
+
+# 幂等：再下一次，应该全部跳过（不是重新下）
+_rc=0
+"$WT" download-release "$P8" > "$T/dl8b.log" 2>&1 || _rc=$?
+chk "第二次 download-release 也成功（幂等）" "$_rc" "0"
+grep -q '已是最新，跳过' "$T/dl8b.log" && ok "已经下好的文件被跳过（没重下）" \
+    || bad "第二次没有跳过" "$(tail -4 "$T/dl8b.log")"
+
+# sha256 对不上 → 不许把坏文件留在 release/
+cp -f "$T/pub8/release.zip" "$T/pub8/release.zip.good"     # 留一份好的，下面换回来
+printf 'corrupt\n' > "$T/pub8/release.zip"
+rm -f "$P8/release/release.zip"
+"$WT" download-release "$P8" > "$T/dl8c.log" 2>&1 || true
+[ ! -f "$P8/release/release.zip" ] && ok "sha256 对不上的文件没被留在 release/" \
+    || bad "坏文件被当成好文件放进 release/ 了"
+
+# 把发布页上的文件换回好的，再下一次 —— 应该能下回来，然后才解包
+mv -f "$T/pub8/release.zip.good" "$T/pub8/release.zip"
+"$WT" download-release "$P8" > "$T/dl8d.log" 2>&1 || true
+[ -f "$P8/release/release.zip" ] && ok "发布页恢复之后能重新下回来" \
+    || bad "重新下载失败" "$(tail -4 "$T/dl8d.log")"
+"$WT" unpack-release "$P8" > "$T/unpack8.log" 2>&1 || true
+[ -x "$P8/output/ubuntu_24.04/bin/tmux" ] && ok "unpack-release 把产物解了出来（可执行位也在）" \
+    || bad "download → unpack 之后 output/ 不对" "$(tail -5 "$T/unpack8.log")"
+[ -f "$P8/wtool.xml" ] && [ -f "$P8/env.bash" ] && ok "声明面回到项目根" || bad "声明面没回来"
 
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'

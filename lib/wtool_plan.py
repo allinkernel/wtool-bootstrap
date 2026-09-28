@@ -63,10 +63,10 @@ DECLARE_FILES = ("wtool.xml", "env.zsh", "env.bash")
 # 分卷大小：网络不稳，卷要小（见 harness/architecture.md §5）
 DEFAULT_VOLUME_SIZE = "32M"
 
-# publish 的默认行为：能力由**文件存在**声明（scripts/publish.sh），
-# 没有它就是源码包。<publish> 标签已经删掉，这里只为过渡期兼容老清单保留。
+# 发布只有引擎一条路（ADR-023）：pack-release 打包 → publish-release 上传。
+# `<publish>` 标签仍然有用：`to=` 推到别的仓、`kind="none"` 表示不发布。
 DEFAULT_PUBLISH_TAG = "snapshot-%Y-%m-%d"
-PUBLISH_KINDS = ("source", "script", "none")
+PUBLISH_KINDS = ("source", "none")
 # source 包的第一层目录名固定，跟本机工作区目录叫什么无关
 PUBLISH_ARCHIVE_PREFIX = "wtool"
 
@@ -188,28 +188,26 @@ def parse_manifest(path, project_root, errors, warnings=None):
 def _parse_publish(node, meta, manifest_path, errors):
     """<publish>：项目声明自己怎么发布。
 
-    kind="source"（默认）  引擎打源码包 → 推到本项目 origin 的 release
-    kind="script"          调用项目内脚本，由脚本产出并上传
+    kind="source"（默认）  引擎打源码包 + 产物包 → 推到本项目 origin 的 release
     kind="none"            不参与发布（第三方上游仓等）
+
+    ⚠️ 2026-09-28（ADR-023）：`kind="script"` 与 `script=` 删除 ——
+    发布只有引擎一条路，项目特有的逻辑归 `scripts/build.sh`。
     """
     kind = (node.get("kind") or "source").strip()
     if kind not in PUBLISH_KINDS:
         errors.append("<publish kind=%r> 只能是 %s（%s）"
                       % (kind, "/".join(PUBLISH_KINDS), manifest_path))
         return
-    script = (node.get("script") or "").strip()
-    if kind == "script":
-        if not script:
-            errors.append("<publish kind=\"script\"> 必须写 script=xxx.sh（%s）"
-                          % manifest_path)
-            return
-        if not is_safe_rel(script):
-            errors.append("<publish script=%r> 必须是不含 .. 的相对路径" % script)
-            return
+    if node.get("script"):
+        errors.append("<publish script=%r> 已经取消（ADR-023）："
+                      "发布不再调项目脚本，构建逻辑放 scripts/build.sh（%s）"
+                      % (node.get("script"), manifest_path))
+        return
 
     info = {
         "kind": kind,
-        "script": script,
+        "script": "",
         "tag": (node.get("tag") or DEFAULT_PUBLISH_TAG).strip(),
         # 发布目标仓：默认取项目 origin；写 to= 可以推到别的仓
         "to": (node.get("to") or "").strip(),
@@ -253,20 +251,18 @@ def _parse_publish(node, meta, manifest_path, errors):
 def effective_publish(path, pub):
     """发布方式的最终判定。
 
-    `<publish>` 标签整个删掉了（旧标签清单见 docs/manifest-schema.md 末尾）：
-    **文件存在即能力声明** —— 项目里有 `scripts/publish.sh` 就是脚本型发布。
-    老清单里显式写的 `<publish>` 仍然认（过渡期），用来表达两件文件表达不了的
-    事：推到别的仓（`to=`）和"不发布"（`kind="none"`，第三方上游仓要它）。
+    **发布只有引擎一条路**（ADR-023）：`pack-release` 打包 → `publish-release` 上传。
+    2026-09-28 起 **`scripts/publish.sh` 不再被认**（脚本型发布退休）——
+    项目特有的构建逻辑归 `scripts/build.sh`，打包上传归引擎。
+
+    `<publish>` 标签仍然有用，因为它能表达两件文件表达不了的事：
+    推到别的仓（`to=`）和"不发布"（`kind="none"`，第三方上游仓要它）。
     """
     out = dict(pub or {})
     for key, default in (("kind", "source"), ("script", ""),
                          ("tag", DEFAULT_PUBLISH_TAG), ("to", ""),
                          ("asset", ""), ("subs", []), ("targets", [])):
         out.setdefault(key, default)
-    if os.path.isfile(os.path.join(path, "scripts", "publish.sh")) or \
-            os.path.isfile(os.path.join(path, "publish.sh")):
-        out["kind"] = "script"
-        out["script"] = "publish.sh"
     return out
 
 
@@ -386,9 +382,8 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                                  manifest=manifest_path))
 
         elif tag == "publish":
-            # 旧写法：发布能力声明。新契约里"有 scripts/publish.sh 就是脚本型发布"，
-            # 这个标签整个删掉了；仍然认它，是为了让还没迁过来的项目照常工作。
-            _legacy("publish", "项目里放 scripts/publish.sh（文件存在即能力声明）")
+            # `<publish>` 现在只表达两件文件表达不了的事：推到别的仓（to=）、
+            # 不发布（kind="none"）。`kind="script"` / `script=` 已经取消（ADR-023）。
             _parse_publish(child, meta, manifest_path, errors)
 
         elif tag == "include":
@@ -1365,7 +1360,7 @@ def project_state(project_root, state_dir, root=None):
 # 表格里的四种状态。用文字而不是符号：圆点、横杠这类符号没有约定俗成的含义，
 # 看表的人（包括三个月后的自己）得先猜一遍。
 LBL_NONE = "不支持"
-LBL_TODO = "待构建下载"
+LBL_TODO = "待产出"
 LBL_CAN = "可执行"
 LBL_DONE = "已完成"
 
@@ -1385,18 +1380,18 @@ def _state_cell(state, color_on):
 
 
 def pipeline_states(path, pub, st):
-    """算出这个项目在四个格子里的状态。
+    """算出这个项目在表格里的状态。
 
-    这是一条流水线：build 或 download → install → publish，后面的依赖前面的。
+    这是一条流水线：**产出** → `install`。产出有两条来路 ——
+    `wtool build`，或者 `wtool download-release` + `wtool unpack-release`。
+    **发布不再是项目的能力**（引擎统一做，见 `harness/docs/adr/0023`），
+    所以表格里没有 download / publish 那两列了。
 
     每个格子只有四种取值：
       不支持      这个项目没这项能力
       可执行      现在就能跑
-      待构建下载  能力有，但要先 build 或 download
+      待产出      能力有，但要先把 `output/` 产出来
       已完成      跑过了
-
-    注意 publish 对 kind="source" 没有前置依赖 —— 它打的是源码包，
-    不需要任何构建产物。
     """
     def _script(name):
         # 脚本住在 scripts/ 下；项目根的老位置仍然认（引擎会给警告）
@@ -1404,23 +1399,16 @@ def pipeline_states(path, pub, st):
                 or os.path.isfile(os.path.join(path, name)))
 
     has_build = _script("build.sh")
-    has_download = _script("download.sh")
 
     acts = st.get("actions") or {}
     built = "build" in acts
-    downloaded = "download" in acts
 
     out = {}
 
-    # build / download：有脚本就能跑，跑过就是完成
     if has_build:
         out["build"] = LBL_DONE if built else LBL_CAN
     else:
         out["build"] = LBL_NONE
-    if has_download:
-        out["download"] = LBL_DONE if downloaded else LBL_CAN
-    else:
-        out["download"] = LBL_NONE
 
     # install：能力来自 wtool.xml 的 link/env，或项目自己的 scripts/install.sh
     has_script = _script("install.sh")
@@ -1434,24 +1422,26 @@ def pipeline_states(path, pub, st):
         out["install"] = LBL_NONE
     elif st.get("installed"):
         out["install"] = LBL_DONE
-    elif (has_build or has_download) and not (built or downloaded):
-        # 这个项目要先产出东西才能装
+    elif has_build and not _has_output(path):
+        # 判据和 `wtool install` 一致：**看磁盘**，不看"做过没有"。
+        # 有 build.sh 就必须先有 output/，否则装出来是半成品。
         out["install"] = LBL_TODO
     else:
         out["install"] = LBL_CAN
 
-    # publish
-    if pub["kind"] == "none":
-        out["publish"] = LBL_NONE
-    elif st.get("published"):
-        out["publish"] = LBL_DONE
-    elif pub["kind"] == "script" and has_build and not built:
-        # 脚本型发布要拿构建产物，没构建就发不了
-        out["publish"] = LBL_TODO
-    else:
-        out["publish"] = LBL_CAN
-
     return out
+
+
+def _has_output(path):
+    """`<项目>/output/` 里有没有东西（和 cmd_install 的判据同一件事）。"""
+    out = os.path.join(path, "output")
+    try:
+        with os.scandir(out) as it:
+            for _ in it:
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def project_caps(path, pub):
@@ -1488,8 +1478,8 @@ def render_table(root, state_dir, verbose=False, color=None):
         st["cap_prov"] = bool({e.kind for e in entries} & {"sysfile", "source", "task"})
         projects.append(st)
 
-    headers = ["项目", "prio", "build", "download", "install", "publish"]
-    keys = [None, None, "build", "download", "install", "publish"]
+    headers = ["项目", "prio", "build", "install"]
+    keys = [None, None, "build", "install"]
 
     # 列宽：表头和数据里最宽的那个（按显示宽度算）
     widths = []
@@ -1550,8 +1540,6 @@ def render_table(root, state_dir, verbose=False, color=None):
                 recs = _read_tsv(os.path.join(state_dir, p["id"], "publish.tsv"))
                 when = recs[-1][2] if recs and len(recs[-1]) > 2 else "?"
                 detail.append("发布过（%s）" % when)
-            elif p["pub"]["kind"] == "script":
-                detail.append("发布走 scripts/publish.sh")
             out.append("  %-*s  %s" % (widths[0], p["id"], "；".join(detail)))
 
     return out, projects
@@ -2413,52 +2401,150 @@ def _downloadable_rows(rows):
     return out
 
 
-def downloads_sh(args):
-    """scripts/downloads.sh 的内容：本次发布了什么（文本，进 Git）。"""
-    rows = _downloadable_rows(_read_tsv(args.rows))
-    base = "https://github.com/%s/releases/download/%s" % (args.repo, args.tag)
-    out = ["# 本次发布的资产清单 —— 由 `wtool pack-release` 生成，不要手改。",
-           "#",
-           "# download.sh 先定义 wt_dl_add（怎么下、并发几路、断线怎么续传），",
-           "# 再 source 本文件 —— 这里只说\"这次发了什么\"。",
-           "",
-           "WT_DL_TAG='%s'" % args.tag,
-           "WT_DL_BASE_URL='%s'" % base,
-           ""]
-    for row in rows:
-        out.append("wt_dl_add '%s' '%s'" % (row[0], row[1]))
-    print("\n".join(out) + "\n", end="")
+def release_json(args):
+    """`scripts/release.json` 的内容：**提交进仓库**的发布声明（ADR-026）。
+
+    它是 `wtool download-release` **唯一要读的东西**，所以必须自足：
+    光凭它就能拼出每个资产的下载地址、校验 sha256 —— 不用先下任何东西
+    （这一点是它和 `release/dist.json` 的根本区别：后者跟着包走，
+    和包同源，所以只能用来拼卷，不能当"可信清单"）。
+
+    资产表**按 `release/` 目录里实际有的文件**算（和 `publish-release`
+    上传时用的 `find -maxdepth 1 -type f` 同一条规则）—— 保证"清单里有的
+    就是传上去的"，不会漂移。role 从 dist.json 里补，补不到的留空。
+
+    Python 只算不写：这里 print 出来，落盘由 shell 侧的 `wt_atomic_write` 干。
+    """
+    rel_dir = os.path.abspath(args.release_dir)
+    dist_path = os.path.abspath(args.dist) if args.dist else \
+        os.path.join(rel_dir, "dist.json")
+
+    dist = {}
+    if os.path.isfile(dist_path):
+        try:
+            with open(dist_path, encoding="utf-8") as fh:
+                dist = json.load(fh)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write("读不了 %s: %s\n" % (dist_path, exc))
+            raise SystemExit(1)
+
+    roles = {}
+    for f in dist.get("files", []):
+        roles[f.get("name", "")] = f.get("role", "")
+    for v in dist.get("volumes", []):
+        roles[v.get("name", "")] = "volume"
+
+    assets = []
+    if os.path.isdir(rel_dir):
+        for name in sorted(os.listdir(rel_dir)):
+            # `.source` 是引擎自己的来源标记，不是发布资产
+            if name.startswith("."):
+                continue
+            fp = os.path.join(rel_dir, name)
+            if not os.path.isfile(fp):
+                continue
+            with open(fp, "rb") as fh:
+                sha = hashlib.sha256()
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    sha.update(chunk)
+            assets.append({"name": name,
+                           "role": roles.get(name, ""),
+                           "bytes": os.path.getsize(fp),
+                           "sha256": sha.hexdigest()})
+
+    pid = dist.get("project") or args.project_id or ""
+    targets = [t for t in (args.targets or "").split(",") if t]
+    out = {
+        "schema": 1,
+        "project": pid,
+        "repo": dist.get("repo", ""),
+        "tag": dist.get("tag", ""),
+        "base_url": dist.get("base_url", ""),
+        "commit": dist.get("commit", ""),
+        "packed_at": dist.get("packed_at", ""),
+        "published_at": args.at or "",
+        "wtool_engine": args.engine or "",
+        "dirty": args.dirty == "1",
+        "volume_size": dist.get("volume_size", ""),
+        "declare": dist.get("declare", []),
+        # ⚠️ 今天只有 target 名字；glibc / arch 要等项目侧的 targets 清单
+        # 定下来（BL-28）才补得上。补上之前 download-release 不能按 glibc 选包。
+        "targets": [{"target": t} for t in targets],
+        "assets": assets,
+        "how": ("wtool download-release %s   # 下到项目的 release/（按本文件的 sha256 校验）\n"
+                "wtool unpack-release %s     # 拼分卷 + 解到 output/\n"
+                "wtool install %s            # 装到本机" % (pid, pid, pid)),
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
 def download_doc(args):
-    """docs/download.md 的内容：给人看的下载页。"""
-    rows = _downloadable_rows(_read_tsv(args.rows))
+    """`docs/download.md` 的内容：给人看的下载页。
+
+    ⚠️ **资产表必须和 `scripts/release.json` 的 `assets[]` 是同一批文件** ——
+    两者都按 `release/` 目录里**实际有什么**算（不是按"源码包/产物包"那一类算）。
+    漏掉 `dist.json` 或 `*-hash.txt` 的话，照页面手动下的人会缺文件，
+    而 `unpack-release` 正好要 `dist.json` 才拼得了分卷。
+
+    人分两类，页面要同时照顾：
+      · 装了 wtool 的 —— 三条命令搞定，走 `download-release` + `unpack-release`；
+      · 只有浏览器的 —— 手点上面那些直链，下完放进项目的 `release/` 再 unpack。
+    """
     base = "https://github.com/%s/releases/download/%s" % (args.repo, args.tag)
+    roles = {}
+    for row in _read_tsv(args.rows):
+        if len(row) < 4:
+            continue
+        roles[row[0]] = "volume" if (len(row) > 4 and row[4]) else row[3]
+
+    assets = []
+    rel_dir = getattr(args, "release_dir", "") or ""
+    if rel_dir and os.path.isdir(rel_dir):
+        for name in sorted(os.listdir(rel_dir)):
+            if name.startswith("."):            # `.source` 是引擎自己的标记
+                continue
+            fp = os.path.join(rel_dir, name)
+            if os.path.isfile(fp):
+                assets.append((name, os.path.getsize(fp), roles.get(name, "")))
+    else:
+        # 兜底：没给目录（老调用方式）就退回按 rows 渲染
+        for row in _downloadable_rows(_read_tsv(args.rows)):
+            try:
+                size = int(row[2] or 0)
+            except ValueError:
+                size = 0
+            assets.append((row[0], size, row[3] if len(row) > 3 else ""))
+
+    _role_cn = {"source": "源码包", "release": "产物包", "volume": "分卷"}
     out = ["# 下载 %s" % args.project_id,
            "",
-           "这一版：`%s`%s" % (args.tag,
-                              ("（%s）" % args.at if args.at else "")),
+           "这一版：`%s`%s" % (args.tag, ("（%s）" % args.at if args.at else "")),
            "",
-           "| 文件 | 大小 | 直链 |",
-           "|---|---|---|"]
-    for row in rows:
-        if len(row) < 3:
-            continue
-        try:
-            size = int(row[2] or 0)
-        except ValueError:
-            size = 0
-        out.append("| `%s` | %s | %s/%s |" % (row[0], _human_size(size), base, row[0]))
+           "| 文件 | 大小 | 是什么 | 直链 |",
+           "|---|---|---|---|"]
+    for name, size, role in assets:
+        out.append("| `%s` | %s | %s | %s/%s |"
+                   % (name, _human_size(size), _role_cn.get(role, role or "—"),
+                      base, name))
     out += ["",
             "## 怎么装",
             "",
+            "**装了 wtool 的机器**（推荐，校验和拼分卷它自己做）：",
+            "",
             "```sh",
-            "# 1) 把 dist.json 和上面所有文件下到项目的 release/ 目录",
-            "wtool unpack-release %s   # 校验每卷 sha256 → 拼接 → 解到 output/" % args.project_id,
-            "wtool install %s          # 再装（登记、软链、shell 集成）" % args.project_id,
+            "wtool download-release %s   # 按仓库里提交的 scripts/release.json 下载 + 校验" % args.project_id,
+            "wtool unpack-release %s     # 拼分卷 + 解到 output/" % args.project_id,
+            "wtool install %s            # 装到本机（登记、软链、shell 集成）" % args.project_id,
             "```",
             "",
-            "`install` 只认 `release.zip`，不需要 `源码.zip`。",
+            "**只有浏览器的机器**：把上面每个文件点下来，放进项目的 `release/` 目录，",
+            "再在那台机器上跑后两条命令 —— `unpack-release` 认包里的 `dist.json`，",
+            "缺了哪一卷它会说清楚。",
+            "",
+            "`install` 只认 `release.zip`（产物包），不需要 `源码.zip`。",
             ""]
     print("\n".join(out), end="")
 
@@ -2738,13 +2824,18 @@ def build_parser():
     wd.add_argument("--volume-size", default=DEFAULT_VOLUME_SIZE)
     wd.add_argument("--declare", default="")
 
-    ds = sub.add_parser("downloads-sh")
-    ds.add_argument("--rows", required=True)
-    ds.add_argument("--tag", required=True)
-    ds.add_argument("--repo", required=True)
+    rj = sub.add_parser("release-json")
+    rj.add_argument("--release-dir", required=True)
+    rj.add_argument("--dist", default="")
+    rj.add_argument("--project-id", default="")
+    rj.add_argument("--engine", default="")
+    rj.add_argument("--at", default="")
+    rj.add_argument("--dirty", default="0")
+    rj.add_argument("--targets", default="")
 
     dd = sub.add_parser("download-doc")
     dd.add_argument("--rows", required=True)
+    dd.add_argument("--release-dir", default="")
     dd.add_argument("--tag", required=True)
     dd.add_argument("--repo", required=True)
     dd.add_argument("--project-id", required=True)
@@ -2831,8 +2922,8 @@ def main(argv):
             dist = write_dist(args)
             print("dist      : %s（%d 个文件，%d 个分卷）"
                   % (args.out, len(dist["files"]), len(dist["volumes"])))
-        elif args.cmd == "downloads-sh":
-            downloads_sh(args)
+        elif args.cmd == "release-json":
+            release_json(args)
         elif args.cmd == "download-doc":
             download_doc(args)
         elif args.cmd == "check":

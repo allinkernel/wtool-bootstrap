@@ -920,6 +920,21 @@ wt_git_dirty() {   # <项目目录>
         _gd_f=$(printf '%s' "$_gd_line" | cut -c4-)
         case $_gd_f in *' -> '*) _gd_f=${_gd_f##* -> } ;; esac
         _gd_abs="$_gd_dir/$_gd_f"
+        # ⚠️ 未跟踪的**目录**会被 git 折叠成一行 `?? docs/`，而生成物登记表里
+        # 记的是文件（`docs/download.md`）。不展开的话，`pack-release` 刚写的
+        # `docs/download.md` 会让整个项目判成"脏"，**一次生成把下一次发布堵死**
+        # —— 正是 generated.tsv 要解决的那个问题，只是折叠目录把它绕过去了。
+        if [ -d "$_gd_abs" ]; then
+            _gd_any=0
+            while IFS= read -r _gd_sub; do
+                [ -n "$_gd_sub" ] || continue
+                wt_generated_owns "$_gd_dir/$_gd_sub" || _gd_any=1
+            done <<EOF
+$(git -C "$_gd_dir" ls-files --others --exclude-standard -- "$_gd_f" 2>/dev/null)
+EOF
+            [ "$_gd_any" = 1 ] && printf '%s\n' "$_gd_line"
+            continue
+        fi
         wt_generated_owns "$_gd_abs" || printf '%s\n' "$_gd_line"
     done
 }
@@ -1004,18 +1019,17 @@ wt_pack_release() {
         wt_step "[dry-run] 源码.zip  ← $_pk_nsrc 个文件（已按 .gitignore 过滤，永远排除 output/ release/）"
         wt_step "[dry-run] release.zip ← $_pk_nrel 个文件 + 声明面 ${_pk_declare:-（无）}"
         wt_step "[dry-run] 写 $_pk_pub/：dist.json、源码-hash.txt、release-hash.txt、超 $_pk_vol 就切分卷"
-        wt_step "[dry-run] 写 $_pk_dir/scripts/downloads.sh 和 $_pk_dir/docs/download.md"
+        wt_step "[dry-run] 写 $_pk_dir/docs/download.md 和 $_pk_pub/.source（来源标记）"
         wt_step "[dry-run] 发布地址 https://github.com/$_pk_repo/releases/download/$_pk_tag/"
         return 0
     fi
 
     if [ "$_pk_nrel" -le 0 ]; then
         # 纯声明式项目（只有 wtool.xml + 配置，没有 build/download）本来就没有产物。
-        # 有 build.sh/download.sh 却拿不出 output/ 才是真错误 —— 那多半是
-        # 忘了 build/download，装出来的会是半成品。
-        if [ -f "$_pk_dir/scripts/build.sh" ] || [ -f "$_pk_dir/scripts/download.sh" ] \
-           || [ -f "$_pk_dir/build.sh" ] || [ -f "$_pk_dir/download.sh" ]; then
-            wt_die "output/ 里什么都没有 —— 先跑 wtool build 或 wtool download ${_pk_pid:-<项目>}"
+        # 有 build.sh 却拿不出 output/ 才是真错误 —— 那多半是忘了 build，
+        # 发出去的会是半成品。
+        if [ -f "$_pk_dir/scripts/build.sh" ] || [ -f "$_pk_dir/build.sh" ]; then
+            wt_die "output/ 里什么都没有 —— 先跑 wtool build ${_pk_pid:-<项目>}（或者 wtool download-release + wtool unpack-release）"
         fi
         wt_info "没有 output/（这个项目没有产物）：release.zip 只带声明面"
     fi
@@ -1109,24 +1123,30 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
         || wt_die "写 dist.json 失败"
     cp -f -- "$_pk_scratch/dist.json" "$_pk_pub/dist.json"
 
-    # 5) 两个给人/给脚本的文本（进 Git —— 不然下一台机器不知道最新一版在哪）
+    # 5) 声明面：**来源标记** + 给人看的下载页
+    #
+    #    ⚠️ `scripts/downloads.sh` 删掉了（ADR-023/026）：那份"这次发了什么"的清单
+    #    归 `scripts/release.json`，而它由 `publish-release` 在**上传成功之后**写
+    #    （因为要等 base_url / published_at 定下来）。这里只放一个来源标记，
+    #    让 publish-release 能拒绝"把刚下下来的包又传回去"。
     wt_run mkdir -p -- "$_pk_dir/scripts" "$_pk_dir/docs"
-    python3 "$PY" downloads-sh --rows "$_pk_scratch/rows.tsv" --tag "$_pk_tag" \
-        --repo "$_pk_repo" > "$_pk_scratch/downloads.sh" || wt_die "生成 downloads.sh 失败"
-    python3 "$PY" download-doc --rows "$_pk_scratch/rows.tsv" --tag "$_pk_tag" \
-        --repo "$_pk_repo" --project-id "$_pk_pid" --at "$(date +%Y-%m-%d)" \
+    # --release-dir：资产表按**目录里实际有的文件**渲染，和 scripts/release.json 的
+    # assets[] 是同一批（页面漏一个，照页面手动下的人就缺一个 —— 测试盯着这条）。
+    python3 "$PY" download-doc --rows "$_pk_scratch/rows.tsv" --release-dir "$_pk_pub" \
+        --tag "$_pk_tag" --repo "$_pk_repo" --project-id "$_pk_pid" \
+        --at "$(date +%Y-%m-%d)" \
         > "$_pk_scratch/download.md" || wt_die "生成 download.md 失败"
-    cp -f -- "$_pk_scratch/downloads.sh" "$_pk_dir/scripts/downloads.sh"
     cp -f -- "$_pk_scratch/download.md" "$_pk_dir/docs/download.md"
-    wt_generated_add "$_pk_dir/scripts/downloads.sh"
     wt_generated_add "$_pk_dir/docs/download.md"
+    printf 'packed\t%s\t%s\t%s\t%s\n' "$_pk_repo" "$_pk_tag" \
+        "$(git -C "$_pk_dir" rev-parse HEAD 2>/dev/null || echo -)" "$(wt_now)" \
+        > "$_pk_pub/.source"
 
     _pk_n=$(awk -F'\t' '$4=="volume"{v++; next} {n++} END{printf "%d 个文件 / %d 个分卷", n, v}' \
             "$_pk_scratch/rows.tsv")
     wt_info "发布包已生成: $_pk_pub（$_pk_n）"
-    wt_info "  该提交的（文本，进 Git，不然下一台机器不知道最新一版在哪）："
-    wt_info "    scripts/downloads.sh"
-    wt_info "    docs/download.md"
+    wt_info "  下一步: wtool publish-release ${_pk_pid:-<项目>}   # 上传 + 写 scripts/release.json"
+    wt_info "  该提交的（文本，进 Git）：docs/download.md 和上传后的 scripts/release.json"
     wt_info "  release/ 是待上传目录（.gitignore 里，不进 Git）"
 }
 
@@ -1142,98 +1162,82 @@ wt_unpack_release() {
         || wt_die "读不了 dist.json: $_ur_dist"
     _ur_rows="$_ur_scratch/dist.rows.tsv"
     _ur_legacy=$(awk -F'\t' '$1=="meta" && $2=="legacy"{print 1}' "$_ur_rows")
-    _ur_comp=$(awk -F'\t' '$1=="meta" && $2=="compression"{print $3}' "$_ur_rows")
     _ur_tmp="$_ur_scratch/unpack"
+
+    # 老格式（astronvim 自己的 publish.sh 写的那种：只有 volumes + compression，
+    # 没有 files 段）**不再支持**（ADR-023：彻底抛弃历史代码）。
+    # 明确报错，不做"猜着解一半"—— 那会留下一个看起来装好了、其实缺东西的 output/。
+    if [ "$_ur_legacy" = 1 ]; then
+        wt_die "$_ur_dist 是老格式（没有 files 段，只有 volumes + compression）——
+  2026-09-28 起不再支持这种包（见 harness/docs/adr/0023）。
+  两条路：①用当时的 wtool 版本解开它；②重发一版新包：wtool pack-release <项目>"
+    fi
 
     _ur_field() {   # <kind> <name> <列号>
         awk -F'\t' -v k="$1" -v n="$2" -v c="$3" '$1==k && $2==n {print $c}' "$_ur_rows"
     }
 
     _ur_got=0
-    if [ "$_ur_legacy" != 1 ]; then
-        for _ur_name in $(awk -F'\t' '$1=="file"{print $2}' "$_ur_rows"); do
-            _ur_role=$(_ur_field file "$_ur_name" 5)
-            _ur_sha=$(_ur_field file "$_ur_name" 3)
-            _ur_vols=$(awk -F'\t' -v n="$_ur_name" '$1=="volume" && $5==n {print $2}' "$_ur_rows")
-            if [ -n "$_ur_vols" ]; then
-                # install 只消费 release.zip（§5）：源码包的分卷不全就跳过，
-                # 不是错误 —— 只下 release.zip 的机器完全合法。
-                _ur_lack=""
-                for _ur_v in $_ur_vols; do
-                    [ -f "$_ur_pub/$_ur_v" ] || { _ur_lack=$_ur_v; break; }
-                done
-                if [ -n "$_ur_lack" ]; then
-                    if [ "$_ur_role" = "source" ]; then
-                        wt_warn "源码包的分卷不全（缺 $_ur_lack），跳过 —— install 不需要它"
-                        continue
-                    fi
-                    wt_die "缺分卷: $_ur_pub/$_ur_lack"
+    for _ur_name in $(awk -F'\t' '$1=="file"{print $2}' "$_ur_rows"); do
+        _ur_role=$(_ur_field file "$_ur_name" 5)
+        _ur_sha=$(_ur_field file "$_ur_name" 3)
+        _ur_vols=$(awk -F'\t' -v n="$_ur_name" '$1=="volume" && $5==n {print $2}' "$_ur_rows")
+        if [ -n "$_ur_vols" ]; then
+            # install 只消费 release.zip（§5）：源码包的分卷不全就跳过，
+            # 不是错误 —— 只下 release.zip 的机器完全合法。
+            _ur_lack=""
+            for _ur_v in $_ur_vols; do
+                [ -f "$_ur_pub/$_ur_v" ] || { _ur_lack=$_ur_v; break; }
+            done
+            if [ -n "$_ur_lack" ]; then
+                if [ "$_ur_role" = "source" ]; then
+                    wt_warn "源码包的分卷不全（缺 $_ur_lack），跳过 —— install 不需要它"
+                    continue
                 fi
-                wt_run mkdir -p -- "$_ur_tmp"
-                _ur_out="$_ur_tmp/$_ur_name"
-                : > "$_ur_out"
-                _ur_k=0
-                for _ur_v in $_ur_vols; do
-                    _ur_exp=$(_ur_field volume "$_ur_v" 3)
-                    _ur_have=$(wt_sha256 "$_ur_pub/$_ur_v")
-                    [ "$_ur_have" = "$_ur_exp" ] || wt_die "分卷校验失败: $_ur_v
+                wt_die "缺分卷: $_ur_pub/$_ur_lack"
+            fi
+            wt_run mkdir -p -- "$_ur_tmp"
+            _ur_out="$_ur_tmp/$_ur_name"
+            : > "$_ur_out"
+            _ur_k=0
+            for _ur_v in $_ur_vols; do
+                _ur_exp=$(_ur_field volume "$_ur_v" 3)
+                _ur_have=$(wt_sha256 "$_ur_pub/$_ur_v")
+                [ "$_ur_have" = "$_ur_exp" ] || wt_die "分卷校验失败: $_ur_v
   期望 sha256: $_ur_exp
   实际 sha256: $_ur_have"
-                    cat -- "$_ur_pub/$_ur_v" >> "$_ur_out"
-                    _ur_k=$((_ur_k + 1))
-                done
-                wt_step "拼接 $_ur_k 卷 → $_ur_name"
-            else
-                _ur_out="$_ur_pub/$_ur_name"
-                if [ ! -f "$_ur_out" ]; then
-                    if [ "$_ur_role" = "source" ]; then
-                        wt_warn "源码包没下，跳过（install 只认 release.zip）: $_ur_name"
-                        continue
-                    fi
-                    wt_die "缺文件: $_ur_out（把 dist.json 和它一起下到 release/）"
+                cat -- "$_ur_pub/$_ur_v" >> "$_ur_out"
+                _ur_k=$((_ur_k + 1))
+            done
+            wt_step "拼接 $_ur_k 卷 → $_ur_name"
+        else
+            _ur_out="$_ur_pub/$_ur_name"
+            if [ ! -f "$_ur_out" ]; then
+                if [ "$_ur_role" = "source" ]; then
+                    wt_warn "源码包没下，跳过（install 只认 release.zip）: $_ur_name"
+                    continue
                 fi
+                wt_die "缺文件: $_ur_out（把 dist.json 和它一起下到 release/）"
             fi
-            if [ -n "$_ur_sha" ] && [ "$_ur_sha" != "-" ]; then
-                _ur_have=$(wt_sha256 "$_ur_out")
-                [ "$_ur_have" = "$_ur_sha" ] || wt_die "$_ur_name 整体校验失败（下载不完整？）
+        fi
+        if [ -n "$_ur_sha" ] && [ "$_ur_sha" != "-" ]; then
+            _ur_have=$(wt_sha256 "$_ur_out")
+            [ "$_ur_have" = "$_ur_sha" ] || wt_die "$_ur_name 整体校验失败（下载不完整？）
   期望 sha256: $_ur_sha
   实际 sha256: $_ur_have"
-            fi
-            if [ "$_ur_role" = "source" ]; then
-                # 源码包只校验不铺开：install 只消费 release.zip，装东西的人不需要源码
-                wt_info "源码包校验通过（不铺开）: $_ur_name"
-                _ur_got=$((_ur_got + 1))
-                continue
-            fi
-            wt_info "解开 $_ur_name → $_ur_dir"
-            wt_run mkdir -p -- "$_ur_dir"
-            wt_unpack_one "$_ur_out" "$_ur_dir"
+        fi
+        if [ "$_ur_role" = "source" ]; then
+            # 源码包只校验不铺开：install 只消费 release.zip，装东西的人不需要源码
+            wt_info "源码包校验通过（不铺开）: $_ur_name"
             _ur_got=$((_ur_got + 1))
-        done
-    fi
+            continue
+        fi
+        wt_info "解开 $_ur_name → $_ur_dir"
+        wt_run mkdir -p -- "$_ur_dir"
+        wt_unpack_one "$_ur_out" "$_ur_dir"
+        _ur_got=$((_ur_got + 1))
+    done
 
-    # 老格式（astronvim 的 publish.sh 自己写的 dist.json）：只有 volumes + compression，
-    # 拼接 + 解压出来是一棵 tar。过渡路径，项目迁到 pack-release 之后就不走了。
-    if [ "$_ur_got" = 0 ] && [ -n "$(awk -F'\t' '$1=="volume"{print $2}' "$_ur_rows")" ]; then
-        wt_run mkdir -p -- "$_ur_tmp" "$_ur_dir/output"
-        _ur_out="$_ur_tmp/legacy.tar"
-        : > "$_ur_out"
-        for _ur_v in $(awk -F'\t' '$1=="volume"{print $2}' "$_ur_rows"); do
-            [ -f "$_ur_pub/$_ur_v" ] || wt_die "缺分卷: $_ur_pub/$_ur_v"
-            _ur_exp=$(_ur_field volume "$_ur_v" 3)
-            _ur_have=$(wt_sha256 "$_ur_pub/$_ur_v")
-            [ "$_ur_have" = "$_ur_exp" ] || wt_die "分卷校验失败: $_ur_v"
-            cat -- "$_ur_pub/$_ur_v" >> "$_ur_out"
-        done
-        wt_warn "这是老格式的 dist.json（没有 files 段）—— 按整棵 tar 解到 $_ur_dir/output/"
-        case $_ur_comp in
-            zstd) zstd -dc -- "$_ur_out" | tar -xf - -C "$_ur_dir/output" \
-                      || wt_die "解开老格式发布包失败" ;;
-            *)    gzip -dc -- "$_ur_out" | tar -xf - -C "$_ur_dir/output" \
-                      || wt_die "解开老格式发布包失败" ;;
-        esac
-        _ur_got=1
-    fi
 
     [ "$_ur_got" -gt 0 ] || wt_die "dist.json 里没有可解的东西: $_ur_dist"
     wt_info "unpack-release 完成（只校验 + 铺到 output/，不做安装）"

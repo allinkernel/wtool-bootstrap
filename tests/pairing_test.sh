@@ -236,12 +236,22 @@ rm -rf "$bcopy/.git" "$bcopy/lib/__pycache__"
 ( cd "$bcopy" && git init -q && git add -A \
   && git -c user.email=t@example.com -c user.name=t commit -qm init )
 
+# ⚠️ 自举那一步（`install.sh` 被引擎调用时）必须落在**被管理的家目录**里。
+#    踩过：它原来只看 `$HOME`，于是跑一遍这个测试就把**真** `$HOME/.wtool/bootstrap`
+#    指向 `$h/bootstrap` 这个临时副本 —— 测试跑完临时目录一删，真 HOME 里留下一条悬空软链。
+#    所以这里两头都钉：该建的建在临时 HOME 里，真 HOME 一个字节不许动。
+_real_boot_before=$(readlink -- "$HOME/.wtool/bootstrap" 2>/dev/null || echo 无)
+
 "$bcopy/wtool.sh" install "$bcopy" > "$h/boot.log" 2>&1 || {
     bad "install bootstrap" "$(cat "$h/boot.log")"; }
 [ -d "$h/home/.wtool/wtool-work-dir/links/bootstrap" ] \
     && ok "bootstrap 中转链接已创建" || bad "bootstrap 中转链接已创建"
 grep -q '# >>> wtool:bootstrap' "$h/home/.wtool/.zshrc" \
     && ok "bootstrap 的块写进了汇总文件" || bad "bootstrap 的块没写进去"
+check "自举落在被管理的家目录里（\$WTOOL_HOME/.wtool/bootstrap）" "$bcopy" \
+    "$(readlink -- "$h/home/.wtool/bootstrap" 2>/dev/null || echo 无)"
+check "★真 \$HOME/.wtool/bootstrap 没被动过" "$_real_boot_before" \
+    "$(readlink -- "$HOME/.wtool/bootstrap" 2>/dev/null || echo 无)"
 
 if command -v zsh >/dev/null 2>&1; then
     got=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1;

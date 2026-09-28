@@ -30,6 +30,7 @@
 | `<sudo-install src="x.conf" dest="/etc/x.conf"/>` | 系统层：`/etc` 下的文件（可逆，备份/还原） |
 | `<sudo-install kind="apt-mirror" mirror="ustc" dest="auto"/>` | 系统层：引擎按发行版生成内容（换源） |
 | `<source url= ref= />` | 上游源码：clone → 固定 ref → 建本地分支 → 铺 overlay |
+| `<publish kind= to= />` | 怎么发布（默认 `source`）：推到本项目 remote，或 `to=` 指定的仓、`kind="none"` 不发布 |
 | `<include src= optional= />` | 拆清单 |
 
 <small>⚠️ 表外的标签**一律报错**，`x-*` 也不行 —— 见文末「自定义元素」。
@@ -197,6 +198,38 @@ state），还原依据单独记在 `system.tsv`；apt 包按"跑前跑后的已
 
 ---
 
+## `<publish>` —— 怎么发布
+
+**不写它 = `kind="source"`**：引擎打源码包 / 产物包，推到**本项目自己 remote** 的 release。
+它只表达"文件表达不了的两件事"：推到**别的仓**、或者**根本不发**。
+
+| 属性 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `kind` | 否 | `source` | 只认 `source` / `none`（`none` = 不参与发布，第三方上游仓用这个） |
+| `to` | 否 | 本项目 remote | 推到别的仓，写 `owner/repo` |
+| `tag` | 否 | `snapshot-%Y-%m-%d` | release 的 tag（`%Y`/`%m`/`%d` 会替换成当天日期） |
+| `asset` | 否 | — | 引擎只解析并透出（`publish-info` 读得到），当前发布流程不消费 |
+
+子元素两个：
+
+| 子元素 | 用途 |
+|---|---|
+| `<sub path= kind= to=/>` | 替**子树里没有 `wtool.xml` 的项目**表态（上游仓不能往里塞清单文件，只能从外面声明） |
+| `<target os= version= codename= image=/>` | 目标系统矩阵；引擎只解析并透出（`publish-info` 读得到），发布流程不消费 |
+
+**`kind="script"` 和 `script=` 已经取消**（ADR-023），现在写它们是**清单错误**，
+`wtool validate` 会拒绝：
+
+```xml
+<!-- ✗ 报错：kind 只能是 source / none -->
+<publish kind="script" script="scripts/publish.sh"/>
+```
+
+提示是"发布不再调项目脚本，构建逻辑放 `scripts/build.sh`" —— 发布全项目走同一条引擎的路：
+`wtool pack-release`（`output/` → `release/`）+ `wtool publish-release`（`release/` → GitHub）。
+
+---
+
 ## `<include>`
 
 | 属性 | 必填 | 说明 |
@@ -234,7 +267,8 @@ repo 的 manifest 用 `x-*` 把命名空间留给用户，`wtool.xml` **故意�
 | 同一清单内 `home` 不重复 | 拒绝 |
 | `home` 未被其他项目在 `registry.tsv` 里登记 | 拒绝（`--force` 降级为警告） |
 | 落点在磁盘上不存在，或已是正确的软链 | 拒绝（`--force` 备份后接管） |
-| 有 `build.sh`/`download.sh` 就必须有非空的 `output/` | 拒绝（`--force` 降级为警告） |
+| 有 `build.sh` 就必须有非空的 `output/` | 拒绝（`--force` 降级为警告） |
+| `<publish kind=…>` 只能是 `source` / `none`；不能有 `script=` | 拒绝 |
 | 旧标签 | 警告（能装，但提醒改成新标签） |
 
 ---
@@ -264,8 +298,10 @@ repo 的 manifest 用 `x-*` 把命名空间留给用户，`wtool.xml` **故意�
 </wtool>
 ```
 
-要编译 / 要下载产物的项目，再加 `scripts/`（`build.sh` / `download.sh` /
-`install.sh` / `publish.sh`，**按需，别留空壳**）和 `output/`（产物，`.gitignore` 里）。
+要编译 / 要产出的项目，再加 `scripts/`（只有 `build.sh` 和 `install.sh` 两种，
+**按需，别留空壳**）和 `output/`（产物，`.gitignore` 里）。
+下载和发布**不用脚本**：那是引擎的 `download-release` / `unpack-release`（取现成的包）和
+`pack-release` / `publish-release`（打包上传）。
 **文件存在即能力声明**：`scripts/` 下有没有那个文件，直接决定项目表里那一列亮不亮。
 
 ---
@@ -278,6 +314,6 @@ repo 的 manifest 用 `x-*` 把命名空间留给用户，`wtool.xml` **故意�
 | `<link src= dest=/>` | `<link home= wtool= subproject=/>` | 没有中间那一跳；`force=` / `optional=` 一并删 |
 | `<provision src= runner=/>` | `<sudo-install src=/>` | `runner=` 按扩展名判断 |
 | `<system-file …/>` | `<sudo-install … dest=/etc/…/>` | 属性名不变 |
-| `<publish kind= …/>`（含 `<sub>` / `<target>`） | **新项目别再用**（⚠️ 不是"已删除"） | 能力由文件声明：有 `scripts/publish.sh` 就是脚本型发布，没有就引擎 `pack-release` 打包。但 `<publish>` 照旧被**完整解析**（`lib/wtool_plan.py:188-250`），只加一条警告（`:388-392`）；其中 `<sub>` 还是**真功能** —— 替没有 `wtool.xml` 的上游子树（如 `neovim/neovim`）声明发布方式（`:2005-2125`），那些仓没有别的办法表态，得留着。详见 `docs/spec.md` §13 |
+| `<publish kind="script" script=…/>` | **没有了** —— 报错 | 发布不再调项目脚本（ADR-023）。`<publish>` 本身**还在**，但只剩 `kind="source"`（默认）/ `kind="none"` / `to="owner/repo"`，见上文「`<publish>` —— 怎么发布」；构建逻辑归 `scripts/build.sh` |
 
 兼容分支在**所有项目迁完之后**删除（见 `harness/architecture.md` §3 的改名对照）。

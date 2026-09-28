@@ -17,14 +17,18 @@
 #
 #   ── 产物与发布 ─────────────────────────────────────────────
 #   wtool build     [<项目>...|all] [--dry-run]   跑项目自己的 scripts/build.sh
-#   wtool download  [<项目>...|all] [--dry-run]   跑 scripts/download.sh
+#   wtool download-release [<项目>...|all] [--dry-run]
+#                       读**项目里提交的** scripts/release.json → 下到 <项目>/release/
+#                       只下载 + 校验，**不解包**（解包是 unpack-release）
 #   wtool pack-release   <项目>... [--tag=T] [--repo=owner/repo] [--volume-size=32M]
 #                       打包到 <项目>/release/：源码.zip、release.zip（大的切分卷）、
-#                       dist.json、两个 -hash.txt，另写 scripts/downloads.sh + docs/download.md
+#                       dist.json、两个 -hash.txt、.source 来源标记，
+#                       另写 docs/download.md
 #   wtool unpack-release <项目>... [--from=目录]
 #                       照 dist.json 校验每卷 sha256 → 拼接 → 解到 output/
-#   wtool publish   [<项目>...] [--tag=TAG] [--dry-run] [--force]
-#                       pack-release + 上传；有 scripts/publish.sh 的项目走那个脚本
+#   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
+#                       把 <项目>/release/ 里的东西传到 GitHub Release（**只上传**），
+#                       成功之后写 scripts/release.json（下载清单，记得提交）
 #   wtool pull-layers    <项目>... [--registry=<前缀>] [--target=] [--layer=]
 #                       从镜像仓库把层拉回来 → output/（**目标机不需要 docker**）
 #   wtool push-layers    <项目>... [--registry=<前缀>] [--target=] [--layer=]
@@ -66,7 +70,7 @@ if [ -z "${WTOOL_STATE:-}" ]; then
         WTOOL_STATE="$WTOOL_HOME/.local/state/wtool"
     fi
 fi
-# 必须 export：planner 和项目的 publish.sh 都要读它。
+# 必须 export：planner 和项目脚本都要读它。
 # 不导出的话 Python 侧读不到，会退化用 basename 当项目 id。
 WTOOL_ROOT=${WTOOL_ROOT:-$(dirname -- "$here")}
 export WTOOL_ROOT
@@ -244,7 +248,8 @@ wt_all_projects() {   # <过滤条件>：build | download | install | publish | 
         [ -n "${_pid:-}" ] || continue
         case $_ap_filter in
             build)    wt_project_script "$_path" build.sh    >/dev/null 2>&1 || continue ;;
-            download) wt_project_script "$_path" download.sh >/dev/null 2>&1 || continue ;;
+            # 「能下载」= 项目里**提交了** scripts/release.json（ADR-026）
+            download) [ -f "$_path/scripts/release.json" ] || continue ;;
             publish)  [ "$_kind" = "none" ] && continue ;;
             sudo)     printf '%s\n' "$_ap_sudo" | grep -qxF -- "$_pid" || continue ;;
             install)  ;;
@@ -268,7 +273,7 @@ wt_expand_targets() {   # <过滤条件> <参数...>
 }
 
 # --------------------------------------------------------------------------
-# 项目自己的脚本：build.sh / install.sh / publish.sh
+# 项目自己的脚本：build.sh / install.sh（发布和下载不用写脚本，见 ADR-023）
 #
 # 约定（见 guide.md「项目拓扑」）：
 #   子项目只提供 wtool.xml + 自己需要的脚本和源码，剩下的全交给 wtool。
@@ -280,7 +285,7 @@ wt_expand_targets() {   # <过滤条件> <参数...>
 #
 # 脚本固定放在 <项目>/scripts/ 下：
 #     terminal/tmux/scripts/build.sh
-#     editor/astronvim_v5/scripts/download.sh
+#     editor/astronvim_v5/scripts/build.sh
 #
 # 为什么单独一层目录，而不是散在项目根：项目根上放的是**内容和声明**
 # （wtool.xml、配置文件、源码），scripts/ 下放的是**动作**。
@@ -335,7 +340,7 @@ wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
         export WTOOL_STATE_DIR="$WTOOL_STATE/$WTOOL_PROJECT_ID"
         cd -- "$_rs_dir" || exit 1
         # stdin 接 /dev/null：脚本不该从终端读，也不该偷引擎的输入
-        # （清单走 fd 3，就是为了防这个——见 cmd_publish 的注释）
+        # （清单走 fd 3，就是为了防这个——见 cmd_publish_release 的注释）
         # shellcheck disable=SC2086
         exec sh "$_rs_path" $_rs_args < /dev/null
     )
@@ -407,7 +412,7 @@ PYGATE
     wt_warn ""
     wt_warn "  这台机器上硬编会很慢，而且多半会在中途因为磁盘或内存失败。"
     wt_warn "  建议改成下载现成的包（发布页上已经有人编好了）："
-    wt_warn "      wtool download $_ce_pid"
+    wt_warn "      wtool download-release $_ce_pid  然后 wtool unpack-release $_ce_pid"
     wt_warn "      wtool install  $_ce_pid"
     wt_warn ""
     wt_warn "  确认要在这台机器上编，就加 --force。"
@@ -496,33 +501,74 @@ EOF
 }
 
 # --------------------------------------------------------------------------
-# download：用发布页上现成的包代替"自己编"
+# download-release：从 GitHub Release 把包下到 <项目>/release/
 #
-# 和 build 是一对：两者都要把产物放到**同样的路径**上，
-# 之后的 install 完全不关心产物是编出来的还是下下来的。
-# 所以任何一个项目同时提供 scripts/build.sh 和 scripts/download.sh 时，
-# 这两条路必须等价（见 guide.md「产物契约」）。
+# **它只干一件事**：下载 + 校验 + 落到 `release/`。**不解包、不认包结构** ——
+# 解包是 `unpack-release` 的事（ADR-023：四条边各自单一职责）。
 #
-# 具体怎么下载、从哪拿、按什么选包，是项目脚本自己的事 ——
-# 引擎只负责：找到脚本、喂好环境（含 WTOOL_ARTIFACTS）、记一笔"做过了"。
+# 该下什么、每个文件的 sha256 是多少，一律读**项目里提交的** `scripts/release.json`：
+# 那份清单在 git 里，所以"清单和包同源、等于没校验"这个弱点在这里不存在（ADR-026）。
+# 只有浏览器的机器没有仓库 —— 那种场景走 docs/download.md 手动下 + unpack-release。
+#
+# 网络两条路（实测换来的，别删）：直链 `github.com/.../releases/download/...`
+# 有时整个不通，而 `api.github.com` 通；所以直链失败要再走一次 API 的资产端点
+# （`Accept: application/octet-stream`）。**两条都失败才算失败。**
 # --------------------------------------------------------------------------
-cmd_download() {
+wt_dl_one() {   # <url> <目标文件> <sha256>（sha256 空 = 不校验）
+    _d_url=$1; _d_out=$2; _d_sha=$3
+    _d_part="$_d_out.part"
+    rm -f -- "$_d_part"
+    # --speed-limit/--speed-time：代理"慢慢磨"的时候要自己判失败，
+    # 而不是挂在那里永远不报错（这个项目在这上面吃过亏）。
+    if ! curl -fL --retry 3 --retry-delay 2 -C - \
+              --connect-timeout 15 --speed-limit 4096 --speed-time 60 \
+              -o "$_d_part" "$_d_url" 2>/dev/null; then
+        rm -f -- "$_d_part"
+        return 1
+    fi
+    if [ -n "$_d_sha" ]; then
+        _d_got=$(sha256sum -- "$_d_part" 2>/dev/null | cut -d' ' -f1)
+        if [ "$_d_got" != "$_d_sha" ]; then
+            rm -f -- "$_d_part"
+            return 2
+        fi
+    fi
+    mv -f -- "$_d_part" "$_d_out"
+    return 0
+}
+
+# 资产名 → API 的资产 id（route B 要用）。不联网失败就吐空。
+wt_dl_asset_ids() {   # <repo> <tag>
+    curl -fsSL --connect-timeout 15 --max-time 60 \
+         -H 'Accept: application/vnd.github+json' \
+         "https://api.github.com/repos/$1/releases/tags/$2" 2>/dev/null |
+    python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for a in d.get("assets") or []:
+    sys.stdout.write("%s\t%s\n" % (a.get("name", ""), a.get("id", "")))
+'
+}
+
+cmd_download_release() {
     _targets=""
     for arg in "$@"; do
         case $arg in
             --dry-run) WTOOL_DRY_RUN=1 ;;
-            --force)   WTOOL_FORCE=1 ;;
             -*)        wt_die "未知参数: $arg" ;;
             *)         _targets="$_targets $arg" ;;
         esac
     done
 
     if [ -z "$_targets" ]; then
-        wt_info "这些项目提供了 scripts/download.sh："
+        wt_info "这些项目提交了 scripts/release.json（可以直接下现成的包）："
         _n=0
         while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
             [ -n "${_pid:-}" ] || continue
-            if wt_project_script "$_path" download.sh >/dev/null 2>&1; then
+            if [ -f "$_path/scripts/release.json" ]; then
                 wt_step "$_pid"
                 _n=$((_n + 1))
             fi
@@ -530,31 +576,149 @@ cmd_download() {
 $(python3 "$PY" publish-list --root "$WTOOL_ROOT")
 EOF
         [ "$_n" -gt 0 ] || wt_info "  （一个都没有）"
-        wt_info "用 wtool download <项目> 下载其中一个；wtool download all 全部"
+        wt_info "下载其中一个：wtool download-release <项目>；全部：wtool download-release all"
+        wt_info "下完还要 wtool unpack-release <项目> 才产出 output/ —— 两步是分开的。"
         return 0
     fi
 
+    command -v curl >/dev/null 2>&1 || wt_die "download-release 需要 curl"
+
     _targets=$(wt_expand_targets download $_targets)
-    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目（试试 wtool download 看有哪些）"
+    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目（试试 wtool download-release 看有哪些）"
 
     _done=0
     for _want in $_targets; do
-        _row=$(wt_publish_resolve "$_want") || exit $?
-        _pid=$(printf '%s\n' "$_row" | cut -f2)
-        _path=$(printf '%s\n' "$_row" | cut -f3)
+        # 和 unpack-release 一样：**先认目录**。目录形式不该要求它已经在项目表里
+        # —— 刚从发布包铺开的工作区就是这种情况（还没有 wtool.xml 之外的账）。
+        _path=""
+        case $_want in
+            /*) [ -d "$_want" ] && _path=$(cd -- "$_want" && pwd) ;;
+            *)  [ -d "$WTOOL_ROOT/$_want" ] && _path=$(cd -- "$WTOOL_ROOT/$_want" && pwd) ;;
+        esac
+        if [ -n "$_path" ]; then
+            case $_path in
+                "$WTOOL_ROOT"/*) _pid=${_path#"$WTOOL_ROOT"/} ;;
+                *)                _pid=$(basename -- "$_path") ;;
+            esac
+        else
+            _row=$(wt_publish_resolve "$_want") || exit $?
+            _pid=$(printf '%s\n' "$_row" | cut -f2)
+            _path=$(printf '%s\n' "$_row" | cut -f3)
+        fi
+        _rl="$_path/scripts/release.json"
 
         wt_info "── $_pid"
-        if ! wt_project_script "$_path" download.sh >/dev/null 2>&1; then
-            wt_warn "  没有 scripts/download.sh，这个项目只能自己编（wtool build $_pid）"
+        if [ ! -f "$_rl" ]; then
+            wt_warn "  没有 scripts/release.json —— 这个项目还没发布过现成的包，"
+            wt_warn "  只能自己编：wtool build $_pid"
             continue
         fi
-        WTOOL_PROJECT_ID=$_pid
-        wt_info "  脚本 : scripts/download.sh"
-        wt_run_project_script "$_path" download.sh || { wt_warn "  download.sh 失败，跳过"; continue; }
+
+        # 清单里每一行：名字 <TAB> sha256 <TAB> 字节 <TAB> 直链（已百分号编码）
+        _rows=$(python3 - "$_rl" <<'PY'
+import json, sys, urllib.parse
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+base = d.get("base_url") or "https://github.com/%s/releases/download/%s" % (
+    d.get("repo", ""), d.get("tag", ""))
+for a in d.get("assets") or []:
+    name = a.get("name", "")
+    if not name:
+        continue
+    print("%s\t%s\t%s\t%s/%s" % (name, a.get("sha256", ""), a.get("bytes", 0),
+                                 base.rstrip("/"), urllib.parse.quote(name)))
+PY
+) || wt_die "读不了 $_rl"
+        [ -n "$_rows" ] || { wt_warn "  release.json 里一个资产都没有，跳过"; continue; }
+
+        _repo=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8")).get("repo",""))' "$_rl")
+        _tag=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8")).get("tag",""))' "$_rl")
+        wt_info "  清单 : scripts/release.json（$_repo $_tag）"
+        wt_info "  落点 : release/"
+
+        if wt_dry; then
+            printf '%s\n' "$_rows" | while IFS='	' read -r _n _s _b _u; do
+                wt_step "[dry-run] $_n  ← $_u"
+            done
+            _done=$((_done + 1))
+            continue
+        fi
+
+        mkdir -p -- "$_path/release"
+        _ids=""
+        _ids_fetched=0
+        _got=0
+        while IFS='	' read -r _n _s _b _u; do
+            [ -n "${_n:-}" ] || continue
+            _dest="$_path/release/$_n"
+            # 已经下好了（sha 对得上）就跳过 —— 重跑是幂等的
+            if [ -f "$_dest" ] && [ -n "$_s" ] && \
+               [ "$(sha256sum -- "$_dest" 2>/dev/null | cut -d' ' -f1)" = "$_s" ]; then
+                wt_step "$_n（已是最新，跳过）"
+                _got=$((_got + 1))
+                continue
+            fi
+            wt_step "$_n  ← 直链"
+            _rc=0
+            wt_dl_one "$_u" "$_dest" "$_s" || _rc=$?
+            if [ "$_rc" != 0 ]; then
+                # 直链不通 → 走 API 的资产端点（第二条路）
+                if [ "$_ids_fetched" = 0 ]; then
+                    _ids=$(wt_dl_asset_ids "$_repo" "$_tag" || true)
+                    _ids_fetched=1
+                fi
+                _id=$(printf '%s\n' "$_ids" | awk -F'\t' -v n="$_n" '$1==n{print $2; exit}')
+                if [ -n "$_id" ]; then
+                    wt_warn "  直链不通，改走 api.github.com 的资产端点"
+                    _u2="https://api.github.com/repos/$_repo/releases/assets/$_id"
+                    _rc=0
+                    wt_dl_one_api "$_u2" "$_dest" "$_s" || _rc=$?
+                fi
+                if [ "$_rc" != 0 ]; then
+                    wt_warn "  $_n 两条路都失败（退出码 $_rc）—— 这个文件没下来"
+                    continue
+                fi
+            fi
+            _got=$((_got + 1))
+        done <<EOF
+$_rows
+EOF
+        if [ "$_got" -eq 0 ]; then
+            wt_warn "  一个文件都没下来"
+            continue
+        fi
+
+        # 来源标记：publish-release 靠它拒绝"把刚下下来的包又传回去"（ADR-026）
+        printf 'downloaded\t%s\t%s\t%s\n' "$_repo" "$_tag" "$(date -Iseconds)" \
+            > "$_path/release/.source"
         wt_record_action "$_pid" download
+        wt_info "  下了 $_got 个文件"
+        wt_info "  下一步: wtool unpack-release $_pid"
         _done=$((_done + 1))
     done
-    wt_info "download 完成（$_done 个项目）"
+    wt_info "download-release 完成（$_done 个项目）"
+}
+
+# route B：API 的资产端点，要带 Accept: application/octet-stream
+wt_dl_one_api() {   # <url> <目标文件> <sha256>
+    _a_url=$1; _a_out=$2; _a_sha=$3
+    _a_part="$_a_out.part"
+    rm -f -- "$_a_part"
+    if ! curl -fL --retry 3 --retry-delay 2 -C - \
+              -H 'Accept: application/octet-stream' \
+              --connect-timeout 15 --speed-limit 4096 --speed-time 60 \
+              -o "$_a_part" "$_a_url" 2>/dev/null; then
+        rm -f -- "$_a_part"
+        return 1
+    fi
+    if [ -n "$_a_sha" ]; then
+        _a_got=$(sha256sum -- "$_a_part" 2>/dev/null | cut -d' ' -f1)
+        if [ "$_a_got" != "$_a_sha" ]; then
+            rm -f -- "$_a_part"
+            return 2
+        fi
+    fi
+    mv -f -- "$_a_part" "$_a_out"
+    return 0
 }
 
 # --------------------------------------------------------------------------
@@ -578,17 +742,18 @@ cmd_install() {
 
     wt_git_precheck "$_project"
 
-    # 产物检查（§4.1）：项目里有 build.sh 或 download.sh ⟺ 装之前 output/ 得在。
+    # 产物检查（§4.1）：项目里有 build.sh ⟺ 装之前 output/ 得在。
     # 理由：install 是**断网也要能跑**的，所以它不替你去编译或下载 ——
     # 但也不能装作没事，那样装出来的是半成品。
     if wt_project_script "$_project" build.sh >/dev/null 2>&1 \
-       || wt_project_script "$_project" download.sh >/dev/null 2>&1; then
+       ; then
         if [ -z "$(ls -A -- "$_project/output" 2>/dev/null)" ]; then
             if [ "${WTOOL_FORCE:-0}" = 1 ]; then
                 wt_warn "output/ 还没有东西（--force 继续），装出来的可能不完整"
             else
                 wt_die "$_project 要先产出产物（output/ 是空的）：
-  wtool download $_project      # 用发布页上现成的包（要联网）
+  wtool download-release $_project   # 下现成的包到 release/（要联网）
+  wtool unpack-release   $_project   # 拼分卷 + 解到 output/
   wtool build    $_project      # 或者自己编（可能要几十分钟）
 install 不替你做这个决定 —— 它永不联网。"
             fi
@@ -1157,14 +1322,12 @@ cmd_bootstrap() {
 
         _needs=""
         wt_project_script "$_path" build.sh >/dev/null 2>&1 && _needs="build"
-        wt_project_script "$_path" download.sh >/dev/null 2>&1 \
-            && _needs="${_needs:+$_needs/}download"
+        # 判据和 `wtool install` **完全一致**：只看 `output/` 里有没有东西。
+        # ⚠️ 别把"做过 build / 下过包"也算进来：`download-release` 只把包放到
+        #    `release/`，`output/` 还是空的 —— 那时候放行，紧接着 install 就会 die
+        #    （实测：这两个判据不一致会让人看到"bootstrap 说能装、装的时候说没产物"）。
         _ready=0
         if [ -n "$_needs" ]; then
-            wt_has_action "$_pid" build && _ready=1
-            wt_has_action "$_pid" download && _ready=1
-            [ -f "$_path/scripts/release.json" ] && _ready=1
-            # output/ 里有东西就算产出过了（有人手工铺的、或者 unpack-release 解开的）
             [ -n "$(ls -A -- "$_path/output" 2>/dev/null)" ] && _ready=1
         fi
 
@@ -1198,7 +1361,7 @@ cmd_bootstrap() {
         printf '\n'
         while IFS='	' read -r _pid _needs; do
             case $_needs in
-                *download*) printf '    wtool download %s\n' "$_pid" ;;
+                *download*) printf '    wtool download-release %s && wtool unpack-release %s\n' "$_pid" "$_pid" ;;
             esac
             case $_needs in
                 *build*)    printf '    wtool build    %s\n' "$_pid" ;;
@@ -1263,9 +1426,13 @@ cmd_sudo_bootstrap() {
 # --------------------------------------------------------------------------
 # pack-release：打包 → <项目>/release/
 #
-# 产出全部落在 release/：源码.zip、release.zip、（超 32M 就切分卷）、dist.json
-# 和两个 -hash.txt。另外往**项目目录里**写 scripts/downloads.sh 和
-# docs/download.md —— 让"下一台机器怎么下"这件事不用人记（都是文本，进 Git）。
+# 产出全部落在 release/：源码.zip、release.zip、（超 32M 就切分卷）、dist.json、
+# 两个 -hash.txt，外加一个 `.source` 来源标记（`packed` / `downloaded` ——
+# publish-release 靠它拒绝"把刚下下来的包又传回去"）。
+# 另外往**项目目录里**写 docs/download.md（给人看的下载页，进 Git）。
+#
+# `scripts/release.json`（下载声明）**不在这里写** —— 它要等上传成功、
+# base_url / published_at 定下来之后由 `publish-release` 写（ADR-026）。
 #
 # **不替你 commit**：跑完把该提交的打出来提醒。
 # --------------------------------------------------------------------------
@@ -1288,7 +1455,7 @@ cmd_pack_release() {
     [ -n "$_targets" ] || wt_die "用法: wtool pack-release <项目>... [--tag=TAG] [--repo=owner/repo] [--volume-size=32M]
 
   产出落在 <项目>/release/：源码.zip、release.zip（大的切分卷）、dist.json、
-  两个 -hash.txt；另外写 <项目>/scripts/downloads.sh 和 <项目>/docs/download.md"
+  两个 -hash.txt、.source 来源标记；另外写 <项目>/docs/download.md"
     [ -n "$_vol_override" ] || _vol_override=${WTOOL_VOLUME_SIZE:-32M}
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-pack.XXXXXX")
@@ -1670,7 +1837,7 @@ cmd_doctor() {
 # --------------------------------------------------------------------------
 # wtool table —— 一行一个项目，一列一个能力
 #
-#   不支持 / 可执行 / 待构建下载 / 已完成 —— 四种状态是**中文词**不是符号
+#   不支持 / 可执行 / 待产出 / 已完成 —— 四种状态是**中文词**不是符号
 #   （常量在 lib/wtool_plan.py:1366-1376，颜色只是辅助）。
 #   早先用的是 ASCII `+ - .` 三个符号，已经废弃：符号要靠图例才看得懂，
 #   而"没这项能力"和"有能力但还没做"用一个 `.` 表示会混。
@@ -1692,10 +1859,12 @@ cmd_table() {
     _c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
     printf '  %s  这个项目没这项能力\n' "$(_c 31 不支持)"
     printf '  %s  现在就能跑\n' "$(_c 33 可执行)"
-    printf '  %s  能力有，但要先 build 或 download\n' "$(_c 34 待构建下载)"
+    printf '  %s  能力有，但要先把 output/ 产出来\n' "$(_c 34 待产出)"
     printf '  %s  跑过了\n' "$(_c 32 已完成)"
-    printf '\n  流水线：build 或 download → install → publish，后面的依赖前面的。\n'
-    printf '  前置没做时 install/publish 会直接报错告诉你去跑哪条，不会替你跑。\n'
+    printf '\n  流水线：产出 → install，前面的没做后面的跑不起来。\n'
+    printf '  产出有两条路：wtool build，或者 wtool download-release + wtool unpack-release。\n'
+    printf '  前置没做时 install 会直接报错告诉你去跑哪条，不会替你跑。\n'
+    printf '  （发布和下载不是"项目能力"，是引擎统一做的 —— 见 harness/docs/adr/0023。）\n'
 }
 
 # --------------------------------------------------------------------------
@@ -1798,16 +1967,17 @@ _q() {
 # --------------------------------------------------------------------------
 cmd_init() {
     _dir=""; _id=""; _prio=""
-    _with_build=0; _with_install=0; _with_publish=0; _with_download=0
+    _with_build=0; _with_install=0
     while [ $# -gt 0 ]; do
         case $1 in
             --id)           shift; _id=${1:-} ;;
             --priority)     shift; _prio=${1:-} ;;
             --with-build)   _with_build=1 ;;
             --with-install) _with_install=1 ;;
-            --with-publish) _with_publish=1 ;;
-            --with-download) _with_download=1 ;;
-            --all)          _with_build=1; _with_install=1; _with_publish=1; _with_download=1 ;;
+            --with-publish|--with-download)
+                            wt_die "$1 已经取消（ADR-023）：项目脚本只剩 build.sh 和 install.sh 两种；
+  发布归引擎（pack-release + publish-release），下载归引擎（download-release + unpack-release）" ;;
+            --all)          _with_build=1; _with_install=1 ;;
             -*)             wt_die "未知参数: $1" ;;
             *)              _dir=$1 ;;
         esac
@@ -1815,11 +1985,12 @@ cmd_init() {
     done
     [ -n "$_dir" ] || wt_die "用法: wtool.sh init <目录> [--id ID] [--priority N] [--all]
 
-  --with-build    生成 scripts/build.sh（能编译的项目）
+  --with-build    生成 scripts/build.sh（能编译 / 要产出的项目）
   --with-install  生成 scripts/install.sh（wtool.xml 表达不了的安装步骤）
-  --with-publish  生成 scripts/publish.sh（发布时要跑脚本的项目）
-  --with-download 生成 scripts/download.sh（能从发布页下现成的包）
-  --all           三个都要
+  --all           两个都要
+
+  （发布和下载**不用写脚本**：pack-release / publish-release / download-release /
+    unpack-release 全是引擎命令，见 harness/docs/adr/0023。）
 
   纯声明式的项目（只靠 wtool.xml 的 link/env 就能装好）不需要任何脚本。"
     [ -n "$_prio" ] || _prio=100
@@ -1905,8 +2076,6 @@ EOF
     }
     [ "$_with_build" = 1 ]   && _emit build.sh   "能构建"
     [ "$_with_install" = 1 ] && _emit install.sh "能安装"
-    [ "$_with_publish" = 1 ] && _emit publish.sh "能发布"
-    [ "$_with_download" = 1 ] && _emit download.sh "能从发布页下现成的包"
 
     wt_info "已生成项目: $_dir  (id=$_id priority=$_prio)"
     wt_info "下一步：填 wtool.xml，然后 wtool validate $_dir"
@@ -1917,10 +2086,12 @@ EOF
 # publish：把项目发布成 release 资产
 #
 # 行为由项目自己的 wtool.xml 决定：
-#   没有 <publish> / kind="source"  → 引擎打源码包（第一层固定 wtool/），
-#                                     推到项目 origin 的 release
-#   kind="script" script="x.sh"     → 调项目内脚本；脚本产出，引擎上传
-#   kind="none"                     → 不发布（第三方上游仓）
+#   **只上传**：打包是 pack-release 的事（ADR-023）。要传的东西必须已经在
+#   <项目>/release/ 里，而且带 dist.json 与 .source=packed。
+#
+#   kind="source"（默认）  → 传到项目 origin 的 release（或 to= 指定的仓）
+#   to="owner/repo"        → 推到别的仓
+#   kind="none"            → 不发布（第三方上游仓）
 #
 # 源码包解压后与 repo sync 出来的路径完全一致，所以解压完 wtool 就能用。
 # --------------------------------------------------------------------------
@@ -1954,7 +2125,7 @@ wt_publish_resolve() {
 
     _n=$(printf '%s\n' "$_hits" | grep -c . || true)
     case $_n in
-        0) wt_die "找不到项目: $_want（用 wtool publish 不带参数看全部）" ;;
+        0) wt_die "找不到项目: $_want（用 wtool publish-release 不带参数看全部）" ;;
         1) printf '%s\n' "$_hits" ;;
         *) wt_warn "「$_want」匹配到多个项目："
            printf '%s\n' "$_hits" | awk -F'\t' '{print "  " $2}' >&2
@@ -1992,7 +2163,7 @@ wt_resolve_project() {
     wt_publish_resolve "$_rp_want"
 }
 
-cmd_publish() {
+cmd_publish_release() {
     _want=""
     _tag_override=""
     _outdir=""
@@ -2008,11 +2179,8 @@ cmd_publish() {
         esac
     done
 
-    command -v gh >/dev/null 2>&1 || wt_die "publish 需要 gh（GitHub CLI）；装好再试"
+    command -v gh >/dev/null 2>&1 || wt_die "publish-release 需要 gh（GitHub CLI）；装好再试"
 
-    # --out=DIR 时产物最后拷到那里（先打出来看看再传）。
-    # 内部中间文件（sel.tsv 之类）始终放在临时目录里，绝不混进产物目录——
-    # 用户很可能直接 `gh release upload DIR/*`，把 sel.tsv 传上去就闹笑话了。
     if [ -n "$_outdir" ]; then
         mkdir -p -- "$_outdir" || wt_die "建不了目录: $_outdir"
         _outdir=$(cd -- "$_outdir" && pwd)
@@ -2021,18 +2189,8 @@ cmd_publish() {
     # 失败时别把产物一起删掉。
     # 踩过：构建跑满 30 分钟、产物 576M，上传到一半代理断线（EOF），
     # 然后 trap 把临时目录连产物一起清了 —— 想重试就得从头再编一遍。
-    # 现在改成：只要这一轮有产物没送出去，就留着，并告诉人怎么补传。
-    _keep_scratch=0
-    _cleanup_scratch() {
-        if [ "$_keep_scratch" = 1 ]; then
-            wt_warn "产物保留在: $_scratch"
-            wt_warn "  补传（不用重新构建）:"
-            wt_warn "    gh release upload <tag> --repo <owner/repo> --clobber $_scratch/out-*/*"
-            wt_warn "  不需要了就删: rm -rf $_scratch"
-        else
-            rm -rf -- "$_scratch"
-        fi
-    }
+    # 这里产物本来就住在项目的 release/ 里，所以只需要别删它。
+    _cleanup_scratch() { rm -rf -- "$_scratch"; }
     trap '_cleanup_scratch' EXIT INT TERM
 
     # 1) 决定发布哪些项目
@@ -2041,7 +2199,6 @@ cmd_publish() {
         for w in $_want; do
             wt_publish_resolve "$w" >> "$_scratch/sel.tsv" || exit $?
         done
-        # 同一个项目写了两次就只发一次
         _tmp="$_scratch/sel.dedup"
         awk -F'\t' '!seen[$2]++' "$_scratch/sel.tsv" > "$_tmp" && mv -f "$_tmp" "$_scratch/sel.tsv"
     else
@@ -2062,8 +2219,7 @@ cmd_publish() {
         _date=$(date +%Y-%m-%d)
         if [ -n "$_tag_override" ]; then _tag=$_tag_override; else _tag=$(wt_publish_tag "$_tpl"); fi
 
-        wt_info "── $_pid  [$(_publish_kind_cn "$_kind")]"
-
+        wt_info "── $_pid"
         if [ "$_kind" = "none" ]; then
             wt_info "  声明为不发布，跳过"
             continue
@@ -2078,16 +2234,11 @@ cmd_publish() {
                 continue
             }
         fi
-
         wt_info "  目标仓 : $_repo"
         wt_info "  tag    : $_tag"
 
         # 权限检查：第三方上游仓（neovim/neovim）在这里被挡下
         if [ "${WTOOL_ALLOW_FOREIGN:-0}" != 1 ]; then
-            # 注意：不能写 `_perm=$(...)` 后紧跟 `_rc=$?`。
-            # set -e 下"只含赋值的简单命令"会继承命令替换的退出码，
-            # 非 0 就直接静默退出——保护逻辑没生效，整个发布却无声中断了。
-            # 放进 || 列表里才安全。
             _rc=0
             _perm=$(wt_publish_can_push "$_repo") || _rc=$?
             if [ "$_rc" = 1 ]; then
@@ -2100,73 +2251,27 @@ cmd_publish() {
             fi
         fi
 
-        if [ "$_kind" = "script" ]; then
-            # 必须走 wt_project_script：它知道脚本住在 scripts/ 下，
-            # 也处理"老位置仍然认"的兼容。自己拼路径会漏掉这一层。
-            _script_path=$_script
-            case $_script_path in
-                /*) ;;
-                *)  _script_path=$(wt_project_script "$_path" "$_script") || {
-                        wt_warn "  脚本不存在: $_path/scripts/$_script，跳过"
-                        continue
-                    } ;;
-            esac
-            _out=$_scratch/out-$_done
-            rm -rf -- "$_out"; mkdir -p -- "$_out"
-
-            wt_info "  脚本   : $_script"
-            if wt_dry; then
-                wt_step "[dry-run] 执行 $_script（产出目录 $_out）"
-                wt_step "[dry-run] 之后把 $_out 里的文件传到 $_repo $_tag"
-                _done=$((_done + 1))
-                continue
-            fi
-
-            (
-                export WTOOL_PUBLISH_PROJECT="$_pid"
-                export WTOOL_PUBLISH_ROOT="$_path"
-                export WTOOL_PUBLISH_WS="$WTOOL_ROOT"
-                export WTOOL_PUBLISH_REPO="$_repo"
-                export WTOOL_PUBLISH_TAG="$_tag"
-                export WTOOL_PUBLISH_OUT="$_out"
-                export WTOOL_PUBLISH_FORCE="${WTOOL_FORCE:-0}"
-                export WTOOL_PUBLISH_DATE="$_date"
-                cd -- "$_path" || exit 1
-                sh "$_script_path"
-            ) || {
-                # 这里以前只 warn 就 continue。结果构建脚本失败了、
-                # 一条产物都没上传，publish 却仍然退出 0 ——
-                # 我自己的后台任务就被这个骗过一次，看到的"成功"是假的。
-                wt_warn "  $_script 失败，跳过上传"
-                _failed=$((_failed + 1))
-                continue
-            }
-
-            _files=$(find "$_out" -maxdepth 1 -type f | sort)
-            _n=$(printf '%s' "$_files" | grep -c . || true)
-            if [ "$_n" = 0 ]; then
-                wt_info "  脚本没有产出文件（可能自己上传了），到此为止"
-                continue
-            fi
-            wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
-                "由 wtool publish 生成。目标系统与内容见 dist.json。"
-            # shellcheck disable=SC2086
-            if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
-                _keep_scratch=1          # 产物留着，别让人重编一遍
-                _failed=$((_failed + 1))
-                continue
-            fi
-            wt_publish_record "$_pid" "$_repo" "$_tag" "$_n" "script:$_script"
-            _done=$((_done + 1))
+        # 要传的东西：**必须是本地打出来的**（release/ 里那一份）
+        _rel="$_path/release"
+        if [ ! -f "$_rel/dist.json" ]; then
+            wt_warn "  release/ 里没有 dist.json —— 先打包：wtool pack-release $_pid"
+            _failed=$((_failed + 1))
+            continue
+        fi
+        # 来源标记：刚 download-release 下来的包不许当自己的发出去（ADR-026）
+        if [ -f "$_rel/.source" ] && \
+           [ "$(cut -f1 < "$_rel/.source" 2>/dev/null)" = "downloaded" ]; then
+            wt_warn "  release/ 里是**下载来的**包（$(cut -f2,3 < "$_rel/.source" 2>/dev/null | tr '\t' ' ')）"
+            wt_warn "  不能把别人打的包当自己的发出去。要发自己这一版：wtool pack-release $_pid"
+            _failed=$((_failed + 1))
             continue
         fi
 
-        # 没有 publish.sh 的项目 = 引擎自己打包（pack-release）+ 上传
         if ! git -C "$_path" rev-parse --git-dir >/dev/null 2>&1; then
-            wt_warn "  $_path 不是 git 仓库，无法确定版本，跳过（用 --force 也推不出有意义的包）"
+            wt_warn "  $_path 不是 git 仓库，无法确定版本，跳过"
             continue
         fi
-        # 脏检查扣掉 wtool 自己生成的文件（downloads.sh / download.md / 下载块）。
+        # 脏检查扣掉 wtool 自己生成的文件（release.json / download.md / 下载块）。
         # 不扣的话：一次发布写完文档 → 项目变脏 → 下一轮 publish
         # 以"有未提交改动"拒绝它 —— 一次发布把下一次发布堵死。
         _dirty=$(wt_git_dirty "$_path")
@@ -2176,55 +2281,60 @@ cmd_publish() {
             printf '%s\n' "$_dirty" | head -5 | sed 's/^/      /' >&2
             continue
         fi
-        if [ -z "$_dirty" ] && [ -n "$(git -C "$_path" status --porcelain 2>/dev/null)" ]; then
-            wt_info "  只有 wtool 自己生成的文件变了，按干净处理（记得提交）"
-        fi
 
-        # publish = pack-release + 上传（契约的一部分，见 harness/architecture.md §5）
-        wt_pack_release "$_path" "$_tag" "$_repo" "${WTOOL_VOLUME_SIZE:-32M}" \
-            "$_scratch" "$_pid" || {
-            wt_warn "  pack-release 失败，跳过上传"
+        # ⚠️ `.source` 是内部标记（来源：packed / downloaded），**不上传、不进清单**。
+        # 它以点开头，所以 `release/*` 这种 shell 展开本来也看不到它 ——
+        # 这里显式排除是为了 find 那条路。
+        _files=$(find "$_rel" -maxdepth 1 -type f ! -name '.source' | LC_ALL=C sort)
+        _n=$(printf '%s\n' "$_files" | awk 'NF{n++} END{print n+0}')
+        if [ "$_n" = 0 ]; then
+            wt_warn "  release/ 里什么都没有，跳过（先 wtool pack-release $_pid）"
             _failed=$((_failed + 1))
             continue
-        }
+        fi
+
         if wt_dry; then
+            wt_step "[dry-run] 上传 $_n 个文件 → $_repo $_tag"
+            wt_step "[dry-run] 之后写 scripts/release.json（记得提交）"
             _done=$((_done + 1))
             continue
         fi
 
-        _files=$(find "$_path/release" -maxdepth 1 -type f | LC_ALL=C sort)
-        _n=$(printf '%s\n' "$_files" | awk 'NF{n++} END{print n+0}')
-        if [ "$_n" = 0 ]; then
-            wt_warn "  release/ 里什么都没有，跳过"
-            _failed=$((_failed + 1))
-            continue
-        fi
         wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
-            "由 wtool pack-release + publish 生成。内容与每卷的 sha256 见 dist.json。"
+            "由 wtool pack-release + publish-release 生成。内容与每卷的 sha256 见 dist.json。"
         # shellcheck disable=SC2086
         if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
-            _keep_scratch=1              # 产物（release/）本来就在项目里，别删
             _failed=$((_failed + 1))
             continue
         fi
         wt_publish_record "$_pid" "$_repo" "$_tag" "$_n" "release:$_tag"
-        _pubbed="${_pubbed:-} $_path/release"
+
+        # 发布声明：**提交进仓库**的 scripts/release.json（ADR-026）。
+        # 它是 download-release 唯一要读的东西，所以必须在上传成功之后才写。
+        _targets=$(ls -d "$_path"/output/*/ 2>/dev/null |
+                   while read -r _t; do basename -- "$_t"; done | paste -sd, -)
+        # "$_dirty" 已经扣掉 wtool 自己生成的文件（release.json / download.md）
+        _dirty_flag=0
+        [ -n "$_dirty" ] && _dirty_flag=1
+        python3 "$PY" release-json \
+            --release-dir "$_rel" --dist "$_rel/dist.json" \
+            --project-id "$_pid" --engine "$ENGINE_VERSION" \
+            --at "$(date -Iseconds)" --dirty "$_dirty_flag" \
+            --targets "$_targets" > "$_scratch/release.json" \
+            || { wt_warn "  生成 release.json 失败 —— 文件传上去了，但清单没更新"; continue; }
+        wt_atomic_write "$_path/scripts/release.json" "$_scratch/release.json" \
+            || { wt_warn "  写不了 scripts/release.json"; continue; }
+        wt_info "  已写 scripts/release.json（下载清单）—— **记得提交**："
+        wt_info "    git -C $_path add scripts/release.json && git -C $_path commit -m '发布 $_tag'"
+
+        _pubbed="${_pubbed:-} $_rel"
         _done=$((_done + 1))
     done
     exec 3<&-
 
     # 产物交付给 --out（如果指定了）
-    #   两条路都要顾：脚本型项目的产物在 scratch 的 out-*/ 里，
-    #   引擎打包的产物在项目自己的 release/ 里（已经在那儿了，拷一份给 --out）。
     if [ -n "${_outdir:-}" ] && ! wt_dry; then
         _copied=0
-        for _d in "$_scratch"/out-*; do
-            [ -d "$_d" ] || continue
-            for _f in "$_d"/*; do
-                [ -f "$_f" ] || continue
-                cp -f -- "$_f" "$_outdir/" && _copied=$((_copied + 1))
-            done
-        done
         for _d in ${_pubbed:-}; do
             for _f in "$_d"/*; do
                 [ -f "$_f" ] || continue
@@ -2242,20 +2352,15 @@ cmd_publish() {
         wt_warn "没有发布任何项目，下载链接未改动"
     fi
 
-    if wt_dry; then
-        wt_info "publish 计划完成（$_done 个项目）"
-    else
-        wt_info "publish 完成（$_done 个项目）"
-    fi
-
-    # 有项目没发出去就**必须**以非零退出。
-    # 原来不管发没发成功都退出 0：明明上传失败了，调用方（脚本、CI、
-    # 包括我自己看后台任务的退出码）看到的却是"成功"。
+    # 有项目没发出去就必须**非零退出**。
+    # 这条不能省：上传到一半断线时，如果退出码是 0，看日志的人（和调用它的
+    # 后台任务）会以为发布成功了 —— 实测被骗过一次（见 ADR-016 的注释）。
     if [ "$_failed" -gt 0 ]; then
-        wt_warn "$_failed 个项目没发出去"
+        wt_warn "$_failed 个项目没有发出去（见上面的原因）"
         return 1
     fi
 }
+
 
 # --------------------------------------------------------------------------
 # 刷新"没有 git clone 时怎么装"那一节的下载链接
@@ -2341,7 +2446,6 @@ EOF
 _publish_kind_cn() {
     case $1 in
         source) printf '源码包' ;;
-        script) printf '脚本' ;;
         none)   printf '不发布' ;;
         *)      printf '%s' "$1" ;;
     esac
@@ -2444,7 +2548,7 @@ cmd_pull_layers() {
     [ -n "$_targets" ] || wt_die "用法: wtool pull-layers <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
 
   从容器镜像仓库把层拉回来，落到 <项目>/output/<target>/<层>/ —— 和
-  build.sh / download.sh **完全相同的路径**，拉完直接 wtool install。
+  build.sh / download-release+unpack-release **完全相同的路径**，拉完直接 wtool install。
 
   <前缀> 形如 crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry，
   默认取 \$WTOOL_LAYER_REGISTRY。目标机上**不需要 docker**（只用一个 crane 二进制）。"
@@ -2661,19 +2765,26 @@ _cmd=${1:-}
 
 case $_cmd in
     build)     cmd_build "$@" ;;
-    download)  cmd_download "$@" ;;
+    download-release) cmd_download_release "$@" ;;
     install)   cmd_install "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     sudo-install)   cmd_sudo_install "$@" ;;
     sudo-uninstall) cmd_sudo_uninstall "$@" ;;
     sudo-bootstrap) cmd_sudo_bootstrap "$@" ;;
+    download) wt_die "download 已改名 download-release，而且**语义变了**：它现在只把包下到 release/，不解包。
+  接着敲：wtool unpack-release <项目>      # 解到 output/，再 wtool install
+  （理由见 harness/docs/adr/0023）" ;;
+    publish)  wt_die "publish 已拆成两条（各干一件事）：
+  wtool pack-release    <项目>    # output/ → release/（本地打包）
+  wtool publish-release <项目>    # release/ → GitHub（只上传）
+  （理由见 harness/docs/adr/0023）" ;;
     provision) wt_die "provision 已改名为 sudo-install，请用：
   wtool sudo-install <项目>      # 一个
   wtool sudo-bootstrap           # 全部项目的系统层
 （改名理由：要 sudo 的都叫 sudo-*，不叫 sudo-* 的永不要 sudo —— 见架构书 §0）" ;;
     pack-release)   cmd_pack_release "$@" ;;
     unpack-release) cmd_unpack_release "$@" ;;
-    publish)   cmd_publish "$@" ;;
+    publish-release) cmd_publish_release "$@" ;;
     push-layers)   cmd_push_layers "$@" ;;
     pull-layers)   cmd_pull_layers "$@" ;;
     pack-layer)    cmd_pack_layer "$@" ;;

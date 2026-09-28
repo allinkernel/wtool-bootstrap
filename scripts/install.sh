@@ -42,7 +42,13 @@ warn() { printf 'wtool-install: 警告: %s\n' "$*" >&2; }
 die()  { printf 'wtool-install: 错误: %s\n' "$*" >&2; exit 1; }
 
 HOME_DIR=${HOME:-/root}
-BOOT_DST=${WTOOL_BOOTSTRAP_DST:-$HOME_DIR/.wtool/bootstrap}
+# ⚠️ **被管理的家目录优先**：引擎调这个脚本时会把 WTOOL_HOME 导出来
+#    （测试里那是一个临时目录）。这里如果只看 $HOME，就会把**真** $HOME 里的
+#    `~/.wtool/bootstrap` 指向临时副本 —— 实测踩过：跑一遍 pairing_test，
+#    真的 ~/.wtool/bootstrap 就变成一个指向已删除 /tmp 目录的悬空软链。
+#    和 lib/wtool_plan.py 的 SHADOW_ROOT 保持同一个判据。
+WTOOL_HOME_DIR=${WTOOL_HOME:-$HOME_DIR}
+BOOT_DST=${WTOOL_BOOTSTRAP_DST:-$WTOOL_HOME_DIR/.wtool/bootstrap}
 DRY_RUN=0
 for _a in "$@"; do [ "$_a" = "--dry-run" ] && DRY_RUN=1; done
 
@@ -63,7 +69,8 @@ if [ -n "${WTOOL_PROJECT_ID:-}" ]; then
     say "由引擎调用（项目 ${WTOOL_PROJECT_ID}），只做自举，不再递归"
     _self_dir=$(dirname -- "$self")
     _proj=$(cd -- "$_self_dir/.." && pwd)
-    _dst=${WTOOL_BOOTSTRAP_DST:-${HOME:-/root}/.wtool/bootstrap}
+    # ⚠️ 同样：被管理的家目录优先（见文件开头那段注释）
+    _dst=${WTOOL_BOOTSTRAP_DST:-${WTOOL_HOME:-${HOME:-/root}}/.wtool/bootstrap}
     if [ -L "$_dst" ] && [ "$(readlink -f -- "$_dst" 2>/dev/null || true)" = "$_proj" ]; then
         say "  引擎已经指向这里，跳过"
     else
