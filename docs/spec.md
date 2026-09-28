@@ -23,7 +23,9 @@
 2. **每个动作都记进 journal。** uninstall 是逆序重放，不是重新计算。
 3. **Python 只算不写。** 除 scratch 目录外，py 不产生任何副作用
    （`lib/wtool_zip.py` 是**工具**，和执行层的 tar/gzip 同级，由执行层调用）。
-4. **Shell 只写不算。** 所有落盘动作集中在 `lib/wtool_fs.sh`，文本逻辑全在 py。
+4. **Shell 只写不算。** 受管的落盘动作集中在 `lib/wtool_fs.sh`，文本逻辑全在 py。
+   （不是"只有它会写"：`wtool.sh` 也直接写状态目录，例如 `meta.tsv` 的追加，
+   见 `wtool.sh:631-633`；`wtool_fs.sh` 管的是**软链 / rc / journal / 系统文件**这类受管写入。）
 5. **要 sudo 的都叫 `sudo-*`；不叫 `sudo-*` 的永不要 sudo、永不联网。**
    推论：`wtool uninstall` **不还原 `/etc`**（那是 `sudo-uninstall` 的事），
    `sudo-uninstall` 也**不动 `$HOME` 里的软链**。
@@ -51,12 +53,33 @@
   wtool unpack-release <项目>... [--from=目录]
   wtool publish        [<项目>...] [--tag=T] [--dry-run] [--force] [--out=DIR]
 
+层（第二条发布通道：容器镜像仓库，详见 §13）
+  wtool pull-layers  <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
+                     镜像仓库 → release/<target>/<层>/。**目标机不需要 docker**，
+                     只要一个 crane 静态二进制（缺 crane 直接报错，不替你装）
+  wtool push-layers  <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
+                     release/ 的层 → 镜像仓库（构建机上跑，用 `docker push`）
+  wtool pack-layer   <项目> --layer=<层名> [--target=<os_ver>] [--out=<文件.tar.gz>]
+                     单个层 → "镜像形状"的 tar。**不联网**
+  wtool unpack-layer <项目> --from=<文件.tar.gz> --layer=<层名> [--target=<os_ver>]
+                     反向：tar → release/<target>/<层>/。**不联网**
+
 不可逆
   wtool kill-self-forever [--yes] [--dry-run]      删掉 wtool 的一切痕迹（含 state）
 ```
 
+四个层命令都认 `--dry-run`；`--registry=` 也可以由 `WTOOL_LAYER_REGISTRY` 提供。
+`pack-layer` / `unpack-layer` 是纯本地格式转换（和 `pack-release`/`unpack-release` 同级），
+**不碰网络**；只有 `pull-layers` / `push-layers` 要联网。
+
+**帮助里没列的隐藏命令**：`wtool docs` / `wtool docs refresh` / `wtool refresh-downloads`
+（三个入口同一个实现 `wt_refresh_downloads`）——按文档里的 `wtool:downloads` 标记块，
+用 `gh release view` 查 GitHub 上**真实存在**的 release，重刷下载链接；
+没有标记块或没有 `gh` 就跳过。
+
 **删掉的命令**：`provision`（→ `sudo-install`，`--with-system` 一并删）、`table`（→ 裸跑 `wtool`）、
-`list`（→ `status`）、`env`（→ `doctor`；`doctor --quiet` 只输出 export 行，可直接 eval）。
+`list`（→ `status`）、`env`（→ `doctor`；`doctor --quiet` 只输出 export 行，可直接 eval）、
+`scaffold`（**整个删掉**，不是改名 —— 新建项目用 `wtool init <目录>`）。
 这些名字还在，但只会报错并告诉你现在该用什么。
 
 ### 两个角色：声明链接 vs 稳定地址
@@ -84,10 +107,11 @@ wtool-bootstrap/            引擎（全机器唯一一份）
 ├── wtool.sh                CLI：install / uninstall / sudo-install / sudo-uninstall /
 │                           bootstrap / sudo-bootstrap / build / download /
 │                           pack-release / unpack-release / publish /
+│                           pull-layers / push-layers / pack-layer / unpack-layer /
 │                           check / repair / status / doctor / validate /
-│                           init / kill-self-forever
+│                           init / kill-self-forever（另有隐藏的 docs refresh）
 ├── lib/wtool_plan.py       规划器：解析清单、校验、算 rc 新内容（只写 scratch）
-├── lib/wtool_fs.sh         执行器：软链、原子写、journal、registry（唯一写 $HOME 的地方）
+├── lib/wtool_fs.sh         执行器：软链、原子写、journal、registry（**受管**写入都走这里）
 ├── lib/wtool_zip.py        打包工具（zip 读写；中文名要 UTF-8 标志）
 ├── templates/*.tpl         项目脚本模板（wtool init --with-* 用）
 └── tests/                  7 组断言：pairing / sudo-install / publish / table /
@@ -261,7 +285,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | 承诺 | 做法 |
 |---|---|
 | 未知 `schema` → 拒绝并提示升级 bootstrap | `SCHEMA_SUPPORTED` 白名单 |
-| 未知元素 → 报错（而不是静默忽略） | 避免拼写错误悄悄生效；自定义元素保留 `x-*` 前缀 |
+| 未知元素 → 报错（而不是静默忽略），**`x-*` 也一样报错** | 避免拼写错误悄悄生效。`<wtool>` 里**没有**"留给用户的自定义元素"这回事：`lib/wtool_plan.py:414-416` 对任何不认识的标签都拒绝（实测 `<x-note>` → `error: 未知元素 <x-note>`，退出码 1） |
 | 未知属性 → 目前静默忽略 | 便于老引擎读新清单的"降级运行" |
 | **旧标签继续认，但一定警告** | `<env>` / `<link src= dest=>` / `<provision>` / `<system-file>` / `<publish>` 解析照旧，`validate` 和每次解析都提示改成新标签；等所有项目迁完再删兼容分支 |
 | `plan.tsv` 列只增不改 | sh 读取时用 `read -r a b c d e f`，多余列被忽略 |
@@ -274,16 +298,11 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 
 ## 8. 未来方向（预留，尚未实现）
 
-| 能力 | 设计草案 | 为什么现在就要想 |
-|---|---|---|
-| **system scope（写 $HOME 之外）** | `<copy src= dest=/etc/... scope="system"/>`，必须显式 `--allow-system` + sudo，且**不记入 journal**（不可逆），只输出"如何手工撤销" | mytool 的 `os` 项目要改 `/etc/apt/sources.list` |
-| **多 shell** | `shells="zsh,bash"` 已支持；`fish`/`nu` 需要新的 rc 注入策略 | 项目里 `env` 只写 zsh 是现状，先按 zsh 落地 |
-| **`--exact`** | uninstall 时用 `head` 从 git 历史取出当时的 `wtool.xml` 推导逆操作 | 比 journal 更严，但 journal 已经够用 |
-| **`--prune`** | install 时把"清单里已删除但 journal 里还在"的软链一并清掉 | 目前 uninstall 会清，install 不会 |
-| **`wtool` 命令本身** | 把 `wtool.sh` 软链到 `~/.local/bin/wtool`，支持 `wtool install <dir>` | 需要 `~/.local/bin` 在 PATH（由某个项目的 env 提供） |
-| **锁** | 并发 install 时对 `$WTOOL_STATE` 加 flock | 多终端同时装才会撞 |
-
----
+> **这张表已经移到 `harness/BACKLOG.md`**（2026-09-27 文档体系调整）——
+> 对应那里的 **BL-15**（`--prune`）、**BL-16**（`--exact`）、**BL-17**（并发锁），
+> 以及"预留设计"一节（system scope / 多 shell / `wtool` 命令本身）。
+>
+> 理由：契约文档只写**已经成立**的东西；"打算怎么做"属于 BACKLOG。
 
 ## 9. 已验证行为
 
@@ -318,16 +337,22 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | **A 长期** | `WTOOL_OS_ID` / `WTOOL_OS_VERSION` / `WTOOL_OS_CODENAME` / `WTOOL_OS_LIKE` | 同上（`lib/wtool_os.sh` 读 `/etc/os-release`） | 每次开 shell | ✅ 有 |
 | **A 长期** | `WTOOL_ARCH` / `WTOOL_JOBS` | 同上 | 每次开 shell | ✅ 有 |
 | **A 长期** | `PATH` += `$WTOOL_PREFIX/bin` 和 `$WTOOL_PROJECT_DIR/bin`（`wtool` 命令） | 同上 | 每次开 shell | ✅ 有 |
-| **B 构建期** | `WTOOL_SRC_DIR` / `WTOOL_REF` | 引擎在跑 `wsw.sh` 前临时注入 | 仅该次构建 | ❌ 不该有 |
+| **B 项目脚本期** | `WTOOL_PROJECT_ID` / `WTOOL_PROJECT_DIR` / `WTOOL_PROJECT_ROOT` / `WTOOL_WORKSPACE` / `WTOOL_HOME` / `WTOOL_PREFIX` / `WTOOL_JOBS` / `WTOOL_ARCH` / `WTOOL_OS_ID` / `WTOOL_OS_VERSION` / `WTOOL_OS_CODENAME` / `WTOOL_OS_LIKE` / `WTOOL_ARTIFACTS` / `WTOOL_STATE_DIR` | 引擎在 `wt_run_project_script` 里临时注入（`wtool.sh:325-335`） | 仅该次项目脚本（build / download / install / publish） | ❌ 不该有 |
+| **B′ `<source>` 任务** | `WTOOL_SOURCE_DIR` / `WTOOL_SOURCE_REF` | 只有 `<source>` 任务额外拿得到（`lib/wtool_fs.sh:555-557`） | 仅该次任务 | ❌ 不该有 |
 | **C source 期** | `WTOOL_PROJECT_ID` / `WTOOL_PROJECT_DIR` / `WTOOL_PROJECT_ROOT` | rc 块 | source 期间（会被后加载的块覆盖） | ⚠️ 有但只对最后一个块成立 |
 
+> ⚠️ 旧文档里写的 **`WTOOL_SRC_DIR` / `WTOOL_REF` 在代码里根本不存在**
+> （2026-09-27 全仓 grep 零命中）。要写项目脚本就照上表 B / B′ 的名字写。
+> 源码树根那个变量叫 `WTOOL_SRC`（`wtool.sh:74`，默认 `~/.wtool/src`），
+> 是引擎自己推导的，不是喂给脚本的。
+
 **设计原则：引擎自足。** `wtool` 命令不依赖 shell 里有没有这些变量——
-`WTOOL_HOME/STATE/ROOT/PREFIX` 由引擎自己推导，`WTOOL_OS_*`/`ARCH`/`JOBS`
-由引擎现场探测（`wt_os_detect`），`WTOOL_SRC_DIR`/`REF` 从项目 `wtool.xml` 读。
+`WTOOL_HOME/STATE/ROOT/PREFIX/SRC` 由引擎自己推导，`WTOOL_OS_*`/`ARCH`/`JOBS`
+由引擎现场探测（`wt_os_detect`），`<source>` 的 `dir=`/`ref=` 从项目 `wtool.xml` 读。
 所以在 docker 里 `wtool sudo-install` 也能正确工作，哪怕 shell 一个变量都没导出。
 
-**B 类为什么不能进 shell**：它描述的是"这一次构建"而不是"这台机器的常态"。
-`WTOOL_REF=v0.10.4` 只对 nvim 有意义；两个项目同时构建时还会互相覆盖。
+**B 类为什么不能进 shell**：它描述的是"这一次脚本"而不是"这台机器的常态"。
+`WTOOL_ARTIFACTS` 指向的是**这一轮**的产物表；两个项目同时 build 时还会互相覆盖。
 
 **`WTOOL_PREFIX` 的语义**：编译安装的唯一前缀，`wsw.sh` 只准往这里写。
 卸载 = 删掉 `$WTOOL_PREFIX` 下对应文件（不需要 journal）。
@@ -462,15 +487,23 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 ### 发布能力由**文件**声明，不由标签声明
 
-`<publish>` 标签（含 `<sub>` / `<target>`）**整个删掉了**：能力来自文件存在 —
+新项目**不要再写** `<publish>`：能力来自文件存在 —
 
 | 项目里有 | 行为 |
 |---|---|
 | `scripts/publish.sh` | 脚本型发布：引擎给环境和产物目录，脚本产出，引擎上传 `$WTOOL_PUBLISH_OUT` 里的文件 |
 | 没有它 | 引擎自己打包（`pack-release`）再上传 |
 
-老清单里的 `<publish>` 在过渡期仍然认，只用来表达两件文件表达不了的事：
-推到别的仓（`to=`）和"不发布"（`kind="none"`，第三方上游仓要它）。
+**但 `<publish>` 并没有被删掉**（2026-09-27 核实）：`lib/wtool_plan.py:188-250` 照旧完整解析
+`kind` / `script` / `tag` / `to` / `asset` 以及 `<sub>` / `<target>`，只是每次解析都加一条
+"旧写法"警告（`lib/wtool_plan.py:388-392`）。而且 **`<sub>` 是真功能**：它替"子树里没有
+`wtool.xml` 的项目"（上游仓，如 `neovim/neovim`）声明发布方式，由
+`lib/wtool_plan.py:2005-2125` 在扫项目时合并进发布信息。所以准确的说法是
+"**还在，但不推荐新项目用**"：
+
+- 普通项目：删掉 `<publish>`，有没有 `scripts/publish.sh` 就是能力的全部
+- 上游镜像子树：`<sub path= kind=/>` 得留着 —— 那些仓没有别的地方可以表态
+- `kind="none"`（不发布）和 `to=`（推到别的仓）也仍然认
 
 ### pack-release：产出全部落在 `<项目>/publish/`
 
@@ -528,9 +561,30 @@ wtool publish tmux --out=/tmp/pkg          # 产物另拷一份出来，先看�
 - 上传失败**不以 0 退出**；产物保留，可直接补传（不必重新构建）
 - 本地发布历史记在 `$WTOOL_STATE/<id>/publish.tsv`
 
+### 第二条通道：层（`pull-layers` / `push-layers` / `pack-layer` / `unpack-layer`）
+
+发布包走 GitHub release 之外，还可以把 `release/` 里的每层做成**容器镜像**放进镜像仓库。
+四步各有分工，判据都是"`release/<target>/<层>/` 里有 `payload/`"：
+
+| 命令 | 方向 | 要什么 | 关键约束 |
+|---|---|---|---|
+| `push-layers` | `release/` → 镜像仓库 | **`docker`**（构建机上） | 一个 `FROM scratch` + **一个 `ADD`** = 恰好一层，tag 是 `<层名（/ 换成 -）>-<target>`；用 `docker push`，**不是** `crane push`（后者把整个 blob 塞进一个 PATCH，大层会被服务器 reset） |
+| `pull-layers` | 镜像仓库 → `release/` | **`crane`** 静态二进制 | **目标机不需要 docker**；缺 crane 直接 die 并告诉你两条路（`WTOOL_CRANE=<路径>` / 干脆 `wtool install`）；只取镜像**顶层那一层**的 digest（`--platform linux/amd64` 不能省） |
+| `pack-layer` | `release/` → tar | 什么都不用 | 打成"镜像形状"的 tar（`root/.wtool/…` + `wtool-layer/OWNED.tsv`），可以直接 `docker load`。**不联网** |
+| `unpack-layer` | tar → `release/` | 什么都不用 | `pack-layer` 的逆操作，也能解 crane blob 下来的那一层。**不联网** |
+
+- 落点全都和 `build.sh` / `download.sh` **完全相同的路径**（`release/<target>/<层>/`），
+  所以拉完直接 `wtool install`
+- `--registry=<前缀>` 或 `WTOOL_LAYER_REGISTRY`（形如
+  `crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry`）；
+  两个命令都不给就报错，不猜
+- 层的 `OWNED.tsv` 必须跟着走：`install.sh` 拿它合并**卸载台账**，
+  缺了 `wtool uninstall` 会删不干净（半装状态）—— 解包时缺它会警告
+
 ## 14. 能力表格
 
-`wtool`（不带参数）和 `wtool table` 都会打印：
+裸跑 `wtool`（不带参数）打印这张表；`wtool table` 这个名字**已经删掉**，
+敲它只会告诉你裸跑 `wtool`：
 
 ```
 ┌──────────────────────┬──────┬────────────┬────────────┬────────────┬────────────┐

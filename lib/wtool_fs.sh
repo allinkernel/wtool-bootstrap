@@ -1,8 +1,9 @@
 #!/bin/sh
-# wtool 执行层 —— 唯一允许修改 $HOME 的地方。
+# wtool 执行层 —— **受管**写入（软链 / rc 块 / journal / registry / 系统文件）都走这里。
 #
 # 契约（见 docs/spec.md §3）：
-#   * 所有对 $HOME 的写操作都经过本文件的函数
+#   * 这些受管动作都经过本文件的函数（别处直接写 $HOME 的都不是受管动作，
+#     例如 wtool.sh:631-633 往 $WTOOL_STATE/<id>/meta.tsv 追加记账行）
 #   * 每个动作都要么记入 journal（可逆），要么本身就是只读检查
 #   * 支持 WTOOL_DRY_RUN=1 时零副作用
 #

@@ -1,11 +1,13 @@
 #!/bin/sh
 # install.sh —— @PROJECT_ID@ 自己的安装步骤
 #
-# 由 `wtool install @PROJECT_ID@` 在**通用机制之前**调用（§4.2 的执行顺序）：
-#   ① 这个脚本：release/ → ~/.wtool（影子 HOME）
+# 由 `wtool install @PROJECT_ID@` 调用（§4.2 的执行顺序，编号跟契约一致）：
+#   ① 引擎基建：中转链接 ~/.wtool/wtool-work-dir/links/<id> + 本项目的 env 块
+#   ① 这个脚本：release/ → ~/.wtool/usr（影子 HOME）
 #   ② wtool.xml 的 <link>：~/.wtool/… → $HOME/…
-# 顺序不能反：②建的软链指向①铺出来的东西，反了就是先建一堆悬空链接。
-# 所以这里可以直接用稳定地址：
+# 也就是说**两件 ① 都比 ② 早**，而本脚本在另一件 ① 之后 ——
+# ②建的软链指向本脚本铺出来的东西，反了就是先建一堆悬空链接。
+# 所以这里可以直接用稳定地址（它此刻已经建好了）：
 #   $HOME/.wtool/wtool-work-dir/links/@PROJECT_ID@   ->  本项目目录
 #
 # 只有"通用机制做不到的事"才写在这里。如果 wtool.xml 的 <link>/<zshrc>

@@ -18,6 +18,12 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 release/
 ./wtool.sh publish        [<项目>]     # pack-release + 上传（有 scripts/publish.sh 的走那个脚本）
 
+# 层（第二条通道：容器镜像仓库）
+./wtool.sh push-layers  <项目>         # release/ 的层 → 镜像仓库（docker push，构建机上跑）
+./wtool.sh pull-layers  <项目>         # 镜像仓库 → release/（目标机只要 crane，不要 docker）
+./wtool.sh pack-layer   <项目> --layer=<层>          # 单个层 ↔ "镜像形状"的 tar（不联网）
+./wtool.sh unpack-layer <项目> --from=<文件> --layer=<层>
+
 # 一次装好 / 出问题
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
@@ -37,12 +43,14 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 |---|---|
 | `wtool.sh` | CLI 入口 |
 | `lib/wtool_plan.py` | 规划器：解析 `wtool.xml`、校验、算 rc 新内容、算发布文件表（只写 scratch） |
-| `lib/wtool_fs.sh` | 执行器：软链、原子写、journal、registry、打包/解包（唯一写 `$HOME` 的地方） |
+| `lib/wtool_fs.sh` | 执行器：软链、原子写、journal、registry、打包/解包（**受管**写入都走这里） |
 | `lib/wtool_zip.py` | 打包工具：zip 的读写（中文名要 UTF-8 标志，系统的 zip 不设） |
 | `tests/` | 7 组断言：pairing / sudo-install / publish / table / release-copy / release / contract |
 | `docs/spec.md` | **接口契约**（改代码前先看） |
 | `docs/manifest-schema.md` | `wtool.xml` 完整字段表 |
-| `docs/roadmap.md` | 未来方向与预留设计 |
+| `docs/roadmap.md` | 只剩一个指针 —— 内容已并入 `harness/BACKLOG.md` |
+| `templates/*.tpl` | 项目脚本模板（`wtool init --all` 用） |
+| `lib/wtool_os.sh` | 系统探测 + sudo 层（`/etc`、apt、任务） |
 
 ## 环境变量
 
@@ -64,8 +72,18 @@ bootstrap 项目（自举）提供的**长期变量**，重启 shell 后依然�
 | `WTOOL_ARCH` / `WTOOL_JOBS` | `uname -m` / `nproc` |
 | `PATH` | 追加 `$WTOOL_PREFIX/bin` 与 `$WTOOL_PROJECT_DIR/bin`（`wtool` 命令） |
 
-**构建期专用变量**（`WTOOL_SRC_DIR` / `WTOOL_REF` 等）不进 shell，由引擎在跑 `wsw.sh` 前临时注入。
+**项目脚本拿到的变量**（`wtool.sh:325-335`，只在跑 `scripts/*.sh` 期间有效）：
+
+```
+WTOOL_PROJECT_ID / WTOOL_PROJECT_DIR / WTOOL_PROJECT_ROOT / WTOOL_WORKSPACE /
+WTOOL_HOME / WTOOL_PREFIX / WTOOL_JOBS / WTOOL_ARCH / WTOOL_OS_* /
+WTOOL_ARTIFACTS / WTOOL_STATE_DIR
+```
+
+`<source>` 任务另外拿得到 `WTOOL_SOURCE_DIR` / `WTOOL_SOURCE_REF`（`lib/wtool_fs.sh:555-557`）。
 完整契约见 `docs/spec.md` §10。
+
+> ⚠️ 旧文档里写的 `WTOOL_SRC_DIR` / `WTOOL_REF` **不存在**（全仓 grep 零命中），别照那个写脚本。
 
 ## 自举
 
@@ -88,8 +106,11 @@ wtool doctor
 
 **已实现**：`install` / `uninstall` / `sudo-install` / `sudo-uninstall` / `sudo-bootstrap` /
 `bootstrap` / `build` / `download` / `pack-release` / `unpack-release` / `publish` /
+`pull-layers` / `push-layers` / `pack-layer` / `unpack-layer` /
 `check` / `repair` / `status` / `doctor` / `validate` / `init` / `kill-self-forever` /
-`version`，加 `--dry-run` / `--force`。
+`version`，加 `--dry-run` / `--force`。另外有三个**帮助里没写**的隐藏入口：
+`wtool docs` / `wtool docs refresh` / `wtool refresh-downloads`
+（同一个实现，重刷文档里的下载链接）。
 
 **已经删掉的命令**（都会给出"现在该用什么"）：
 
@@ -99,14 +120,20 @@ wtool doctor
 | `table` | 裸跑 `wtool` |
 | `list` | `wtool status`（登记表并进去了） |
 | `env` | `wtool doctor`（`doctor --quiet` 只输出 export 行） |
+| `scaffold` | `wtool init <目录>`（**整个删掉**，不是改名） |
 
-**已经删掉的标签**：`<publish>` / `<sub>` / `<target>`（能力由文件声明：有
-`scripts/publish.sh` 就是脚本型发布）。旧标签（`<env>` / `<link src= dest=>` /
-`<provision>` / `<system-file>` / `<publish>`）在**过渡期仍然认**，但 `wtool validate`
-和每次解析都会警告 —— 等项目都迁到新标签（`<zshrc>` / `<bashrc>` / 三段 `<link>` /
-`<sudo-install>`）就删掉兼容分支。
+**还在、但新项目别再用**：`<publish>` / `<sub>` / `<target>` —— 它们**没有被删除**，
+引擎照旧完整解析校验，只加一条警告；两者甚至都还有活的消费者：
+`<sub>` 替没有 `wtool.xml` 的上游子树（如 `neovim/neovim`）声明发布方式，
+`<target>` 被项目自己的 `scripts/publish.sh` **直接从 XML 读**成目标系统矩阵
+（`editor/astronvim_v5/scripts/publish.sh:229-247`）。新项目的能力一律由文件声明：
+有 `scripts/publish.sh` 就是脚本型发布。同理，旧标签（`<env>` / `<link src= dest=>` /
+`<provision>` / `<system-file>`）也仍然认，但 `wtool validate` 和每次解析都会警告 ——
+等项目都迁到新标签（`<zshrc>` / `<bashrc>` / 三段 `<link>` / `<sudo-install>`）就删掉兼容分支。
 
-**还没做**（见 `harness/notes/00-architecture.md` 的 🚧 与 `docs/roadmap.md`）：
-`/var/backups/wtool` 那一份备份需要 root（非 root 时跳过并说明）、
-`check --json`、`publish` 的目标系统矩阵（`<target>` 随 `<publish>` 一起删了，
-现在由项目自己的 `scripts/publish.sh` 决定）、`--prune`、`--exact`、并发锁、fish 支持。
+**还没做**（见 `harness/BACKLOG.md`）：
+`check --json`、`--prune`、`--exact`、并发锁、fish 支持。
+
+**已实现但需要 root**：`/etc` 改动备份的**第二份** `/var/backups/wtool/<原始路径>`
+（`lib/wtool_fs.sh:379-441`）—— 非 root 时跳过这一份并打印说明，
+其余两份（原文件旁边 + state）照常写。

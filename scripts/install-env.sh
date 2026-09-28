@@ -52,7 +52,7 @@ env_use_mirror() {
 
     mkdir -p /etc/apt/sources.list.d
     # deb822（.sources）在 apt 1.1 就有了，20.04 的 apt 2.0 也认。
-    # 曾经误以为 focal 不认，走了弯路 —— 见 harness/notes/03-hazards.md。
+    # 曾经误以为 focal 不认，走了弯路 —— 见 harness/docs/hazards.md。
     cat > /etc/apt/sources.list.d/wtool-mirror.sources <<EOF
 Types: deb
 URIs: http://$ENV_MIRROR/ubuntu/

@@ -24,14 +24,17 @@
 |---|---|
 | `<zshrc src="env.zsh"/>` | 这份文件的内容进 `~/.wtool/.zshrc`（被 `~/.zshrc` 里的 loader 块 source） |
 | `<bashrc src="env.bash"/>` | 同上，进 `~/.wtool/.bashrc` |
-| `<link home= wtool= subproject= />` | 三段映射，见下 |
-| `<link home= wtool= produced-by="install.sh"/>` | 同上，但中间那一跳由项目 `install.sh` 产出 |
+| `<link home= subproject= />` | 三段映射，见下（`wtool=` 可省，省了就按 `home=` 的镜像路径推） |
+| `<link home= produced-by="install.sh"/>` | 同上，但中间那一跳由项目 `install.sh` 产出 |
 | `<sudo-install src="provision/packages.yaml"/>` | 系统层：要跑的脚本 / playbook（要 sudo、要联网，不在 `install` 里跑） |
 | `<sudo-install src="x.conf" dest="/etc/x.conf"/>` | 系统层：`/etc` 下的文件（可逆，备份/还原） |
 | `<sudo-install kind="apt-mirror" mirror="ustc" dest="auto"/>` | 系统层：引擎按发行版生成内容（换源） |
 | `<source url= ref= />` | 上游源码：clone → 固定 ref → 建本地分支 → 铺 overlay |
 | `<include src= optional= />` | 拆清单 |
-| `x-*` | 自定义（引擎不认别的未知标签） |
+
+<small>⚠️ 表外的标签**一律报错**，`x-*` 也不行 —— 见文末「自定义元素」。
+（旧版这张表里写过"`x-*` 自定义"，**那是错的**：`lib/wtool_plan.py:414-416` 对任何未知标签
+都拒绝，实测 `<x-note>` → `error: 未知元素 <x-note>`、退出码 1。）</small>
 
 ---
 
@@ -80,14 +83,23 @@ env.bash 的内容 ──► ~/.wtool/.bashrc ──┘   （全局的，不属�
 
 ## `<link>` —— 三段映射
 
-三个属性**都必填**：
+| 属性 | 必填 | 说明 | 写什么 |
+|---|---|---|---|
+| `home` | ✅ | `$HOME` 下的落点 | 写全，带 `~/` |
+| `wtool` | 否 | `~/.wtool`（影子 HOME）下的落点 | **省掉就按镜像路径推**（`$HOME` 里的路径在 `~/.wtool` 下同名，`lib/wtool_plan.py:482-493`）；想放别处才写出来 |
+| `subproject` | ✅ | 项目里的相对路径 | 内容从这儿来 |
+| `produced-by` | 否 | 内容由谁产出 | 目前只认 `install.sh`（这时不写 `subproject`） |
 
-| 属性 | 说明 | 写什么 |
-|---|---|---|
-| `home` | `$HOME` 下的落点 | 写全，带 `~/` |
-| `wtool` | `~/.wtool`（影子 HOME）下的落点 | 必填，即使它就是 `home` 的镜像路径也要写出来 —— 自解释，也允许例外 |
-| `subproject` | 项目里的相对路径 | 内容从这儿来 |
-| `produced-by` | 内容由谁产出 | 目前只认 `install.sh`（这时不写 `subproject`） |
+所以下面两种写法等价，**短的那种就够**：
+
+```xml
+<link home="~/.foo.conf" wtool="~/.wtool/.foo.conf" subproject="foo.conf"/>
+<link home="~/.foo.conf"                         subproject="foo.conf"/>
+```
+
+2026-09-27 实测：只写 `home=` + `subproject=` 的清单 `wtool validate` → `ok`，退出码 0。
+`wtool=` 一旦写了，就必须落在 `~/.wtool/` 下面（写别处会被拒绝），
+所以它只在"刻意不镜像"时才有信息量。
 
 连起来是两跳：
 
@@ -195,7 +207,15 @@ state），还原依据单独记在 `system.tsv`；apt 包按"跑前跑后的已
 
 ## 自定义元素
 
-repo 的 manifest 用 `x-*` 保留给用户。这里同样：**自定义元素请用 `x-` 前缀**；其他未知元素一律报错（避免拼写错误悄悄失效）。
+**没有这回事。** `<wtool>` 只认上面「标签总表」里列出的元素，其他一律报错
+（避免拼写错误悄悄失效）—— **`x-` 前缀也不行**。
+
+repo 的 manifest 用 `x-*` 把命名空间留给用户，`wtool.xml` **故意不跟**：
+清单是引擎要逐条执行的动作表，一条没被理解的声明**静默丢掉**比报错危险得多。
+2026-09-27 实测：清单里放 `<x-note/>` → `error: 未知元素 <x-note>`，退出码 1。
+
+要放机器本地差异，用 `<include src="wtool.local.xml" optional="true"/>`
+（那个文件不入库），别指望自定义标签。
 
 ---
 
@@ -255,6 +275,6 @@ repo 的 manifest 用 `x-*` 保留给用户。这里同样：**自定义元素�
 | `<link src= dest=/>` | `<link home= wtool= subproject=/>` | 没有中间那一跳；`force=` / `optional=` 一并删 |
 | `<provision src= runner=/>` | `<sudo-install src=/>` | `runner=` 按扩展名判断 |
 | `<system-file …/>` | `<sudo-install … dest=/etc/…/>` | 属性名不变 |
-| `<publish kind= …/>`（含 `<sub>` / `<target>`） | **整个删掉** | 能力由文件声明：有 `scripts/publish.sh` 就是脚本型发布；`pack-release` 负责打包 |
+| `<publish kind= …/>`（含 `<sub>` / `<target>`） | **新项目别再用**（⚠️ 不是"已删除"） | 能力由文件声明：有 `scripts/publish.sh` 就是脚本型发布，没有就引擎 `pack-release` 打包。但 `<publish>` 照旧被**完整解析**（`lib/wtool_plan.py:188-250`），只加一条警告（`:388-392`）；其中 `<sub>` 还是**真功能** —— 替没有 `wtool.xml` 的上游子树（如 `neovim/neovim`）声明发布方式（`:2005-2125`），那些仓没有别的办法表态，得留着。详见 `docs/spec.md` §13 |
 
-兼容分支在**所有项目迁完之后**删除（见 `harness/notes/00-architecture.md` §3 的改名对照）。
+兼容分支在**所有项目迁完之后**删除（见 `harness/architecture.md` §3 的改名对照）。

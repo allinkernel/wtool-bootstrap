@@ -1622,8 +1622,10 @@ cmd_doctor() {
 # --------------------------------------------------------------------------
 # wtool table —— 一行一个项目，一列一个能力
 #
-#   +  已经做了     -  能做但还没做（TODO）     .  这个项目没这项能力
-# 用 ASCII 而不是 emoji/勾号：终端里算不准的字符宽会让整张表错位。
+#   不支持 / 可执行 / 待构建下载 / 已完成 —— 四种状态是**中文词**不是符号
+#   （常量在 lib/wtool_plan.py:1366-1376，颜色只是辅助）。
+#   早先用的是 ASCII `+ - .` 三个符号，已经废弃：符号要靠图例才看得懂，
+#   而"没这项能力"和"有能力但还没做"用一个 `.` 表示会混。
 # --------------------------------------------------------------------------
 cmd_table() {
     _args=""
@@ -1799,7 +1801,7 @@ print(os.path.basename(p) if rel.startswith("..") else rel)
   $_id
 
   写清楚这个项目是干什么的，以及装完之后用户能用到什么。
-  wtool 只认下面这些元素，别的不认识的会直接报错（自定义的请用 x- 前缀）。
+  wtool 只认下面这些元素，别的不认识的会直接报错（x- 前缀也不例外 —— 没有自定义元素这回事）。
 -->
 <wtool schema="1" id="$_id" priority="$_prio">
 
@@ -1807,12 +1809,12 @@ print(os.path.basename(p) if rel.startswith("..") else rel)
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
 
-  <!-- 提供一个配置文件：三段映射，三个属性都必填
+  <!-- 提供一个配置文件：三段映射（home= 和 subproject= 必填）
          home=        \$HOME 下的落点（写全，带 ~/）
-         wtool=       影子 HOME（~/.wtool/）下的落点
+         wtool=       影子 HOME（~/.wtool/）下的落点；省掉就按镜像路径推
          subproject=  项目里的相对路径（内容从这儿来）
        连起来：<项目>/foo.conf → ~/.wtool/.foo.conf → ~/.foo.conf
-  <link home="~/.foo.conf" wtool="~/.wtool/.foo.conf" subproject="foo.conf"/>
+  <link home="~/.foo.conf" subproject="foo.conf"/>
   -->
 
   <!-- 目录、内容由项目自己的 install.sh 产出时，把 subproject 换成 produced-by：
@@ -2220,7 +2222,7 @@ wt_refresh_downloads() {
     # 目标文档靠标记自己声明，不写死路径
     # 只认"整行就是这个标记"的文件。用 -F 匹配子串会误伤：
     # 任何一篇**提到**这个标记的文档都会被当成目标
-    # （实测把 harness/notes/05-next.md 当成了下载页，然后刷失败）。
+    # （实测把 harness/BACKLOG.md 当成了下载页，然后刷失败）。
     _doc=$(grep -rl --include='*.md' -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' \
                "$WTOOL_ROOT" 2>/dev/null | head -1)
     if [ -z "$_doc" ]; then
@@ -2312,8 +2314,8 @@ _publish_kind_cn() {
 # 为什么值得多这条通道（2026-09-26 实测）：上传两条路一样慢（~0.25 MB/s），
 # 但下载 **ACR 10.2 MB/s vs GitHub 2.6~4.8 MB/s** —— 发布一次慢，取用快一倍多。
 #
-# 完整设计见 harness/notes/00-architecture.md §5.1；
-# 踩过的坑见 harness/notes/03-hazards.md O 节（尤其 O1 crane push 推不了大层、
+# 完整设计见 harness/architecture.md §5.1；
+# 踩过的坑见 harness/docs/hazards.md O 节（尤其 O1 crane push 推不了大层、
 # O2 docker push 的命门是 dockerd 写死的代理配置）。
 # --------------------------------------------------------------------------
 

@@ -37,6 +37,10 @@ mkrepo() { # mkrepo <目录> <id> <优先级>
     mkdir -p "$d"
     if [ -d "$demo" ]; then
         cp -r "$demo"/. "$d/"
+    # ‼️ 拷过来的 .git 可能是指向 .repo/projects/… 的**软链**（repo 客户端的工作区就是这样），
+    #    落进临时目录后会解析成 /tmp/.repo/… 而悬空，下面的 git init 直接 fatal。
+    #    rm -rf 只删这条软链本身，不会跟着删目标。
+    rm -rf "$d/.git"
     fi
     cat > "$d/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

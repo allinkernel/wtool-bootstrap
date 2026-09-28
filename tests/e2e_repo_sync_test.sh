@@ -5,7 +5,7 @@
 #   * 不需要 push、不需要网络、不需要 docker
 #   * 可以在本机反复验证整条链路
 #
-# ⚠️ 安全纪律（见 harness/notes/03-hazards.md G 节）：
+# ⚠️ 安全纪律（见 harness/docs/hazards.md G 节）：
 #   1. repo init 只在 $WORK 里跑，跑之前断言 pwd —— 曾经因为变量为空
 #      在用户的 repo client 里裸跑过 repo init，把 .repo/repo 退回了 v2.9
 #   2. 所有临时目录放在工作区内（agent 的 /tmp 不跨调用保留）
@@ -18,7 +18,7 @@ wtool_root=$(dirname -- "$boot")
 REPO_BIN=${REPO_BIN:-$HOME/bin/repo}
 REPO_TOOL_SRC=${REPO_TOOL_SRC:-$wtool_root/.repo/repo}
 
-# ⚠️⚠️ 安全闸（血的教训，见 harness/notes/03-hazards.md G 节）：
+# ⚠️⚠️ 安全闸（血的教训，见 harness/docs/hazards.md G 节）：
 #   repo 会【向上逐级查找】已有的 .repo，一旦找到就"复用那个 client"。
 #   所以测试目录绝不能放在任何 repo client 里面，否则 repo init 会直接
 #   改写用户的 client（曾两次把 ~/self/wtool 的 manifests 清空到 unborn HEAD）。
