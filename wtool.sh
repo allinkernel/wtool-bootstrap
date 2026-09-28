@@ -33,9 +33,12 @@
 #                       从镜像仓库把层拉回来 → output/（**目标机不需要 docker**）
 #   wtool push-layers    <项目>... [--registry=<前缀>] [--target=] [--layer=]
 #                       output/ 的层 → 镜像仓库（docker push，**不是** crane push）
-#   wtool pack-layer     <项目> --layer=<层名> [--out=文件]
-#   wtool unpack-layer   <项目> --from=文件 --layer=<层名>
-#                       单个层 ↔ 一个"镜像形状"的 tar。**不联网**
+#   wtool layer-save     <项目> --image=<镜像> [--target=] [--layer=]
+#                       docker 镜像 → <项目>/layer/<target>/（OCI 布局，blob 按 sha256 去重）
+#   wtool layer-load     <项目> [--target=]
+#                       <项目>/layer/<target>/ → docker（接着构建 / 恢复容器用）
+#   wtool unpack-layer   <项目> [--layer=] [--target=]
+#                       layer/<target>/ 里的层 → output/<target>/<层>/。**不联网**
 #
 #   ── 一次装好 ───────────────────────────────────────────────
 #   wtool bootstrap [--dry-run] [--force]   所有项目 install（**不做系统层**）
@@ -2527,6 +2530,130 @@ wt_layer_untar() {   # $1=tar 文件  $2=层目录（output/<target>/<层>）
     fi
 }
 
+# --------------------------------------------------------------------------
+# layer/ 存储：docker 镜像 ⇄ <项目>/layer/<target>/（OCI 镜像布局）
+#
+# 决策和实测数据见 harness/docs/adr/0024。**两条管道就是全部**：
+#   写：docker save <镜像> | tar -x -C layer/<target>/     ← tar 只当管道，不落盘
+#   读：tar -c -C layer/<target>/ . | docker load
+# 磁盘上留下的是**目录**：blobs/sha256/… 按内容命名，所以父链天然只存一份
+# （实测两份 tar 324M+424M 合进同一目录只有 424M）；装回去是同一个 image ID。
+#
+# ⚠️ `layer/` 只对 kind="docker" 的项目存在（本地直接编的项目没有层）。
+# --------------------------------------------------------------------------
+
+wt_layer_dir() { printf '%s/layer/%s\n' "$1" "$2"; }   # <项目目录> <target>
+
+# 把一个 docker 镜像写进 layer/<target>/。同一棵 layout 里的 index.json 要**合并**
+# —— 直接把后一个 save 的 index.json 覆盖上去，前一个镜像的条目就没了（实测过）。
+wt_layer_import() {   # <项目目录> <target> <镜像> <层名>
+    _li_dir=$(wt_layer_dir "$1" "$2")
+    _li_img=$3; _li_name=$4
+    command -v docker >/dev/null 2>&1 || wt_die "layer-save 需要 docker（它要把镜像从 docker 里导出来）"
+    docker image inspect "$_li_img" >/dev/null 2>&1 || wt_die "docker 里没有这个镜像: $_li_img"
+    _li_tmp=$(mktemp -d "${TMPDIR:-/tmp}/wtool-lsave.XXXXXX") || return 1
+    if ! docker save "$_li_img" | tar -x -C "$_li_tmp"; then
+        rm -rf -- "$_li_tmp"; return 1
+    fi
+    wt_run mkdir -p -- "$_li_dir/blobs/sha256"
+    if [ ! -f "$_li_dir/oci-layout" ]; then
+        printf '{"imageLayoutVersion":"1.0.0"}\n' > "$_li_dir/.oci-layout.new"
+        mv -f -- "$_li_dir/.oci-layout.new" "$_li_dir/oci-layout"
+    fi
+    # blob 同名就是同内容（名字就是它的 sha256）→ 已有的不覆盖，父链只留一份
+    cp -an -- "$_li_tmp/blobs/sha256/." "$_li_dir/blobs/sha256/" 2>/dev/null || \
+        cp -a -- "$_li_tmp/blobs/sha256/." "$_li_dir/blobs/sha256/" || {
+            rm -rf -- "$_li_tmp"; wt_die "blob 拷不进 $_li_dir/blobs/sha256"; }
+    python3 - "$_li_dir/index.json" "$_li_tmp/index.json" "$_li_name" "$2" \
+        > "$_li_dir/index.json.new" <<'PY' || { rm -rf -- "$_li_tmp"; return 1; }
+import json, sys
+cur_p, new_p, layer, target = sys.argv[1:5]
+def load(p):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh).get("manifests", [])
+    except Exception:
+        return []
+entries = load(cur_p)
+have = {e.get("digest") for e in entries}
+for e in load(new_p):
+    if e.get("digest") in have:
+        continue
+    ann = e.setdefault("annotations", {})
+    ann["io.wtool.layer"] = layer
+    ann["io.wtool.target"] = target
+    entries.append(e)
+print(json.dumps({"schemaVersion": 2,
+                  "mediaType": "application/vnd.oci.image.index.v1+json",
+                  "manifests": entries}, ensure_ascii=False, indent=2))
+PY
+    mv -f -- "$_li_dir/index.json.new" "$_li_dir/index.json"
+    rm -rf -- "$_li_tmp"
+    wt_info "  已存进 layer/$2/（层名 $_li_name）"
+}
+
+# 把 layer/<target>/ 里的镜像装回 docker（接着构建 / 恢复容器用）。
+wt_layer_load() {   # <项目目录> <target>
+    _ll_dir=$(wt_layer_dir "$1" "$2")
+    [ -f "$_ll_dir/index.json" ] || wt_die "没有 $_ll_dir —— 先 wtool layer-save（或 pull-layer）"
+    command -v docker >/dev/null 2>&1 || wt_die "layer-load 需要 docker"
+    wt_run tar -c -C "$_ll_dir" . | docker load
+}
+
+cmd_layer_save() {
+    _targets=""; _img=""; _t=""; _name=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            --image=*) _img=${arg#--image=} ;;
+            --target=*) _t=${arg#--target=} ;;
+            --layer=*)  _name=${arg#--layer=} ;;
+            -*)        wt_die "未知参数: $arg" ;;
+            *)         _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] && [ -n "$_img" ] || wt_die "用法: wtool layer-save <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
+
+  把 docker 里的一个镜像**存进项目的 layer/<target>/**（OCI 镜像布局，blob 按 sha256 去重）。
+  层名不给就从镜像 tag 推；target 不给就从 output/ 推一个。
+
+  磁盘上留下的是**目录**不是 tar：blobs/sha256/… 按内容命名，父子层共用一份。"
+    [ -n "$_name" ] || _name=${_img##*/}
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
+        [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
+        [ -n "$_t" ] || wt_die "$_pid 没有 output/ 目标 —— 用 --target=<os_ver> 明确指一个"
+        wt_info "── $_pid  $_img → layer/$_t/"
+        if wt_dry; then wt_step "[dry-run] docker save $_img | tar -x -C $(wt_layer_dir "$_path" "$_t")"; continue; fi
+        wt_layer_import "$_path" "$_t" "$_img" "$_name" || wt_die "存不进 layer/$_t"
+    done
+}
+
+cmd_layer_load() {
+    _targets=""; _t=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run) WTOOL_DRY_RUN=1 ;;
+            --target=*) _t=${arg#--target=} ;;
+            -*)        wt_die "未知参数: $arg" ;;
+            *)         _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] || wt_die "用法: wtool layer-load <项目> [--target=<os_ver>]
+
+  把 <项目>/layer/<target>/ 里的镜像**装回 docker**（tar 只当管道）。
+  要接着构建、或者恢复一个已经没了的容器，就用它。"
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
+        [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
+        [ -n "$_t" ] || wt_die "$_pid 没有 output/ 目标 —— 用 --target=<os_ver> 明确指一个"
+        wt_info "── $_pid  layer/$_t/ → docker"
+        wt_layer_load "$_path" "$_t" || wt_die "装不回 docker"
+    done
+}
+
 # 缺 --target= 时从 output/ 里推一个出来（只有一个才敢推）
 wt_guess_target() {   # $1=项目目录
     _gt=$(ls -d "$1"/output/*/ 2>/dev/null | head -1)
@@ -2787,7 +2914,12 @@ case $_cmd in
     publish-release) cmd_publish_release "$@" ;;
     push-layers)   cmd_push_layers "$@" ;;
     pull-layers)   cmd_pull_layers "$@" ;;
-    pack-layer)    cmd_pack_layer "$@" ;;
+    layer-save)    cmd_layer_save "$@" ;;
+    layer-load)    cmd_layer_load "$@" ;;
+    pack-layer)    wt_die "pack-layer 已删除（ADR-024）：方向本来就是反的 —— 层是源，output 是层的导出物。
+  现在两件事各有命令：
+    wtool layer-save <项目> --image=<镜像>   # docker 镜像 → layer/<target>/
+    wtool unpack-layer <项目>                # layer/<target>/ → output/" ;;
     unpack-layer)  cmd_unpack_layer "$@" ;;
     bootstrap) cmd_bootstrap "$@" ;;
     check)     cmd_check "$@" ;;

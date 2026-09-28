@@ -334,8 +334,9 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
 | contract | `tests/contract_test.sh` | 69 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill |
+| layer | `tests/layer_test.sh` | 14 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、dry-run、pack-layer 已删 |
 
-共 **364** 条断言：
+共 **378** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 7 组全跑
