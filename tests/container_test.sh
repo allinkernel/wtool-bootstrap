@@ -163,8 +163,9 @@ check "wtool env 识别出 24.04"           "24.04"            "$WTOOL_OS_VERSIO
 check "wtool env 识别出 noble"           "noble"            "$WTOOL_OS_CODENAME"
 check "wtool 命令可用"                   "$WT/bootstrap/bin/wtool" "$(command -v wtool)"
 
-n=$(wtool list | grep -c . || true)
-printf '  wtool list: %s 行\n' "$n"
+# `wtool list` 已经并进 `wtool status`（旧名字 die + 指路，见架构书 §7）
+n=$(wtool status | grep -c . || true)
+printf '  wtool status: %s 行\n' "$n"
 [ "$n" -ge 7 ] && ok "registry 登记了 ≥7 条" || bad "registry 登记了 ≥7 条" "只有 $n 行"
 
 printf '\n  --- ~/.zshrc 里的块顺序（应按 priority 5→10→20→40→50→60）---\n'
@@ -202,8 +203,10 @@ check "bash 下 fzf 在 PATH" "$HOME/.wtool/wtool-work-dir/links/terminal/fzf/bi
 printf '\n  --- wtool doctor ---\n'
 wtool doctor | sed 's/^/    /'
 
-printf '\n  --- provision 干跑（os/ubuntu：换源 + ansible 装包，不实际执行）---\n'
-pout=$(wtool provision "$WT/os/ubuntu" --dry-run --with-system --force 2>&1 || true)
+printf '\n  --- sudo-install 干跑（os/ubuntu：换源 + ansible 装包，不实际执行）---\n'
+# `provision` 已改名 `sudo-install`（旧名字 die + 指路，见架构书 §0/§7）；
+# `--with-system` 也取消了 —— 这条命令本来就只做系统层。
+pout=$(wtool sudo-install "$WT/os/ubuntu" --dry-run --force 2>&1 || true)
 case $pout in
     *"系统文件[replace]"*"/etc/apt/sources.list.d/ubuntu.sources"*)
         ok "识别出 ubuntu 并算出换源目标路径" ;;
