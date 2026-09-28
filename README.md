@@ -19,19 +19,20 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh download-release <项目>|all # 读提交在项目里的 scripts/release.json → release/（**只下载**）
 ./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 output/
 
-# 层（第二条通道：容器镜像仓库）
-./wtool.sh push-layers  <项目>         # output/ 的层 → 镜像仓库（docker push，构建机上跑）
-./wtool.sh pull-layers  <项目>         # 镜像仓库 → output/（目标机只要 crane，不要 docker）
-./wtool.sh pack-layer   <项目> --layer=<层>          # 单个层 ↔ "镜像形状"的 tar（不联网）
-./wtool.sh unpack-layer <项目> --from=<文件> --layer=<层>
+# 层（第二条通道：容器镜像仓库；layer/ 是一棵 OCI 镜像布局，ADR-024）
+./wtool.sh layer-save   <项目> --image=<镜像>   # docker 镜像 → layer/<target>/
+./wtool.sh layer-load   <项目>                  # layer/<target>/ → docker
+./wtool.sh unpack-layer <项目> [--layer=<层>]   # layer/ 顶层 blob → output/（不联网、不要 docker）
+./wtool.sh push-layer   <项目>                  # layer/ → 镜像仓库（docker push，构建机上跑）
+./wtool.sh pull-layer   <项目>                  # 镜像仓库 → layer/（目标机只要 skopeo，不要 docker）
 
 # 一次装好 / 出问题
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 8 组 / 378 条断言
+./tests/run_all.sh                    # 8 组 / 403 条断言
                                       # pairing 35 / sudo-install 24 / publish 114 / table 43
-                                      # release-copy 17 / release 62 / contract 69 / layer 14
+                                      # release-copy 17 / release 62 / contract 69 / layer 39
 ```
 
 ---
@@ -109,7 +110,7 @@ wtool doctor
 
 **已实现**：`install` / `uninstall` / `sudo-install` / `sudo-uninstall` / `sudo-bootstrap` /
 `bootstrap` / `build` / `pack-release` / `publish-release` / `download-release` / `unpack-release` /
-`pull-layers` / `push-layers` / `pack-layer` / `unpack-layer` /
+`layer-save` / `layer-load` / `unpack-layer` / `push-layer` / `pull-layer` /
 `check` / `repair` / `status` / `doctor` / `validate` / `init` / `kill-self-forever` /
 `version`，加 `--dry-run` / `--force`。另外有三个**帮助里没写**的隐藏入口：
 `wtool docs` / `wtool docs refresh` / `wtool refresh-downloads`
@@ -126,6 +127,8 @@ wtool doctor
 | `list` | `wtool status`（登记表并进去了） |
 | `env` | `wtool doctor`（`doctor --quiet` 只输出 export 行） |
 | `scaffold` | `wtool init <目录>`（**整个删掉**，不是改名） |
+| `pack-layer` | 删了（**方向反了**，ADR-024）：层是源、`output/` 是层的导出物。现在 `layer-save`（镜像 → `layer/`）+ `unpack-layer`（`layer/` → `output/`） |
+| `push-layers` / `pull-layers` | `push-layer` / `pull-layer`：推拉的是 `layer/<target>/` 里的**真镜像**，`pull-layer` 也不再直接落 `output/`（要多一步 `unpack-layer`） |
 
 前两条**故意不留兼容窗口**（ADR-023）：名字一样、语义不一样，静默兼容会做出错误的事
 （让人以为东西在 `output/` 里，其实在 `release/`）。

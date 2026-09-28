@@ -57,23 +57,28 @@
   wtool unpack-release <项目>... [--from=目录]             release/ → output/（**不联网**）
 
 层（第二条发布通道：容器镜像仓库，详见 §13）
-  wtool pull-layers  <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
-                     镜像仓库 → output/<target>/<层>/。**目标机不需要 docker**，
-                     只要一个 crane 静态二进制（缺 crane 直接报错，不替你装）
-  wtool push-layers  <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
-                     output/ 的层 → 镜像仓库（构建机上跑，用 `docker push`）
-  wtool pack-layer   <项目> --layer=<层名> [--target=<os_ver>] [--out=<文件.tar.gz>]
-                     单个层 → "镜像形状"的 tar。**不联网**
-  wtool unpack-layer <项目> --from=<文件.tar.gz> --layer=<层名> [--target=<os_ver>]
-                     反向：tar → output/<target>/<层>/。**不联网**
+  wtool layer-save   <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
+                      docker 镜像 → layer/<target>/（OCI 布局，blob 按 sha256 去重）
+  wtool layer-load   <项目> [--target=<os_ver>]
+                      layer/<target>/ → docker（接着构建 / 恢复容器）
+  wtool unpack-layer <项目> [--layer=<层名>] [--target=<os_ver>] [--output=<目录>]
+                      layer/<target>/ 的顶层 blob → output/<target>/<层>/。
+                      **不联网、不要 docker**（直接读 blob）
+  wtool push-layer   <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
+                      layer/<target>/ 的层镜像 → 镜像仓库（构建机上跑，用 `docker push`）
+  wtool pull-layer   <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
+                      镜像仓库 → layer/<target>/。**目标机不需要 docker**，
+                      只要一个 skopeo（缺了直接报错，告诉你 `apt install skopeo`）
 
 不可逆
   wtool kill-self-forever [--yes] [--dry-run]      删掉 wtool 的一切痕迹（含 state）
 ```
 
-四个层命令都认 `--dry-run`；`--registry=` 也可以由 `WTOOL_LAYER_REGISTRY` 提供。
-`pack-layer` / `unpack-layer` 是纯本地格式转换（和 `pack-release`/`unpack-release` 同级），
-**不碰网络**；只有 `pull-layers` / `push-layers` 要联网。
+五个层命令都认 `--dry-run`；`--registry=` 也可以由 `WTOOL_LAYER_REGISTRY` 提供。
+`layer-save` / `layer-load` / `unpack-layer` 全是本地动作（和 `pack-release`/`unpack-release`
+同级），**不碰网络**；只有 `pull-layer` / `push-layer` 要联网。
+两个方向用的工具**故意不一样**：push 走 `docker push`（`crane push` 推大 blob 会
+connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.json`，而且不需要 docker）。
 
 **帮助里没列的隐藏命令**：`wtool docs` / `wtool docs refresh` / `wtool refresh-downloads`
 （三个入口同一个实现 `wt_refresh_downloads`）——按文档里的 `wtool:downloads` 标记块，
@@ -120,7 +125,7 @@ wtool-bootstrap/            引擎（全机器唯一一份）
 ├── wtool.sh                CLI：install / uninstall / sudo-install / sudo-uninstall /
 │                           bootstrap / sudo-bootstrap / build /
 │                           pack-release / publish-release / download-release / unpack-release /
-│                           pull-layers / push-layers / pack-layer / unpack-layer /
+│                           layer-save / layer-load / unpack-layer / push-layer / pull-layer /
 │                           check / repair / status / doctor / validate /
 │                           init / kill-self-forever（另有隐藏的 docs refresh）
 ├── lib/wtool_plan.py       规划器：解析清单、校验、算 rc 新内容（只写 scratch）
@@ -334,12 +339,12 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
 | contract | `tests/contract_test.sh` | 69 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill |
-| layer | `tests/layer_test.sh` | 14 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、dry-run、pack-layer 已删 |
+| layer | `tests/layer_test.sh` | 39 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **378** 条断言：
+共 **403** 条断言：
 
 ```sh
-./tests/run_all.sh            # 7 组全跑
+./tests/run_all.sh            # 8 组全跑
 ./tests/contract_test.sh      # 只跑这一组
 ```
 
@@ -672,25 +677,32 @@ wtool publish-release tmux --out=/tmp/pkg      # 发布完把 release/ 里的产
 - 需要 `gh`（GitHub CLI）；没有就报错（退出码 1）
 - 单个项目失败（脏仓库 / 没权限 / 上传断线）**退出码仍是 0**：看输出里的 `warning`
 
-### 第二条通道：层（`pull-layers` / `push-layers` / `pack-layer` / `unpack-layer`）
+### 第二条通道：层（`layer-save` / `layer-load` / `unpack-layer` / `push-layer` / `pull-layer`）
 
-发布包走 GitHub release 之外，还可以把 `output/` 里的每层做成**容器镜像**放进镜像仓库。
-四步各有分工，判据都是"`output/<target>/<层>/` 里有 `payload/`"：
+发布包走 GitHub release 之外，还可以把**层镜像**放进镜像仓库。中心是 `<项目>/layer/<target>/`
+—— 一棵 **OCI 镜像布局**（ADR-024）：`oci-layout` + `index.json` + `blobs/sha256/…`，
+blob 按内容命名所以父链天然只存一份。五条命令分工：
 
 | 命令 | 方向 | 要什么 | 关键约束 |
 |---|---|---|---|
-| `push-layers` | `output/` → 镜像仓库 | **`docker`**（构建机上） | 一个 `FROM scratch` + **一个 `ADD`** = 恰好一层，tag 是 `<层名（/ 换成 -）>-<target>`；用 `docker push`，**不是** `crane push`（后者把整个 blob 塞进一个 PATCH，大层会被服务器 reset） |
-| `pull-layers` | 镜像仓库 → `output/` | **`crane`** 静态二进制 | **目标机不需要 docker**；缺 crane 直接 die 并告诉你两条路（`WTOOL_CRANE=<路径>` / 干脆 `wtool install`）；只取镜像**顶层那一层**的 digest（`--platform linux/amd64` 不能省） |
-| `pack-layer` | `output/` → tar | 什么都不用 | 打成"镜像形状"的 tar（`root/.wtool/…` + `wtool-layer/OWNED.tsv`），可以直接 `docker load`。**不联网** |
-| `unpack-layer` | tar → `output/` | 什么都不用 | `pack-layer` 的逆操作，也能解 crane blob 下来的那一层。**不联网** |
+| `layer-save` | `docker` → `layer/<target>/` | `docker` | `docker save <镜像> \| tar -x -C layer/<target>/`（**tar 只当管道，不落盘**）；`index.json` 要**合并**（直接解第二个 `save` 会覆盖第一个的条目）；annotation 记 `io.wtool.layer` / `io.wtool.target` / `io.wtool.image` |
+| `layer-load` | `layer/<target>/` → `docker` | `docker` | `tar -c -C layer/<target>/ . \| docker load`，装回来是**同一个 image ID** |
+| `unpack-layer` | `layer/<target>/` → `output/<target>/<层>/` | 什么都不用 | 顺着 `index.json → manifest → layers[-1]` 找到**顶层 blob**，直接解（`--strip-components=2` 剥掉 `root/.wtool`，丢掉 `.wh.` 白障），再扫一遍生成 `OWNED.tsv`。**不联网、不要 docker** |
+| `push-layer` | `layer/<target>/` → 镜像仓库 | **`docker`**（构建机上） | tag 是 `<层名（/ 换成 -）>-<target>`；先 `docker load` 整棵布局再 `docker push` —— **不是** `crane push`（它把整个 blob 塞进一个 PATCH，大层会被服务器 reset，且重试从 offset 0 重来） |
+| `pull-layer` | 镜像仓库 → `layer/<target>/` | **`skopeo`** | **目标机不需要 docker**；`skopeo copy --all docker://… oci:layer/<target>:<tag>` —— skopeo 写布局时会**合并** `index.json`、blob 去重；拉完由引擎补上 `io.wtool.layer` / `io.wtool.target` annotation。缺 skopeo 直接 die 并告诉你 `apt install skopeo` |
 
-- 落点全都和 `build.sh` 的产物**完全相同的路径**（`output/<target>/<层>/`），
-  所以拉完直接 `wtool install`
+- 层名里的 `/` 在 tag 里写成 `-`（`lang/lua` → `lang-lua`）；拉回来时**先看本地布局里
+  有没有同 tag 的层名**，没有才按 `-` → `/` 还原（层名里同时有 `a-b` 和 `a/b` 会有歧义，
+  本项目的层名不会撞）
+- 落点：`unpack-layer` 解出来的是 `output/<target>/<层>/`，和 `build.sh` 的产物**完全相同的
+  路径**，所以 `pull-layer` → `unpack-layer` → `wtool install` 接得上
 - `--registry=<前缀>` 或 `WTOOL_LAYER_REGISTRY`（形如
   `crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry`）；
-  两个命令都不给就报错，不猜
-- 层的 `OWNED.tsv` 必须跟着走：`install.sh` 拿它合并**卸载台账**，
-  缺了 `wtool uninstall` 会删不干净（半装状态）—— 解包时缺它会警告
+  两个联网命令不给就报错，不猜
+- 层的 `OWNED.tsv` 由 `unpack-layer` **扫出来**（不是从包里读的）：它会拒收**指向 payload
+  外面**的软链（换台机器必然是断的），值为 `sha256` 或 `L:<软链原值>`
+- `layer/` 只对 `kind="docker"` 的项目存在（见 ADR-025）；`layer/` 是**项目资产**，
+  docker 存储只是缓存 —— `docker system prune` 之后 `layer-load` 就装回来
 
 ## 14. 能力表格
 

@@ -29,16 +29,16 @@
 #   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
 #                       把 <项目>/release/ 里的东西传到 GitHub Release（**只上传**），
 #                       成功之后写 scripts/release.json（下载清单，记得提交）
-#   wtool pull-layers    <项目>... [--registry=<前缀>] [--target=] [--layer=]
-#                       从镜像仓库把层拉回来 → output/（**目标机不需要 docker**）
-#   wtool push-layers    <项目>... [--registry=<前缀>] [--target=] [--layer=]
-#                       output/ 的层 → 镜像仓库（docker push，**不是** crane push）
 #   wtool layer-save     <项目> --image=<镜像> [--target=] [--layer=]
 #                       docker 镜像 → <项目>/layer/<target>/（OCI 布局，blob 按 sha256 去重）
 #   wtool layer-load     <项目> [--target=]
 #                       <项目>/layer/<target>/ → docker（接着构建 / 恢复容器用）
 #   wtool unpack-layer   <项目> [--layer=] [--target=]
-#                       layer/<target>/ 里的层 → output/<target>/<层>/。**不联网**
+#                       layer/<target>/ 的顶层 blob → output/<target>/<层>/。**不联网、不要 docker**
+#   wtool push-layer     <项目>... [--registry=<前缀>] [--target=] [--layer=]
+#                       layer/<target>/ 的层镜像 → 镜像仓库（docker push）
+#   wtool pull-layer     <项目>... [--registry=<前缀>] [--target=] [--layer=]
+#                       镜像仓库 → layer/<target>/（**目标机不需要 docker**）
 #
 #   ── 一次装好 ───────────────────────────────────────────────
 #   wtool bootstrap [--dry-run] [--force]   所有项目 install（**不做系统层**）
@@ -2455,24 +2455,29 @@ _publish_kind_cn() {
 }
 
 # --------------------------------------------------------------------------
-# push-layers / pull-layers / pack-layer / unpack-layer
+# push-layer / pull-layer / layer-save / layer-load / unpack-layer
 #
-# 第二条发布通道：**容器镜像仓库**。和 pack-release / publish（GitHub 分卷那条）
-# 是同一份 payload 的两种包装：
+# **第二条发布通道：容器镜像仓库**。运的和 pack-release / publish-release（GitHub 分卷那条）
+# 是同一份东西 —— `<项目>/layer/<target>/` 里那几个**真镜像**：
 #
-#   push-layers    output/<target>/<层>/{payload,OWNED.tsv}  →  镜像仓库
-#   pull-layers    镜像仓库  →  output/<target>/<层>/{payload,OWNED.tsv}
-#   pack-layer     单个层 → 一个镜像形状的 tar（**不联网**）
-#   unpack-layer   同上，反方向（**不联网**）
+#   layer-save     docker 里的镜像              →  layer/<target>/（OCI 布局，ADR-024）
+#   layer-load     layer/<target>/              →  docker
+#   unpack-layer   layer/<target>/ 的顶层 blob  →  output/<target>/<层>/（**不联网、不要 docker**）
+#   push-layer     layer/<target>/              →  镜像仓库
+#   pull-layer     镜像仓库                     →  layer/<target>/（**目标机不需要 docker**）
 #
-# **目标机上不需要 docker** —— 拉取只用一个 crane 静态二进制。
 # 为什么值得多这条通道（2026-09-26 实测）：上传两条路一样慢（~0.25 MB/s），
 # 但下载 **ACR 10.2 MB/s vs GitHub 2.6~4.8 MB/s** —— 发布一次慢，取用快一倍多。
 #
-# 完整设计见 harness/architecture.md §5.1；
-# 踩过的坑见 harness/docs/hazards.md O 节（尤其 O1 crane push 推不了大层、
-# O2 docker push 的命门是 dockerd 写死的代理配置）。
-# --------------------------------------------------------------------------
+# ⚠️ **两个方向用的工具不一样，是有意的**（实测挑出来的，不是随手选的）：
+#   push 用 **docker push**：`crane push` 把整个 blob 塞进一个 PATCH，ACR 传到 ~30MB
+#        就 connection reset，而且重试从 offset 0 重来（hazards O1）；docker push 分块
+#        5MB，一次就过 —— 代价是推的机器上要有 docker（构建机上本来就有）。
+#   pull 用 **skopeo**：它往 oci: 布局里写第二个镜像时会**合并** index.json（实测：
+#        两个 tag 各一条、共享的 blob 只存一份），而且**不需要 docker** ——
+#        目标机上 `unpack-layer` 直接读 blob。
+#
+# 完整设计见 harness/architecture.md §5.1；踩过的坑见 harness/docs/hazards.md O 节。
 
 # registry 前缀的形状：<域名>/<命名空间>，例如
 #   crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry
@@ -2480,54 +2485,69 @@ _publish_kind_cn() {
 wt_layer_repo() { printf '%s/%s\n' "$1" "$(basename "$2")"; }
 wt_layer_tag()  { printf '%s-%s\n' "$(printf '%s' "$1" | tr '/' '-')" "$2"; }
 
-# output/<target>/ 下有哪些层。判据是"目录里有 payload/"，层名允许带斜杠（lang/perl）。
-wt_layers_of() {
-    [ -d "$1" ] || return 0
-    for _d in "$1"/*/ "$1"/*/*/; do
-        [ -d "${_d}payload" ] || continue
-        printf '%s\n' "${_d%/}" | sed "s|^$1/||"
-    done
-}
-
-wt_need_crane() {
-    _wc=${WTOOL_CRANE:-crane}
-    command -v "$_wc" >/dev/null 2>&1 || wt_die "找不到 crane（拉层用的静态二进制）。
-
-  crane 是单文件、静态链接、不用装也不用 root —— 目标机上只需要它，**不需要 docker**。
-  · 已经有的话：WTOOL_CRANE=<路径> wtool pull-layers …
-  · 或者干脆不拉：output/ 里的东西已经在了，直接 wtool install"
-    printf '%s\n' "$_wc"
-}
-
-# 取镜像**顶层那一层**的 digest。
-# ⚠️ `--platform linux/amd64` 不能省：不加的话返回的是多平台 index，
-#    里面**没有 layers 字段**。
-# ⚠️ 只取顶层：推上去的镜像必须是**一个 ADD 打出来的单层**（§5.1），
-#    多一个 ADD 就会多一层，layers[-1] 取到的就不是增量层了。
-wt_layer_digest() {   # $1=crane $2=完整 ref
-    "$1" manifest --platform linux/amd64 "$2" 2>/dev/null | python3 -c '
-import json,sys
+# 读一棵 layer/<target>/ 布局的层清单：一行一个镜像，TSV 五列
+#   层名 <TAB> target <TAB> docker 里的镜像名 <TAB> manifest digest <TAB> ref.name
+# "按层名找镜像"的操作（push / unpack）都从这里拿清单 —— 唯一入口。
+#
+# ‼️ 空值写成 `-`，**不能是真空白**：TAB 在 shell 里算 IFS 空白字符，
+#    `IFS=<TAB> read a b c d e` 会把连续的 TAB **折成一个** —— 空字段直接消失，
+#    后面的列整体左移（实测踩过：image 是空的时候，digest 被当成了镜像名）。
+#    这也是引擎别处 TSV 一律用 `-` 占位的原因。
+wt_layer_entries() {   # <layout 目录>
+    python3 - "$1" <<'INNER_PY'
+import json, os, sys
+lay = sys.argv[1]
 try:
-    print(json.load(sys.stdin)["layers"][-1]["digest"])
+    with open(os.path.join(lay, "index.json"), encoding="utf-8") as fh:
+        mans = json.load(fh).get("manifests", [])
 except Exception:
-    sys.exit(1)' 2>/dev/null
+    sys.exit(0)
+for m in mans:
+    a = m.get("annotations") or {}
+    print("\t".join([a.get("io.wtool.layer") or "-", a.get("io.wtool.target") or "-",
+                     a.get("io.wtool.image") or "-", m.get("digest") or "-",
+                     a.get("org.opencontainers.image.ref.name") or "-"]))
+INNER_PY
 }
 
-# 解一个"镜像形状的层 tar"到 output/<target>/<层>/。
-#   root/.wtool/…         --strip 2 → payload/（影子 $HOME 的形状）
-#   wtool-layer/OWNED.tsv --strip 1 → 层目录下
-# OWNED.tsv 必须落到位：install.sh 拿它合并**卸载台账**，缺了会导致
-# wtool uninstall 删不干净（"半装状态"）。
-wt_layer_untar() {   # $1=tar 文件  $2=层目录（output/<target>/<层>）
-    [ -f "$1" ] || return 1
-    mkdir -p "$2/payload"
-    tar -xzf "$1" -C "$2/payload" --strip-components=2 \
-        --wildcards 'root/.wtool/*' --exclude='*/.wh.*' 2>/dev/null || true
-    if tar -xzf "$1" -C "$2" --strip-components=1 --wildcards 'wtool-layer/*' 2>/dev/null; then
-        [ -s "$2/OWNED.tsv" ] || wt_warn "$2 的 OWNED.tsv 是空的"
-    else
-        wt_warn "这一层里没有 wtool-layer/OWNED.tsv —— 装了以后卸载会删不干净"
-    fi
+# 给布局里某一个 manifest 补 annotation —— pull 回来的镜像要知道"这是哪一层"。
+# 认的锚是 skopeo 写进 index.json 的 ref.name（就是我们给它的那个 tag）。
+# $1=layout 目录  $2=ref.name  $3=层名  $4=target  $5=镜像名（可选）
+wt_layer_annotate() {
+    python3 - "$@" <<'INNER_PY'
+import json, os, sys
+lay, refname, layer, target = sys.argv[1:5]
+image = sys.argv[5] if len(sys.argv) > 5 else ""
+p = os.path.join(lay, "index.json")
+with open(p, encoding="utf-8") as fh:
+    idx = json.load(fh)
+hit = 0
+for m in idx.get("manifests", []):
+    a = m.setdefault("annotations", {})
+    if a.get("org.opencontainers.image.ref.name") != refname:
+        continue
+    a["io.wtool.layer"] = layer
+    a["io.wtool.target"] = target
+    if image:
+        a["io.wtool.image"] = image
+    hit += 1
+if not hit:
+    sys.exit("index.json 里没有 ref.name=%s 的条目" % refname)
+tmp = p + ".new"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(idx, fh, ensure_ascii=False, indent=2)
+os.replace(tmp, p)
+INNER_PY
+}
+
+wt_need_skopeo() {
+    _ws=${WTOOL_SKOPEO:-skopeo}
+    command -v "$_ws" >/dev/null 2>&1 || wt_die "找不到 skopeo（拉层用的）。
+
+  · 装一个：sudo apt install skopeo
+  · 或者指路径：WTOOL_SKOPEO=<路径> wtool pull-layer …
+  · 不拉也行：包是从 GitHub 下来的就 wtool unpack-release，用不着它"
+    printf '%s\n' "$_ws"
 }
 
 # --------------------------------------------------------------------------
@@ -2564,10 +2584,11 @@ wt_layer_import() {   # <项目目录> <target> <镜像> <层名>
     cp -an -- "$_li_tmp/blobs/sha256/." "$_li_dir/blobs/sha256/" 2>/dev/null || \
         cp -a -- "$_li_tmp/blobs/sha256/." "$_li_dir/blobs/sha256/" || {
             rm -rf -- "$_li_tmp"; wt_die "blob 拷不进 $_li_dir/blobs/sha256"; }
-    python3 - "$_li_dir/index.json" "$_li_tmp/index.json" "$_li_name" "$2" \
+    python3 - "$_li_dir/index.json" "$_li_tmp/index.json" "$_li_name" "$2" "$_li_img" \
         > "$_li_dir/index.json.new" <<'PY' || { rm -rf -- "$_li_tmp"; return 1; }
 import json, sys
 cur_p, new_p, layer, target = sys.argv[1:5]
+image = sys.argv[5] if len(sys.argv) > 5 else ""
 def load(p):
     try:
         with open(p, encoding="utf-8") as fh:
@@ -2582,6 +2603,9 @@ for e in load(new_p):
     ann = e.setdefault("annotations", {})
     ann["io.wtool.layer"] = layer
     ann["io.wtool.target"] = target
+    if image:
+        # docker 里的镜像名（save 的时候是什么就记什么）—— push-layer 靠它 docker tag
+        ann["io.wtool.image"] = image
     entries.append(e)
 print(json.dumps({"schemaVersion": 2,
                   "mediaType": "application/vnd.oci.image.index.v1+json",
@@ -2618,7 +2642,11 @@ cmd_layer_save() {
   层名不给就从镜像 tag 推；target 不给就从 output/ 推一个。
 
   磁盘上留下的是**目录**不是 tar：blobs/sha256/… 按内容命名，父子层共用一份。"
-    [ -n "$_name" ] || _name=${_img##*/}
+    # 层名不给就从镜像名推：去掉 registry 路径，**也去掉 tag / digest** ——
+    # 层名最后要当 docker tag 用，冒号在里面非法（实测：`--image=astro/nvim_base:ubuntu_22.04`
+    # 会推出层名 `nvim_base:ubuntu_22.04`，push 时拼成 `…:nvim_base:ubuntu_22.04-ubuntu_22.04`，
+    # docker 直接 "invalid reference format"）。
+    [ -n "$_name" ] || _name=$(printf '%s' "${_img##*/}" | sed 's/[:@].*$//')
     for _want in $_targets; do
         _row=$(wt_resolve_project "$_want") || exit $?
         _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
@@ -2654,13 +2682,89 @@ cmd_layer_load() {
     done
 }
 
-# 缺 --target= 时从 output/ 里推一个出来（只有一个才敢推）
-wt_guess_target() {   # $1=项目目录
-    _gt=$(ls -d "$1"/output/*/ 2>/dev/null | head -1)
-    [ -n "$_gt" ] && basename "$_gt"
+# 从 layer/<target>/ 里找出某一层的**顶层 blob**（就是"这一层"，ADR-024 §8 那条链：
+# index.json → manifest → layers[-1] → blobs/sha256/<digest>）。
+# 层名不给（或给 -）时：layout 里只有一个镜像就用它，多个就要求明确指一个。
+wt_layer_last_blob() {   # <layout 目录> [层名]
+    _lb_dir=$1; _lb_want=${2:-}
+    [ -f "$_lb_dir/index.json" ] || return 1
+    python3 - "$_lb_dir" "$_lb_want" <<'INNER_PY'
+import json, os, sys
+lay, want = sys.argv[1], sys.argv[2]
+idx = json.load(open(os.path.join(lay, "index.json"), encoding="utf-8"))
+mans = idx.get("manifests", [])
+if want:
+    mans = [m for m in mans
+            if (m.get("annotations") or {}).get("io.wtool.layer") == want]
+if not mans:
+    sys.exit("找不到层%s（layout 里有 %d 个镜像）"
+             % (" " + want if want else "", len(idx.get("manifests", []))))
+if len(mans) > 1:
+    sys.exit("layout 里有多个层（%s）—— 用 --layer= 明确指一个"
+             % ", ".join(sorted((m.get("annotations") or {}).get("io.wtool.layer", "?")
+                                for m in mans)))
+md = mans[0]["digest"].split(":", 1)[-1]
+mf = json.load(open(os.path.join(lay, "blobs", "sha256", md), encoding="utf-8"))
+print(os.path.join(lay, "blobs", "sha256", mf["layers"][-1]["digest"].split(":", 1)[-1]))
+print((mans[0].get("annotations") or {}).get("io.wtool.layer", ""))
+INNER_PY
 }
 
-cmd_pull_layers() {
+# 扫一棵 payload 目录，生成 OWNED.tsv（三列：相对影子 $HOME 的路径 	 值 	 层名）。
+# 值的三态（install.sh 的 verify_layer 认这个约定）：
+#   64 位 sha256 / `-`（读不到）/ `L:<readlink 原值>`
+# ⚠️ 软链必须**自己判**，不能丢给 sha256sum —— 它会**跟随**软链，
+#    把"目标的内容"记成"这个文件的内容"（2026-09-26 实测踩过：
+#    发布出去的包在干净机器上因此根本装不上）。
+# ⚠️ 指向 payload **外面**的软链换台机器必然是断的 —— 这一层不能用，直接失败。
+wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径>
+    _os_pay=$1; _os_name=$2; _os_out=$3
+    _os_esc="$_os_pay/.escaping-links.$$"
+    : > "$_os_esc"
+    ( cd -- "$_os_pay" && find . -type f -o -type l | sed 's|^\./||' | LC_ALL=C sort ) \
+    | while IFS= read -r _os_f; do
+        _os_p="$_os_pay/$_os_f"
+        if [ -L "$_os_p" ]; then
+            _os_t=$(readlink -- "$_os_p")
+            case $_os_t in
+                /*) _os_out2=1 ;;
+                *)  _os_real=$(cd -- "$(dirname -- "$_os_p")" && pwd)/$_os_t
+                    case $_os_real in
+                        "$_os_pay"/*) _os_out2=0 ;;
+                        *)            _os_out2=1 ;;
+                    esac ;;
+            esac
+            [ "$_os_out2" = 1 ] && printf '%s -> %s\n' "$_os_f" "$_os_t" >> "$_os_esc"
+            printf '%s\tL:%s\t%s\n' "$_os_f" "$_os_t" "$_os_name"
+        else
+            _os_h=$(sha256sum -- "$_os_p" 2>/dev/null | cut -d' ' -f1)
+            printf '%s\t%s\t%s\n' "$_os_f" "${_os_h:--}" "$_os_name"
+        fi
+    done > "$_os_out" 2>/dev/null || true
+    if [ -s "$_os_esc" ]; then
+        {
+            echo "错误: $_os_name 这一层里有指向包**外面**的软链 —— 换台机器必然悬空:"
+            sed 's/^/    /' -- "$_os_esc"
+            echo "  指向系统包（apt 装出来的）的，要么把真身拷进 \$PREFIX，要么别建这条链。"
+        } >&2
+        rm -f -- "$_os_esc"
+        return 1
+    fi
+    rm -f -- "$_os_esc"
+    return 0
+}
+
+# 缺 --target= 时从 output/ 里推一个出来（只有一个才敢推）
+wt_guess_target() {   # $1=项目目录
+    # ‼️ 必须永远 return 0：调用点普遍写成 `[ -n "$_t" ] || _t=$(wt_guess_target …)`，
+    # 而 `set -e` 会看整条 `||` 列表的状态 —— 猜不到时返回 1 会让 wtool **一声不吭地退出 1**
+    # （2026-09-28 实测：unpack-layer 在 output/ 还没建时就死得无声无息）。
+    _gt=$(ls -d "$1"/output/*/ 2>/dev/null | head -1) || true
+    [ -n "$_gt" ] && basename -- "$_gt"
+    return 0
+}
+
+cmd_pull_layer() {
     _targets=""; _reg=""; _only_t=""; _only_l=""
     for arg in "$@"; do
         case $arg in
@@ -2672,19 +2776,17 @@ cmd_pull_layers() {
             *)            _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_targets" ] || wt_die "用法: wtool pull-layers <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
+    [ -n "$_targets" ] || wt_die "用法: wtool pull-layer <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
 
-  从容器镜像仓库把层拉回来，落到 <项目>/output/<target>/<层>/ —— 和
-  build.sh / download-release+unpack-release **完全相同的路径**，拉完直接 wtool install。
+  从镜像仓库把**层镜像**拉进 <项目>/layer/<target>/（OCI 布局，ADR-024）。接着：
+    wtool unpack-layer <项目>     # layer/ → output/（不需要 docker）
+    wtool install      <项目>
 
   <前缀> 形如 crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry，
-  默认取 \$WTOOL_LAYER_REGISTRY。目标机上**不需要 docker**（只用一个 crane 二进制）。"
+  默认取 \$WTOOL_LAYER_REGISTRY。**目标机上不需要 docker**（只要一个 skopeo）。"
     [ -n "$_reg" ] || _reg=${WTOOL_LAYER_REGISTRY:-}
     [ -n "$_reg" ] || wt_die "没给 registry：--registry=<前缀> 或 export WTOOL_LAYER_REGISTRY=<前缀>"
-    _crane=$(wt_need_crane)
-
-    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-pull.XXXXXX")
-    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    _sk=$(wt_need_skopeo) || exit $?
 
     _done=0
     for _want in $_targets; do
@@ -2692,19 +2794,26 @@ cmd_pull_layers() {
         _pid=$(printf '%s\n' "$_row" | cut -f2)
         _path=$(printf '%s\n' "$_row" | cut -f3)
         _repo=$(wt_layer_repo "$_reg" "$_path")
-        wt_info "── $_pid  ← $_repo"
-
-        _rel="$_path/output"
+        [ -n "$_only_t" ] || _only_t=$(wt_guess_target "$_path")
         if [ -z "$_only_t" ]; then
-            _only_t=$(wt_guess_target "$_path")
-            [ -n "$_only_t" ] || wt_die "$_pid 的 output/ 是空的，也没给 --target=<os_ver>，
-  没法判断要拉哪个系统的层。明确指一个，例如 --target=ubuntu_22.04"
+            _lt=$(ls -d "$_path"/layer/*/ 2>/dev/null | head -1) || true
+            [ -n "$_lt" ] && _only_t=$(basename -- "$_lt")
         fi
+        [ -n "$_only_t" ] || wt_die "$_pid 没有 output/ 也没有 layer/ 目标 —— 用 --target=<os_ver> 指一个"
+        _lay=$(wt_layer_dir "$_path" "$_only_t")
+        wt_info "── $_pid  ← $_repo:*-$_only_t"
 
-        # 层清单以**仓库里的 tag** 为准 —— 这样在一台全新的、output/ 还空着的
-        # 机器上也能拉（这正是"部署到公司机器"那个场景：那边没有本地构建产物）。
-        _tags=$("$_crane" ls "$_repo" 2>/dev/null) || true
-        [ -n "$_tags" ] || wt_die "读不到 $_repo 的 tag 列表（仓库不存在？凭据没配？）"
+        # tag 清单以**仓库**为准 —— 这样在一台连 output/ 都还空着的机器上也能拉
+        # （这正是"装到公司机器"那个场景：那边没有本地构建产物）。
+        _tags=$("$_sk" list-tags "docker://$_repo" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    print("\n".join(json.load(sys.stdin).get("Tags") or []))
+except Exception:
+    pass') || true
+        [ -n "$_tags" ] || wt_die "读不到 $_repo 的 tag 列表（仓库不存在？没登录？skopeo login <域名>）
+
+  凭据：skopeo login --username <账号> <域名>   （阿里云 ACR 的密码在控制台设）"
 
         _n=0
         for _tag in $_tags; do
@@ -2712,44 +2821,44 @@ cmd_pull_layers() {
                 *-"$_only_t") _layer=${_tag%-"$_only_t"} ;;
                 *) continue ;;
             esac
-            # tag 里的 - 是层名里的 / 换来的（docker tag 只认 [A-Za-z0-9_.-]）。
+            # tag 里的 - 是层名里的 / 换来的（tag 只认 [A-Za-z0-9_.-]）。
             # 还原两步：
-            #   ① 本地已经有这个层目录 → 用本地那个名字（最准）
-            #   ② 本地没有（全新机器、output/ 还空着）→ 按 - → / 还原
+            #   ① 本地这棵 layout 里已经有这个 tag（重拉/续拉）→ 用它记着的层名（最准）
+            #   ② 没有（全新机器）→ 按 - → / 还原
             # 局限：层名里如果有同时存在 `a-b` 和 `a/b` 两个层，这一步会有歧义。
-            # 本项目的层名是 main / others / lang/<语言>，不冲突。
-            _cand=$(wt_layers_of "$_rel/$_only_t" | grep -Fx "$_layer" || true)
+            # 本项目的层名是 main / nvim_base / astronvim_base / lang/<语言>，不冲突。
+            _cand=$(wt_layer_entries "$_lay" | awk -F'\t' -v t="$_tag" '$1!="-" && $5==t{print $1; exit}')
             if [ -n "$_cand" ]; then
                 _layer=$_cand
             else
-                # 本地没有这一层（全新机器，或这一层刚被删掉）→ 按约定还原。
-                # ⚠️ 不能加"转换后目录要已存在"这种条件 —— 那正好把**需要还原**
-                #    的情形排除掉了（踩过：删掉 lang/lua 之后怎么都拉不回来）。
                 _layer=$(printf '%s' "$_layer" | tr '-' '/')
             fi
             [ -z "$_only_l" ] || [ "$_layer" = "$_only_l" ] || continue
 
-            _d=$(wt_layer_digest "$_crane" "$_repo:$_tag") \
-                || { wt_warn "取 $_tag 的 manifest 失败，跳过"; continue; }
             _n=$((_n + 1))
             if wt_dry; then
-                wt_step "[dry-run] $_repo:$_tag → $_rel/$_only_t/$_layer"
+                wt_step "[dry-run] $_repo:$_tag → layer/$_only_t/$_layer"
                 continue
             fi
-            if ! "$_crane" blob "$_repo@$_d" > "$_scratch/l.tgz" 2>/dev/null; then
-                wt_warn "下载 $_tag 失败，跳过"; continue
+            wt_run mkdir -p -- "$_lay"
+            [ -f "$_lay/oci-layout" ] || printf '{"imageLayoutVersion":"1.0.0"}\n' > "$_lay/oci-layout"
+            # ⚠️ 不能用 wt_run：它一失败就 wt_die（整条命令退出），而这里要的是
+            #    "这个 tag 拉不动就跳过、接着拉下一个"。
+            if ! "$_sk" copy --all "docker://$_repo:$_tag" "oci:$_lay:$_tag"; then
+                wt_warn "拉 $_tag 失败，跳过"
+                continue
             fi
-            wt_layer_untar "$_scratch/l.tgz" "$_rel/$_only_t/$_layer"
-            wt_step "$_layer（$(du -sh "$_rel/$_only_t/$_layer" 2>/dev/null | cut -f1)）"
-            _n=$((_n + 1))
+            wt_layer_annotate "$_lay" "$_tag" "$_layer" "$_only_t" "docker://$_repo:$_tag" || \
+                wt_die "拉回来的 $_tag 认不出来（annotation 写不进 $_lay/index.json）"
+            wt_step "$_layer（blob 只存一份；整个 layout $(du -sh "$_lay" 2>/dev/null | cut -f1)）"
         done
         [ "$_n" -gt 0 ] || wt_warn "一个层都没拉到（target=$_only_t，仓库里没匹配的 tag？）"
         _done=$((_done + 1))
     done
-    wt_info "pull-layers 完成（$_done 个项目）—— 接下来 wtool install"
+    wt_info "pull-layer 完成（$_done 个项目）—— 接着 wtool unpack-layer <项目>"
 }
 
-cmd_push_layers() {
+cmd_push_layer() {
     _targets=""; _reg=""; _only_t=""; _only_l=""
     for arg in "$@"; do
         case $arg in
@@ -2761,14 +2870,17 @@ cmd_push_layers() {
             *)            _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_targets" ] || wt_die "用法: wtool push-layers <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
+    [ -n "$_targets" ] || wt_die "用法: wtool push-layer <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
 
-  把 output/<target>/<层>/ 推成镜像：FROM scratch + **一个** ADD（= 一层），
-  tag 是 <层名（/ 换成 -）>-<target>。用 docker push —— **不是 crane push**，
-  后者把整个 blob 塞进一个 PATCH，大层会被服务器 reset（§5.1 / 03-hazards O1）。"
+  把 <项目>/layer/<target>/ 里的层镜像推到镜像仓库：tag = <层名（/ 换成 -）>-<target>。
+  推的是**真镜像**（基础层 + 每层一个 commit），blob 按 sha256 去重 ——
+  共享父链只在第一个镜像里传一次。
+
+  ⚠️ 要 docker：`crane push` 推大 blob 会 connection reset（hazards O1），
+     docker push 分块 5MB 才过得去。构建机上本来就有 docker（ADR-024 §8）。"
     [ -n "$_reg" ] || _reg=${WTOOL_LAYER_REGISTRY:-}
     [ -n "$_reg" ] || wt_die "没给 registry：--registry=<前缀> 或 export WTOOL_LAYER_REGISTRY=<前缀>"
-    command -v docker >/dev/null 2>&1 || wt_die "push-layers 要 docker（构建机上有；目标机不需要）"
+    command -v docker >/dev/null 2>&1 || wt_die "push-layer 要 docker（crane push 推不了大 blob，见 hazards O1）"
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-push.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
@@ -2779,108 +2891,112 @@ cmd_push_layers() {
         _pid=$(printf '%s\n' "$_row" | cut -f2)
         _path=$(printf '%s\n' "$_row" | cut -f3)
         _repo=$(wt_layer_repo "$_reg" "$_path")
-        _rel="$_path/output"
-        [ -d "$_rel" ] || wt_die "$_pid 没有 output/：先 wtool build"
         [ -n "$_only_t" ] || _only_t=$(wt_guess_target "$_path")
-        [ -n "$_only_t" ] || wt_die "$_pid 没有 output 目标，用 --target= 指定"
-        wt_info "── $_pid  → $_repo"
+        if [ -z "$_only_t" ]; then
+            _lt=$(ls -d "$_path"/layer/*/ 2>/dev/null | head -1) || true
+            [ -n "$_lt" ] && _only_t=$(basename -- "$_lt")
+        fi
+        [ -n "$_only_t" ] || wt_die "$_pid 没有 output/ 也没有 layer/ 目标 —— 用 --target=<os_ver> 指一个"
+        _lay=$(wt_layer_dir "$_path" "$_only_t")
+        [ -f "$_lay/index.json" ] || wt_die "没有 $_lay —— 先 wtool layer-save / pull-layer"
 
-        for _layer in $(wt_layers_of "$_rel/$_only_t"); do
-            [ -z "$_only_l" ] || [ "$_layer" = "$_only_l" ] || continue
-            _tag=$(wt_layer_tag "$_layer" "$_only_t")
-            if wt_dry; then wt_step "[dry-run] $_layer → $_repo:$_tag"; continue; fi
+        wt_layer_entries "$_lay" | awk -F'\t' -v t="$_only_t" '$1!="-" && ($2=="-" || $2==t)' \
+            > "$_scratch/rows"
+        [ -s "$_scratch/rows" ] || wt_die "$_lay 里一个层镜像都没有（index.json 是空的？）"
+        wt_info "── $_pid  layer/$_only_t/ → $_repo"
 
-            _ctx="$_scratch/ctx"; rm -rf "$_ctx"
-            mkdir -p "$_ctx/stage/root/.wtool" "$_ctx/stage/wtool-layer"
-            # 硬链接搭树：GB 级的层不用真拷一份
-            cp -al "$_rel/$_only_t/$_layer/payload/." "$_ctx/stage/root/.wtool/" 2>/dev/null || \
-                cp -a "$_rel/$_only_t/$_layer/payload/." "$_ctx/stage/root/.wtool/"
-            cp -a "$_rel/$_only_t/$_layer/OWNED.tsv" "$_ctx/stage/wtool-layer/" 2>/dev/null || \
-                wt_warn "$_layer 没有 OWNED.tsv —— 装了以后卸载会删不干净"
-            # ⚠️ 一个 tar、一个 ADD = 一层。拆成两个 ADD 会多一层，
-            #    拉取端取 layers[-1] 就取错了（§5.1 实测踩过）。
-            tar -czf "$_ctx/image.tar.gz" -C "$_ctx/stage" root wtool-layer
-            printf 'FROM scratch\nADD image.tar.gz /\n' > "$_ctx/Dockerfile"
+        if wt_dry; then
+            while IFS="$(printf '\t')" read -r _l _lt2 _limg _ldg _lrn; do
+                [ -z "$_only_l" ] || [ "$_l" = "$_only_l" ] || continue
+                wt_step "[dry-run] $_l → $_repo:$(wt_layer_tag "$_l" "$_only_t")"
+            done < "$_scratch/rows"
+            continue
+        fi
 
-            if ! docker build -q -t "$_repo:$_tag" "$_ctx" >/dev/null 2>"$_scratch/err"; then
-                cat -- "$_scratch/err" >&2
-                wt_die "构建 $_tag 的镜像失败"
-            fi
-            if ! docker push "$_repo:$_tag" >"$_scratch/push.log" 2>&1; then
+        # 布局 → docker（tar 只当管道；镜像名字由 index.json 里 docker 自己写的
+        # io.containerd.image.name 还原），再从 docker 推上去。
+        wt_run tar -c -C "$_lay" . | docker load > "$_scratch/load.log" 2>&1 || {
+            tail -5 -- "$_scratch/load.log" >&2
+            wt_die "布局装不回 docker（$_lay）"
+        }
+        _n=0
+        while IFS="$(printf '\t')" read -r _l _lt2 _limg _ldg _lrn; do
+            [ "$_l" != "-" ] || continue
+            [ -z "$_only_l" ] || [ "$_l" = "$_only_l" ] || continue
+            [ "$_limg" != "-" ] || wt_die "层 $_l 不知道对应 docker 里的哪个镜像（layout 是旧版写的）。
+  重新存一次：wtool layer-save <项目> --image=<镜像> --layer=$_l"
+            _tag=$(wt_layer_tag "$_l" "$_only_t")
+            wt_run docker tag "$_limg" "$_repo:$_tag" || wt_die "docker tag $_limg → $_repo:$_tag 失败"
+            if ! docker push "$_repo:$_tag" > "$_scratch/push.log" 2>&1; then
                 tail -5 -- "$_scratch/push.log" >&2
-                wt_die "推 $_tag 失败 —— dockerd 的代理配好了吗？（§5.1 / 03-hazards O2）"
+                wt_die "推 $_tag 失败 —— dockerd 的代理配好了吗？（hazards O2）"
             fi
-            wt_step "$_layer → $_repo:$_tag"
-            _done=$((_done + 1))
-        done
+            wt_step "$_l → $_repo:$_tag"
+            _n=$((_n + 1))
+        done < "$_scratch/rows"
+        [ "$_n" -gt 0 ] || wt_warn "一个层都没推（--layer=$_only_l 在这棵 layout 里没有？）"
+        _done=$((_done + 1))
     done
-    wt_info "push-layers 完成（$_done 个层）"
-}
-
-cmd_pack_layer() {
-    _targets=""; _layer=""; _t=""; _out=""
-    for arg in "$@"; do
-        case $arg in
-            --dry-run)  WTOOL_DRY_RUN=1 ;;
-            --layer=*)  _layer=${arg#--layer=} ;;
-            --target=*) _t=${arg#--target=} ;;
-            --out=*)    _out=${arg#--out=} ;;
-            -*)         wt_die "未知参数: $arg" ;;
-            *)          _targets="$_targets $arg" ;;
-        esac
-    done
-    [ -n "$_targets" ] && [ -n "$_layer" ] || wt_die "用法: wtool pack-layer <项目> --layer=<层名> [--target=<os_ver>] [--out=<文件.tar.gz>]
-
-  把一个层打成**镜像形状**的 tar（root/.wtool/… + wtool-layer/OWNED.tsv），
-  **不联网**。可以直接 docker load，也可以用 wtool unpack-layer 解回 output/。"
-    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-pl.XXXXXX")
-    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
-    for _want in $_targets; do
-        _row=$(wt_resolve_project "$_want") || exit $?
-        _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
-        [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
-        [ -n "$_t" ] || wt_die "$_pid 没有 output 目标，用 --target= 指定"
-        _src="$_path/output/$_t/$_layer"
-        [ -d "$_src/payload" ] || wt_die "层不存在: $_src"
-        [ -n "$_out" ] || _out="$PWD/$(basename "$_path")-$(printf '%s' "$_layer" | tr '/' '-')-$_t.tar.gz"
-        wt_info "── $_pid  $_layer → $_out"
-        if wt_dry; then wt_step "[dry-run] tar（镜像形状）"; continue; fi
-        mkdir -p "$_scratch/stage/root/.wtool" "$_scratch/stage/wtool-layer"
-        cp -al "$_src/payload/." "$_scratch/stage/root/.wtool/" 2>/dev/null || \
-            cp -a "$_src/payload/." "$_scratch/stage/root/.wtool/"
-        cp -a "$_src/OWNED.tsv" "$_scratch/stage/wtool-layer/" 2>/dev/null || true
-        tar -czf "$_out" -C "$_scratch/stage" root wtool-layer
-        wt_step "写好 $(du -h "$_out" | cut -f1)"
-    done
+    wt_info "push-layer 完成（$_done 个项目）"
 }
 
 cmd_unpack_layer() {
-    _targets=""; _from=""; _t=""; _layer=""
+    _targets=""; _t=""; _layer=""; _outdir=""
     for arg in "$@"; do
         case $arg in
             --dry-run)  WTOOL_DRY_RUN=1 ;;
-            --from=*)   _from=${arg#--from=} ;;
             --layer=*)  _layer=${arg#--layer=} ;;
             --target=*) _t=${arg#--target=} ;;
+            --output=*) _outdir=${arg#--output=} ;;
             -*)         wt_die "未知参数: $arg" ;;
             *)          _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_targets" ] && [ -n "$_from" ] && [ -n "$_layer" ] || \
-        wt_die "用法: wtool unpack-layer <项目> --from=<文件.tar.gz> --layer=<层名> [--target=<os_ver>]
+    [ -n "$_targets" ] || wt_die "用法: wtool unpack-layer <项目> [--layer=<层名>] [--target=<os_ver>] [--output=<目录>]
 
-  把 pack-layer 打出来的文件（或 crane blob 下来的那一层）解回
-  <项目>/output/<target>/<层>/。**不联网**。"
-    [ -f "$_from" ] || wt_die "文件不存在: $_from"
+  把 <项目>/layer/<target>/ 里某一层的**顶层 blob** 解成安装产物：
+    → <项目>/output/<target>/<层>/{payload,OWNED.tsv}（--output= 可以指到别处）
+  **不需要 docker**（直接读 blob），也不联网。
+
+  这就是 ADR-025 那条分界：layer/ 里的镜像是**完整运行时**（一个字节都不丢），
+  output/ 才是**过滤过的安装产物** —— 白障（.wh.）在这里丢掉。
+  层名不给时：layout 里只有一个镜像就用它。"
     for _want in $_targets; do
         _row=$(wt_resolve_project "$_want") || exit $?
         _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
         [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
+        # output/ 可能还没建（unpack-layer 正是来建它的）—— 那就看 layer/ 里现成的 target 目录
+        if [ -z "$_t" ]; then
+            _lt=$(ls -d "$_path"/layer/*/ 2>/dev/null | head -1) || true
+            [ -n "$_lt" ] && _t=$(basename -- "$_lt")
+        fi
         [ -n "$_t" ] || wt_die "$_pid 没有 output 目标，用 --target= 指定"
-        wt_info "── $_pid  $_from → output/$_t/$_layer"
-        if wt_dry; then wt_step "[dry-run] 解开"; continue; fi
-        wt_layer_untar "$_from" "$_path/output/$_t/$_layer"
-        wt_step "解完：$(du -sh "$_path/output/$_t/$_layer" 2>/dev/null | cut -f1)"
+        _lay=$(wt_layer_dir "$_path" "$_t")
+        [ -f "$_lay/index.json" ] || wt_die "没有 $_lay —— 先 wtool layer-save（或 pull-layer）"
+
+        _blobinfo=$(wt_layer_last_blob "$_lay" "$_layer") || wt_die "$(wt_layer_last_blob "$_lay" "$_layer" 2>&1 >/dev/null)"
+        _blob=$(printf '%s\n' "$_blobinfo" | sed -n 1p)
+        _name=$(printf '%s\n' "$_blobinfo" | sed -n 2p)
+        [ -n "$_name" ] || _name=$(basename -- "$_blob")
+        _dst=${_outdir:-"$_path/output/$_t"}/$_name
+        wt_info "── $_pid  layer/$_t/$_name → ${_dst#$WTOOL_ROOT/}"
+
+        if wt_dry; then
+            wt_step "[dry-run] 读 $(basename -- "$_blob") → payload/ + OWNED.tsv"
+            continue
+        fi
+        [ -f "$_blob" ] || wt_die "blob 不在: $_blob"
+        wt_run rm -rf -- "$_dst"
+        wt_run mkdir -p -- "$_dst/payload"
+        # 层里的形状是容器内绝对路径（root/.wtool/…），payload 要的是**相对影子 $HOME**
+        # 的形状 —— 剥掉前两节。剥不干净就是"装上去路径全错"（症状：装完了敲命令找不到）。
+        chmod +x "$_dst/payload" 2>/dev/null || true
+        tar -xf "$_blob" -C "$_dst/payload" --strip-components=2 \
+            --wildcards 'root/.wtool/*' --exclude='*/.wh.*' 2>/dev/null || true
+        chmod -R a+rX "$_dst/payload" 2>/dev/null || true
+        wt_owned_scan "$_dst/payload" "$_name" "$_dst/OWNED.tsv" \
+            || wt_die "$_name 这一层不能用（上面列了原因）"
+        wt_step "解完：$(du -sh -- "$_dst" 2>/dev/null | cut -f1)（$(awk 'END{print NR}' "$_dst/OWNED.tsv") 个文件）"
     done
 }
 
@@ -2912,14 +3028,19 @@ case $_cmd in
     pack-release)   cmd_pack_release "$@" ;;
     unpack-release) cmd_unpack_release "$@" ;;
     publish-release) cmd_publish_release "$@" ;;
-    push-layers)   cmd_push_layers "$@" ;;
-    pull-layers)   cmd_pull_layers "$@" ;;
-    layer-save)    cmd_layer_save "$@" ;;
-    layer-load)    cmd_layer_load "$@" ;;
+    push-layer)    cmd_push_layer "$@" ;;
+    pull-layer)    cmd_pull_layer "$@" ;;
+    push-layers)   wt_die "push-layers 已改名 push-layer，而且**对象变了**：推的现在是 layer/<target>/ 里的**真镜像**（ADR-024），不是 output/ 打的假镜像。
+  敲：wtool push-layer <项目> [--registry=<前缀>]" ;;
+    pull-layers)   wt_die "pull-layers 已改名 pull-layer，而且**落点变了**：现在拉进 layer/<target>/（不再直接落 output/）。
+  wtool pull-layer   <项目> [--registry=<前缀>]   # 镜像仓库 → layer/
+  wtool unpack-layer <项目>                      # layer/ → output/（不需要 docker）" ;;
     pack-layer)    wt_die "pack-layer 已删除（ADR-024）：方向本来就是反的 —— 层是源，output 是层的导出物。
   现在两件事各有命令：
     wtool layer-save <项目> --image=<镜像>   # docker 镜像 → layer/<target>/
     wtool unpack-layer <项目>                # layer/<target>/ → output/" ;;
+    layer-save)    cmd_layer_save "$@" ;;
+    layer-load)    cmd_layer_load "$@" ;;
     unpack-layer)  cmd_unpack_layer "$@" ;;
     bootstrap) cmd_bootstrap "$@" ;;
     check)     cmd_check "$@" ;;
