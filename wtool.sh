@@ -366,30 +366,35 @@ wt_default_min_cores=4
 wt_default_min_mem_gb=8
 wt_default_min_disk_gb=10
 
+# 构建方式 + 门槛，**只有 planner 一个来源**（`<build>` 的解析在 wtool_plan.py）。
+# 这里曾经自己用 ElementTree 再解析一遍 wtool.xml —— 两份实现不一致的直接后果
+# 就是 BL-22（planner 把 <build> 判成"未知元素"、引擎却已经在读它）。
+# docker 二进制可覆盖（`WTOOL_DOCKER=<路径>`）—— 和 `WTOOL_SKOPEO` 一样，
+# 顺带让"这台机器没有 docker"能在测试里不装/不卸 docker 就验到。
+wt_docker()      { printf '%s\n' "${WTOOL_DOCKER:-docker}"; }
+wt_have_docker() { command -v "$(wt_docker)" >/dev/null 2>&1; }
+
+wt_build_kind() {   # <项目目录> → local | docker
+    _bk=$(python3 "$PY" publish-info "$1" --root "$WTOOL_ROOT" 2>/dev/null \
+          | awk -F'\t' '$1=="build"{print $2; exit}') || true
+    printf '%s\n' "${_bk:-local}"
+}
+
 wt_check_build_env() {   # <项目目录> <项目 id> → 不满足返回 1
     _ce_dir=$1; _ce_pid=$2
     _ce_cores=$wt_default_min_cores
     _ce_mem=$wt_default_min_mem_gb
     _ce_disk=$wt_default_min_disk_gb
 
-    # 项目自己在 wtool.xml 里声明的要求
-    _ce_xml="$_ce_dir/wtool.xml"
-    if [ -f "$_ce_xml" ]; then
-        _ce_vals=$(python3 - "$_ce_xml" <<'PYGATE' 2>/dev/null || true
-import sys, xml.etree.ElementTree as ET
-try:
-    root = ET.parse(sys.argv[1]).getroot()
-except Exception:
-    sys.exit(0)
-for b in root.iter("build"):
-    print(b.get("min-cores") or "", b.get("min-mem") or "", b.get("min-disk") or "")
-PYGATE
-)
-        [ -n "$_ce_vals" ] && set -- $_ce_vals && {
-            [ -n "${1:-}" ] && _ce_cores=$1
-            [ -n "${2:-}" ] && _ce_mem=$2
-            [ -n "${3:-}" ] && _ce_disk=$3
-        }
+    # 项目自己在 wtool.xml 的 <build min-cores= min-mem= min-disk=/> 里声明的要求
+    _ce_info=$(python3 "$PY" publish-info "$_ce_dir" --root "$WTOOL_ROOT" 2>/dev/null) || true
+    if [ -n "$_ce_info" ]; then
+        _ce_v=$(printf '%s\n' "$_ce_info" | awk -F'\t' '$1=="min_cores"{print $2; exit}')
+        [ -n "$_ce_v" ] && [ "$_ce_v" != "-" ] && _ce_cores=$_ce_v
+        _ce_v=$(printf '%s\n' "$_ce_info" | awk -F'\t' '$1=="min_mem_gb"{print $2; exit}')
+        [ -n "$_ce_v" ] && [ "$_ce_v" != "-" ] && _ce_mem=$_ce_v
+        _ce_v=$(printf '%s\n' "$_ce_info" | awk -F'\t' '$1=="min_disk_gb"{print $2; exit}')
+        [ -n "$_ce_v" ] && [ "$_ce_v" != "-" ] && _ce_disk=$_ce_v
     fi
 
     _ce_have_cores=$(nproc 2>/dev/null || echo 1)
@@ -422,9 +427,6 @@ PYGATE
     return 1
 }
 
-# 并行度按内存封顶。
-# 32 核配 16G 内存的机器很常见，WTOOL_JOBS=nproc 会让 nvim 的构建 OOM ——
-# 核心数只决定快慢，内存不够是直接失败。
 wt_effective_jobs() {
     # 默认就是 nproc —— 不要凭"32 核配 24G 大概会 OOM"这种猜测去砍并行度，
     # 那会让一台完全跑得动的机器慢上两倍多，而且没有任何测量依据。
@@ -445,8 +447,10 @@ wt_effective_jobs() {
 # --------------------------------------------------------------------------
 # build：跑项目自己的 build.sh
 #
-# 「能构建」这件事只有项目自己知道——编什么、要不要 docker、产物在哪。
-# 引擎不做任何假设，只负责找到脚本、把环境喂好、把输出原样透出来。
+# 「怎么构建」由项目在 `wtool.xml` 的 `<build kind="local|docker"/>` 里声明
+# （ADR-025）—— 引擎因此能在**动手之前**判断这台机器行不行（没 docker 就直接指路
+# `download-release`，需求 4），也能知道 `output/` 该长什么形状。
+# 具体编什么、产物在哪，仍然是脚本自己的事。
 # --------------------------------------------------------------------------
 cmd_build() {
     _targets=""
@@ -481,6 +485,7 @@ EOF
     [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目（试试 wtool build 看有哪些）"
 
     _done=0
+    _failed=0
     for _want in $_targets; do
         _row=$(wt_publish_resolve "$_want") || exit $?
         _pid=$(printf '%s\n' "$_row" | cut -f2)
@@ -493,7 +498,24 @@ EOF
         fi
         wt_info "  脚本 : scripts/build.sh"
         WTOOL_PROJECT_ID=$_pid
-        wt_check_build_env "$_path" "$_pid" || continue
+        _bkind=$(wt_build_kind "$_path")
+        wt_info "  方式 : $_bkind（wtool.xml 的 <build kind=\"...\"/>，ADR-025）"
+        if [ "$_bkind" = docker ] && ! wt_have_docker; then
+            # 需求 4 的机制化：声明是 docker 的构建，本机没有 docker = 编不了。
+            # 不等脚本跑到一半才 die，也不装傻继续。
+            wt_warn "$_pid 声明了 <build kind=\"docker\"/>，但这台机器上没有 docker —— 跳过。"
+            wt_step "拿现成的包（推荐）："
+            wt_step "  wtool download-release $_pid     # 发布页 → release/"
+            wt_step "  wtool unpack-release   $_pid     # release/ → output/"
+            wt_step "  wtool install          $_pid"
+            _failed=$((_failed + 1))
+            continue
+        fi
+        if ! wt_check_build_env "$_path" "$_pid"; then
+            wt_step "拿现成的包：wtool download-release $_pid && wtool unpack-release $_pid"
+            _failed=$((_failed + 1))
+            continue
+        fi
         WTOOL_JOBS=$(wt_effective_jobs)
         wt_info "  并行 : -j$WTOOL_JOBS（按内存封顶，nproc=$(nproc 2>/dev/null || echo ?)）"
         wt_record_action "$_pid" build
@@ -501,6 +523,12 @@ EOF
         _done=$((_done + 1))
     done
     wt_info "build 完成（$_done 个项目）"
+    # 因为环境不够（没 docker / 机器太弱）跳过的，不能报成功 ——
+    # "什么也没干却退出 0"是最容易骗过调用方的一种失败。
+    [ "$_failed" -eq 0 ] || {
+        wt_warn "$_failed 个项目没能构建 —— 上面写了各自的出路"
+        return 1
+    }
 }
 
 # --------------------------------------------------------------------------
@@ -2314,8 +2342,10 @@ cmd_publish_release() {
 
         # 发布声明：**提交进仓库**的 scripts/release.json（ADR-026）。
         # 它是 download-release 唯一要读的东西，所以必须在上传成功之后才写。
-        _targets=$(ls -d "$_path"/output/*/ 2>/dev/null |
-                   while read -r _t; do basename -- "$_t"; done | paste -sd, -)
+        # targets[] 的形状由 <build kind> 决定（ADR-025）—— 判据在 planner 里
+        # （`release-targets`），shell 不再自己扫 output/*/：kind="local" 的项目
+        # 那样扫出来的是**层名**（"bin"/"main"），是假信息。
+        _targets=$(python3 "$PY" release-targets "$_path" 2>/dev/null || true)
         # "$_dirty" 已经扣掉 wtool 自己生成的文件（release.json / download.md）
         _dirty_flag=0
         [ -n "$_dirty" ] && _dirty_flag=1
@@ -2569,10 +2599,10 @@ wt_layer_dir() { printf '%s/layer/%s\n' "$1" "$2"; }   # <项目目录> <target>
 wt_layer_import() {   # <项目目录> <target> <镜像> <层名>
     _li_dir=$(wt_layer_dir "$1" "$2")
     _li_img=$3; _li_name=$4
-    command -v docker >/dev/null 2>&1 || wt_die "layer-save 需要 docker（它要把镜像从 docker 里导出来）"
-    docker image inspect "$_li_img" >/dev/null 2>&1 || wt_die "docker 里没有这个镜像: $_li_img"
+    wt_have_docker || wt_die "layer-save 需要 docker（它要把镜像从 docker 里导出来）"
+    "$(wt_docker)" image inspect "$_li_img" >/dev/null 2>&1 || wt_die "docker 里没有这个镜像: $_li_img"
     _li_tmp=$(mktemp -d "${TMPDIR:-/tmp}/wtool-lsave.XXXXXX") || return 1
-    if ! docker save "$_li_img" | tar -x -C "$_li_tmp"; then
+    if ! "$(wt_docker)" save "$_li_img" | tar -x -C "$_li_tmp"; then
         rm -rf -- "$_li_tmp"; return 1
     fi
     wt_run mkdir -p -- "$_li_dir/blobs/sha256"
@@ -2620,8 +2650,8 @@ PY
 wt_layer_load() {   # <项目目录> <target>
     _ll_dir=$(wt_layer_dir "$1" "$2")
     [ -f "$_ll_dir/index.json" ] || wt_die "没有 $_ll_dir —— 先 wtool layer-save（或 pull-layer）"
-    command -v docker >/dev/null 2>&1 || wt_die "layer-load 需要 docker"
-    wt_run tar -c -C "$_ll_dir" . | docker load
+    wt_have_docker || wt_die "layer-load 需要 docker"
+    wt_run tar -c -C "$_ll_dir" . | "$(wt_docker)" load
 }
 
 cmd_layer_save() {
@@ -2880,7 +2910,7 @@ cmd_push_layer() {
      docker push 分块 5MB 才过得去。构建机上本来就有 docker（ADR-024 §8）。"
     [ -n "$_reg" ] || _reg=${WTOOL_LAYER_REGISTRY:-}
     [ -n "$_reg" ] || wt_die "没给 registry：--registry=<前缀> 或 export WTOOL_LAYER_REGISTRY=<前缀>"
-    command -v docker >/dev/null 2>&1 || wt_die "push-layer 要 docker（crane push 推不了大 blob，见 hazards O1）"
+    wt_have_docker || wt_die "push-layer 要 docker（crane push 推不了大 blob，见 hazards O1）"
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-push.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
@@ -2915,7 +2945,7 @@ cmd_push_layer() {
 
         # 布局 → docker（tar 只当管道；镜像名字由 index.json 里 docker 自己写的
         # io.containerd.image.name 还原），再从 docker 推上去。
-        wt_run tar -c -C "$_lay" . | docker load > "$_scratch/load.log" 2>&1 || {
+        wt_run tar -c -C "$_lay" . | "$(wt_docker)" load > "$_scratch/load.log" 2>&1 || {
             tail -5 -- "$_scratch/load.log" >&2
             wt_die "布局装不回 docker（$_lay）"
         }
@@ -2926,8 +2956,8 @@ cmd_push_layer() {
             [ "$_limg" != "-" ] || wt_die "层 $_l 不知道对应 docker 里的哪个镜像（layout 是旧版写的）。
   重新存一次：wtool layer-save <项目> --image=<镜像> --layer=$_l"
             _tag=$(wt_layer_tag "$_l" "$_only_t")
-            wt_run docker tag "$_limg" "$_repo:$_tag" || wt_die "docker tag $_limg → $_repo:$_tag 失败"
-            if ! docker push "$_repo:$_tag" > "$_scratch/push.log" 2>&1; then
+            wt_run "$(wt_docker)" tag "$_limg" "$_repo:$_tag" || wt_die "docker tag $_limg → $_repo:$_tag 失败"
+            if ! "$(wt_docker)" push "$_repo:$_tag" > "$_scratch/push.log" 2>&1; then
                 tail -5 -- "$_scratch/push.log" >&2
                 wt_die "推 $_tag 失败 —— dockerd 的代理配好了吗？（hazards O2）"
             fi

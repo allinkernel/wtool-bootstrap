@@ -30,9 +30,9 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 8 组 / 403 条断言
+./tests/run_all.sh                    # 8 组 / 417 条断言
                                       # pairing 35 / sudo-install 24 / publish 114 / table 43
-                                      # release-copy 17 / release 62 / contract 69 / layer 39
+                                      # release-copy 17 / release 62 / contract 83 / layer 39
 ```
 
 ---
@@ -103,6 +103,11 @@ wtool doctor
 
 - `sh`（POSIX）、`python3`（3.6+，只用标准库）、`git`
 - 不用 PyYAML / 不用 TOML：清单是 XML，解析走 `xml.etree`
+
+**构建方式写在清单里**（`<build kind="local|docker"/>`，ADR-025）：引擎因此能在动手之前
+判断这台机器行不行 —— `kind="docker"` 而没有 docker 时 `wtool build` 直接拒绝并指路
+`download-release`（退出码非 0），kind 还决定 `output/` 有没有 `<os>_<ver>/` 那一层。
+`WTOOL_DOCKER=<路径>` 可以指定 docker 二进制。
 
 ## 当前状态
 

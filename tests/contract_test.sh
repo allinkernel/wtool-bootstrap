@@ -425,6 +425,90 @@ case $_m in
 esac
 
 # --------------------------------------------------------------------------
+printf '\n== 场景 9：<build kind="local|docker"/>（ADR-025）==\n'
+#   kind 决定两件事：这台机器行不行（没 docker 直接指路 download-release）、
+#   output/ 是什么形状（release.json 的 targets[] 跟着它走）。
+newhome
+mkdir -p "$WTOOL_ROOT"
+
+mkbuildproj() {   # <相对路径> <id> <build 标签行>
+    _d=$(mkproj "$1" "$2")
+    mkdir -p "$_d/scripts"
+    cat > "$_d/scripts/build.sh" <<'BEOF'
+#!/bin/sh
+echo "ran" > "$WTOOL_PROJECT_DIR/build-ran.txt"
+mkdir -p "$WTOOL_PROJECT_DIR/output/$WTOOL_BUILD_LAYER"
+printf 'x\n' > "$WTOOL_PROJECT_DIR/output/$WTOOL_BUILD_LAYER/out.bin"
+BEOF
+    chmod +x "$_d/scripts/build.sh"
+    printf '%s\n' "$3" > "$_d/buildline"
+    {
+        printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+        printf '<wtool schema="1" id="%s" priority="50">\n' "$2"
+        cat "$_d/buildline"
+        printf '</wtool>\n'
+    } > "$_d/wtool.xml"
+    rm -f "$_d/buildline"
+    echo "$_d"
+}
+
+# ① 非法 kind：validate 必须拒绝（顺带证明 <build> 不再是"未知元素" —— BL-22）
+PD=$(mkbuildproj "editor/dockerproj" "editor/dockerproj" '<build kind="podman"/>')
+_rc=0
+_out=$("$WT" validate "$PD" 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "<build kind=\"podman\"> 被 validate 拒绝" || bad "非法 kind 居然过了"
+case $_out in
+    *"只能是 local / docker"*) ok "报错说清了合法值" ;;
+    *) bad "没说清合法值" "$_out" ;;
+esac
+# 顺带：<build> 本身是认识的标签了（BL-22 的症状是 error: 未知元素 <build>）
+case $_out in
+    *"未知元素"*) bad "validate 仍把 <build> 当未知元素（BL-22 回来了）" "$_out" ;;
+    *) ok "<build> 不再是未知元素（BL-22）" ;;
+esac
+
+# ② kind=docker + 没有 docker：拒绝、说原因、指路 download-release，**脚本不许跑**
+WTB=$(mkbuildproj "editor/dockerproj" "editor/dockerproj" '<build kind="docker"/>')
+export WTOOL_BUILD_LAYER=main
+_rc=0
+_out=$(WTOOL_DOCKER=/nonexistent/wtool-docker "$WT" build "$WTB" 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "没 docker 时 build 退出码非 0（不当成成功）" || bad "没 docker 也报成功"
+case $_out in
+    *docker*) ok "说清了缺的是 docker" ;;
+    *) bad "没说缺 docker" "$_out" ;;
+esac
+case $_out in
+    *"download-release"*) ok "指了路：download-release" ;;
+    *) bad "没指路下载" "$_out" ;;
+esac
+[ -f "$WTB/build-ran.txt" ] && bad "build.sh 居然跑了（白等一场）" || ok "build.sh 没跑（动手之前就拦住）"
+
+# ③ 同一台机器上 kind=local（显式写）照跑
+PL=$(mkbuildproj "editor/localproj" "editor/localproj" '<build kind="local" min-cores="1" min-mem="1" min-disk="1"/>')
+_rc=0
+_out=$(WTOOL_DOCKER=/nonexistent/wtool-docker "$WT" build "$PL" 2>&1) || _rc=$?
+chk "kind=local：没有 docker 也编" "$_rc" "0"
+[ -f "$PL/build-ran.txt" ] && ok "build.sh 跑了" || bad "local 项目没跑起来" "$_out"
+chk "<build> 里的 min-* 是认识的（BL-22：不再报未知元素）" \
+    "$("$WT" validate "$PL" >/dev/null 2>&1 && echo ok || echo bad)" "ok"
+
+# ④ 不写 <build> = local（默认），也不要求 docker
+PN=$(mkbuildproj "editor/nobuildtag" "editor/nobuildtag" '<!-- 没有 <build> -->')
+_rc=0
+WTOOL_DOCKER=/nonexistent/wtool-docker "$WT" build "$PN" >/dev/null 2>&1 || _rc=$?
+chk "不写 <build> 时默认 local，不要求 docker" "$_rc" "0"
+
+# ⑤ 形状由声明决定：targets[] 的来源
+chk "local 项目的 targets 是空的（不把层名当 target）" "" \
+    "$(python3 "$boot/lib/wtool_plan.py" release-targets "$PL")"
+mkdir -p "$WTB/output/ubuntu_22.04/main" "$WTB/output/ubuntu_24.04/main"
+chk "docker 项目的 targets 就是 output/<os>_<ver>/ 的名字" "ubuntu_22.04,ubuntu_24.04" \
+    "$(python3 "$boot/lib/wtool_plan.py" release-targets "$WTB")"
+mkdir -p "$PL/output/main" "$PL/output/lang-lua"      # local：层名不是 target
+chk "local 项目就算 output/ 里有多个目录，targets 还是空" "" \
+    "$(python3 "$boot/lib/wtool_plan.py" release-targets "$PL")"
+
+# --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 printf 'contract_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

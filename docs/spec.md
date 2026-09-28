@@ -56,7 +56,7 @@
   wtool download-release [<项目>...|all] [--dry-run]      GitHub Release → release/（**只下载**）
   wtool unpack-release <项目>... [--from=目录]             release/ → output/（**不联网**）
 
-层（第二条发布通道：容器镜像仓库，详见 §13）
+层（第二条发布通道：容器镜像仓库，详见 §14）
   wtool layer-save   <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
                       docker 镜像 → layer/<target>/（OCI 布局，blob 按 sha256 去重）
   wtool layer-load   <项目> [--target=<os_ver>]
@@ -98,7 +98,7 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 | `wtool download` | `wtool download-release` + `wtool unpack-release` | 以前一步到 `output/`；现在只把包下到 `release/`，解包是另一条命令 |
 | `wtool publish` | `wtool pack-release` + `wtool publish-release` | 以前打包 + 上传一条命令；现在只上传 `release/` 里已有的东西 |
 
-`wtool init` 的 `--with-download` / `--with-publish` 同样取消（项目脚本只剩两种，见 §13）。
+`wtool init` 的 `--with-download` / `--with-publish` 同样取消（项目脚本只剩两种，见 §14）。
 
 ### 两个角色：声明链接 vs 稳定地址
 
@@ -306,7 +306,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | 承诺 | 做法 |
 |---|---|
 | 未知 `schema` → 拒绝并提示升级 bootstrap | `SCHEMA_SUPPORTED` 白名单 |
-| 未知元素 → 报错（而不是静默忽略），**`x-*` 也一样报错** | 避免拼写错误悄悄生效。`<wtool>` 里**没有**"留给用户的自定义元素"这回事：`lib/wtool_plan.py:414-416` 对任何不认识的标签都拒绝（实测 `<x-note>` → `error: 未知元素 <x-note>`，退出码 1） |
+| 未知元素 → 报错（而不是静默忽略），**`x-*` 也一样报错** | 避免拼写错误悄悄生效。`<wtool>` 里**没有**"留给用户的自定义元素"这回事：`lib/wtool_plan.py` 对任何不认识的标签都拒绝（实测 `<x-note>` → `error: 未知元素 <x-note>`，退出码 1）。报错本身给出真出路（`<include src="wtool.local.xml" optional="true"/>`），**不再**教人写 `x-*`（那是它刚拒绝的东西，照做还是同一个错 —— BL-23） |
 | 未知属性 → 目前静默忽略 | 便于老引擎读新清单的"降级运行" |
 | **旧标签继续认，但一定警告** | `<env>` / `<link src= dest=>` / `<provision>` / `<system-file>` 解析照旧，`validate` 和每次解析都提示改成新标签；等所有项目迁完再删兼容分支 |
 | **删掉的命令不给兼容窗口** | `download` / `publish` 直接 `die` + 指路（语义变了，见 §1）；`provision` / `table` / `list` / `env` / `scaffold` 同理 |
@@ -338,10 +338,10 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 69 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill |
+| contract | `tests/contract_test.sh` | 83 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
 | layer | `tests/layer_test.sh` | 39 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **403** 条断言：
+共 **417** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 8 组全跑
@@ -503,7 +503,30 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 ---
 
-## 13. 发布层：release 的四条边
+## 13. 构建层：`<build kind>` 决定形状（ADR-025）
+
+`wtool build` 只做三件事：找 `scripts/build.sh`、**判断这台机器够不够**、把环境喂好跑它。
+
+| 声明 | `output/` 的形状 | `wtool build` 的前置判断 |
+|---|---|---|
+| `<build kind="local"/>`（默认） | `output/<层>/…`（**没有** target 那一层） | 只查 `min-cores` / `min-mem` / `min-disk` |
+| `<build kind="docker"/>` | `output/<os>_<ver>/<层>/…` | 同上，**外加**：没有 docker 直接拒绝 |
+
+- **拒绝发生在动手之前**：`build.sh` 一行都不会跑。理由见需求 4 —— 在一台编不了的机器上
+  跑一小时再失败是最坏的体验，所以引擎读声明就知道，并给出可复制的出路
+  （`download-release` → `unpack-release` → `install`）
+- **拒绝时退出码非 0**：`wtool build all` 里别的项目照编，但整条命令不算成功
+  （"什么也没干却退出 0"是最容易骗过调用方的一种失败）
+- 门槛不写就用引擎默认值（4 核 / 8G 内存 / 10G 磁盘）；`--force` 可以把门槛降级成警告，
+  **但不能把"没有 docker"变成能编**
+- **形状由声明唯一确定，引擎不嗅探**：`release.json` 的 `targets[]` 就是按它算的
+  （`local` → 空；`docker` → `output/*/` 的目录名）。`local` 项目就算 `output/` 下有
+  `bin/`、`main/` 这样的目录，也不会被当成"发行版"
+- `WTOOL_DOCKER=<路径>` 可以指定 docker 二进制（和 `WTOOL_SKOPEO` 一个路子）
+
+---
+
+## 14. 发布层：release 的四条边
 
 `install` 管"这台机器上装好了没有"，`sudo-install` 管"系统层面备齐了没有"，
 发布层管"这些东西怎么到另一台机器上"。
@@ -568,7 +591,7 @@ apt-get update && apt-get install -y --no-install-recommends \
 `scripts/download.sh` / `scripts/publish.sh` / `scripts/extract.sh` **全部退休**（ADR-023）：
 下载归 `download-release` + `unpack-release`，打包上传归 `pack-release` + `publish-release`，
 所有项目走同一条引擎实现的路，项目侧不再各写一遍（曾经有个项目的 `download.sh` 815 行）。
-**"文件存在即能力声明"这条原则不变，但只有这两种**（判定见 §14）。
+**"文件存在即能力声明"这条原则不变，但只有这两种**（判定见 §15）。
 
 ### `<publish>`：只表达文件表达不了的两件事
 
@@ -704,7 +727,7 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 - `layer/` 只对 `kind="docker"` 的项目存在（见 ADR-025）；`layer/` 是**项目资产**，
   docker 存储只是缓存 —— `docker system prune` 之后 `layer-load` 就装回来
 
-## 14. 能力表格
+## 15. 能力表格
 
 裸跑 `wtool`（不带参数）打印这张表；`wtool table` 这个名字**已经删掉**，
 敲它只会告诉你裸跑 `wtool`：
@@ -750,7 +773,7 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 
 **"文件存在即能力声明"**：新建一个空的 `scripts/build.sh` 会让那一列
 立刻从「不支持」变成「可执行」。这是有意的 —— 能力由项目自己声明，
-引擎不去猜。**但只有 `build.sh` / `install.sh` 这两种算数**（§13）。
+引擎不去猜。**但只有 `build.sh` / `install.sh` 这两种算数**（§15）。
 
 **这几者要分开记：** 能力有无是**静态的**（看项目文件，不随运行变化），
 `已完成` 是**动态的**（看状态目录），`待产出` 看**磁盘**（`output/`）。
@@ -762,7 +785,7 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 
 ---
 
-## 15. 出问题时：check / repair / kill-self-forever
+## 16. 出问题时：check / repair / kill-self-forever
 
 ### `wtool check [<项目>]`
 

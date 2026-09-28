@@ -272,9 +272,12 @@ print(",".join(k for k in need if k not in d))' "$RJ")" ""
         "$(wt "$T/bin" "$WS1" "$ST1" version | awk '{print $3}')"
     chk "dirty=false（只有 wtool 自己生成的文件是新的）" \
         "$(J 'import json,sys;print(str(json.load(open(sys.argv[1]))["dirty"]).lower())' "$RJ")" "false"
-    chk "targets[].target 从 output/*/ 目录名来" "$(J '
+    # ADR-025：形状由 <build kind> 决定，引擎不嗅探。这个项目**没有** <build>
+    # （= kind="local"），output/ 下是 output/bin/ 这种**层名**而不是 <os>_<ver>/
+    # —— 硬扫出来当 target 就是假信息，所以 targets 必须是空的。
+    chk "没写 <build>（=local）→ targets 是空的，不把层名当 target" "$(J '
 import json, sys
-print(",".join(t["target"] for t in json.load(open(sys.argv[1]))["targets"]))' "$RJ")" "bin"
+print(",".join(t["target"] for t in json.load(open(sys.argv[1]))["targets"]))' "$RJ")" ""
     chk "assets 的每个资产都有 name/role/bytes/sha256" "$(J '
 import json, sys
 need = ("name", "role", "bytes", "sha256")

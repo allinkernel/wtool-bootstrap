@@ -30,12 +30,49 @@
 | `<sudo-install src="x.conf" dest="/etc/x.conf"/>` | 系统层：`/etc` 下的文件（可逆，备份/还原） |
 | `<sudo-install kind="apt-mirror" mirror="ustc" dest="auto"/>` | 系统层：引擎按发行版生成内容（换源） |
 | `<source url= ref= />` | 上游源码：clone → 固定 ref → 建本地分支 → 铺 overlay |
+| `<build kind="local\|docker"/>` | 构建方式（ADR-025）：`local` 本地直接编（默认）、`docker` 每个发行版一个容器分层构建。可带 `min-cores=` / `min-mem=` / `min-disk=` 门槛 |
 | `<publish kind= to= />` | 怎么发布（默认 `source`）：推到本项目 remote，或 `to=` 指定的仓、`kind="none"` 不发布 |
 | `<include src= optional= />` | 拆清单 |
 
 <small>⚠️ 表外的标签**一律报错**，`x-*` 也不行 —— 见文末「自定义元素」。
 （旧版这张表里写过"`x-*` 自定义"，**那是错的**：`lib/wtool_plan.py:414-416` 对任何未知标签
 都拒绝，实测 `<x-note>` → `error: 未知元素 <x-note>`、退出码 1。）</small>
+
+---
+
+## `<build>` —— 构建方式
+
+```xml
+<build kind="local"/>                                    <!-- 默认：本地直接编 -->
+<build kind="docker" min-cores="8" min-mem="16" min-disk="40"/>
+```
+
+| 属性 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `kind` | 否 | `local` | `local` = 本地直接编，产物天然跨发行版；`docker` = 每个发行版一个容器、分层构建。**别的值一律报错** |
+| `min-cores` | 否 | 引擎默认 4 | 这台机器至少几个核，不够就拒绝构建并指路 `download-release` |
+| `min-mem` | 否 | 引擎默认 8 | 内存 GB 数（按 `/proc/meminfo` 的 MemTotal 算） |
+| `min-disk` | 否 | 引擎默认 10 | `$HOME` 所在分区至少剩多少 GB |
+
+`kind` 决定**两件事**，引擎因此不用猜（ADR-025）：
+
+1. **这台机器行不行** —— `kind="docker"` 而机器上没有 docker，
+   `wtool build` 在**动手之前**就拒绝（`build.sh` 一行都不会跑），
+   并给出 `download-release` + `unpack-release` + `install` 三条命令。
+   这台机器够不够编，同样在跑脚本之前判断（不够就加 `--force` 硬上）。
+2. **`output/` 的形状**：
+
+   | kind | `output/` 下是什么 |
+   |---|---|
+   | `local` | `output/<层>/…` —— **没有** `<os>_<ver>/` 那一层 |
+   | `docker` | `output/<os>_<ver>/<层>/…` |
+
+   形状**由声明唯一确定**：`release.json` 的 `targets[]` 就是按这个算的
+   （`local` → 空；`docker` → `output/*/` 的目录名）。所以 `local` 项目的
+   `output/` 里就算有 `bin/`、`main/` 这种目录，也不会被当成"发行版"。
+
+> 只声明 kind，**targets 和层清单不进 XML** —— 那是项目数据（住项目自己的清单文件），
+> XML 是给引擎看的声明面。见 `harness/docs/adr/0025`。
 
 ---
 
@@ -248,10 +285,16 @@ state），还原依据单独记在 `system.tsv`；apt 包按"跑前跑后的已
 
 repo 的 manifest 用 `x-*` 把命名空间留给用户，`wtool.xml` **故意不跟**：
 清单是引擎要逐条执行的动作表，一条没被理解的声明**静默丢掉**比报错危险得多。
-2026-09-27 实测：清单里放 `<x-note/>` → `error: 未知元素 <x-note>`，退出码 1。
 
-要放机器本地差异，用 `<include src="wtool.local.xml" optional="true"/>`
-（那个文件不入库），别指望自定义标签。
+报错本身就会指路（2026-09-28 起，BL-23）—— 它不再教人写 `x-*`（那正是它刚拒绝的东西，
+照着改还是同一个错），而是给出真出路：
+
+```
+error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元素（x-* 也拒绝），
+       机器本地差异请用 <include src="wtool.local.xml" optional="true"/>
+```
+
+机器本地差异就是那个 `wtool.local.xml`（不入库）。
 
 ---
 
@@ -269,6 +312,7 @@ repo 的 manifest 用 `x-*` 把命名空间留给用户，`wtool.xml` **故意�
 | 落点在磁盘上不存在，或已是正确的软链 | 拒绝（`--force` 备份后接管） |
 | 有 `build.sh` 就必须有非空的 `output/` | 拒绝（`--force` 降级为警告） |
 | `<publish kind=…>` 只能是 `source` / `none`；不能有 `script=` | 拒绝 |
+| `<build kind=…>` 只能是 `local` / `docker`；`min-cores` / `min-mem` / `min-disk` 必须是正整数 | 拒绝 |
 | 旧标签 | 警告（能装，但提醒改成新标签） |
 
 ---

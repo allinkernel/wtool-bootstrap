@@ -34,6 +34,9 @@ import xml.etree.ElementTree as ET
 ENGINE_VERSION = "1.0.0"
 SCHEMA_SUPPORTED = (1,)
 DEFAULT_PRIORITY = 100
+# <build kind=...>：构建方式（ADR-025）。local = 本地直接编、产物天然跨发行版；
+# docker = 每个发行版一个容器、分层构建。默认 local（不写就是本地编）。
+BUILD_KINDS = ("local", "docker")
 
 # ---------------------------------------------------------------------------
 # 引擎自用目录：~/.wtool/wtool-work-dir/
@@ -177,6 +180,11 @@ def parse_manifest(path, project_root, errors, warnings=None):
         # "声明了不发布" 和 "压根没声明"。
         "publish": {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
                     "asset": "", "subs": [], "targets": [], "_declared": False},
+        # <build kind=...>：**只有 kind 进 XML**，targets / 层清单是项目数据（ADR-025）。
+        # 三个 min-* 是"这台机器够不够"的门槛，引擎有默认值兜底（wtool.sh 的
+        # wt_default_min_*），所以这里 None = 没声明。
+        "build": {"kind": "local", "min_cores": None, "min_mem_gb": None,
+                  "min_disk_gb": None, "_declared": False},
     }
 
     entries = []
@@ -246,6 +254,39 @@ def _parse_publish(node, meta, manifest_path, errors):
                           % (child.tag, manifest_path))
 
     meta["publish"] = info
+
+
+def _parse_build(child, meta, manifest_path, errors):
+    """`<build kind="local|docker" min-cores= min-mem= min-disk=/>`（ADR-025）。
+
+    `kind` 决定 `output/` 的形状：`local` 没有 `<os>_<ver>/` 那一层，`docker` 有。
+    形状**由声明唯一确定**，引擎不再嗅探（ADR-025 第 2 条）。
+
+    三个 `min-*` 是"这台机器够不够跑这个构建"的门槛（引擎侧有默认值），
+    跟 `kind` 写在同一个标签里是因为它们描述的是同一件事：**这个构建要什么**。
+    """
+    info = meta["build"]
+    info["_declared"] = True
+
+    kind = (child.get("kind") or "local").strip()
+    if kind not in BUILD_KINDS:
+        errors.append("<build kind=%r> 只能是 %s（%s）"
+                      % (child.get("kind"), " / ".join(BUILD_KINDS), manifest_path))
+    else:
+        info["kind"] = kind
+
+    for attr, key in (("min-cores", "min_cores"), ("min-mem", "min_mem_gb"),
+                      ("min-disk", "min_disk_gb")):
+        if child.get(attr) is None:
+            continue
+        val = _int_attr(child, attr, None, errors, "<build>")
+        if val is None:
+            info[key] = None
+        elif val <= 0:
+            errors.append("<build %s=%r> 必须是正整数（%s）" % (attr, child.get(attr),
+                                                          manifest_path))
+        else:
+            info[key] = val
 
 
 def effective_publish(path, pub):
@@ -381,6 +422,9 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                                  desc=child.get("desc") or "",
                                  manifest=manifest_path))
 
+        elif tag == "build":
+            _parse_build(child, meta, manifest_path, errors)
+
         elif tag == "publish":
             # `<publish>` 现在只表达两件文件表达不了的事：推到别的仓（to=）、
             # 不发布（kind="none"）。`kind="script"` / `script=` 已经取消（ADR-023）。
@@ -407,7 +451,10 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                             errors, depth + 1, warnings=warnings)
 
         else:
-            errors.append("未知元素 <%s>（%s）；自定义元素请用 x-* 前缀"
+            # ‼️ 别再写"自定义元素请用 x-* 前缀"：本解析器对 x-* 一样拒绝 ——
+            # 照着改还是同一个错（BL-23）。真出路是 <include>（机器本地差异）。
+            errors.append("未知元素 <%s>（%s）；wtool.xml 没有自定义元素（x-* 也拒绝），"
+                          "机器本地差异请用 <include src=\"wtool.local.xml\" optional=\"true\"/>"
                           % (tag, manifest_path))
 
 
@@ -2112,7 +2159,9 @@ def publish_info(project_dir, ws_root=None):
         meta = {"id": None, "priority": DEFAULT_PRIORITY,
                 "publish": {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
                             "to": "", "asset": "", "subs": [], "targets": [],
-                            "_declared": False}}
+                            "_declared": False},
+                "build": {"kind": "local", "min_cores": None, "min_mem_gb": None,
+                          "min_disk_gb": None, "_declared": False}}
     pub = effective_publish(root, meta["publish"])
     # 没有 wtool.xml 的项目用"相对工作区的路径"当 id，和 plan_install 的约定一致
     _ws = ws_root or os.environ.get("WTOOL_ROOT") or root
@@ -2127,6 +2176,12 @@ def publish_info(project_dir, ws_root=None):
     print("tag\t%s" % (pub.get("tag") or DEFAULT_PUBLISH_TAG))
     print("to\t%s" % (pub.get("to") or "-"))
     print("asset\t%s" % (pub.get("asset") or "-"))
+    # 构建方式（ADR-025）：kind 决定 output/ 的形状，min-* 决定这台机器够不够
+    _bld = meta.get("build") or {}
+    print("build\t%s" % (_bld.get("kind") or "local"))
+    print("min_cores\t%s" % (_bld.get("min_cores") if _bld.get("min_cores") else "-"))
+    print("min_mem_gb\t%s" % (_bld.get("min_mem_gb") if _bld.get("min_mem_gb") else "-"))
+    print("min_disk_gb\t%s" % (_bld.get("min_disk_gb") if _bld.get("min_disk_gb") else "-"))
     for sub in pub.get("subs", []):
         print("sub\t%s\t%s\t%s" % (sub["path"], sub["kind"], sub["to"] or "-"))
     for tgt in pub.get("targets", []):
@@ -2399,6 +2454,34 @@ def _downloadable_rows(rows):
         else:
             out.append(row)
     return out
+
+
+def release_targets(project_dir):
+    """`release.json` 的 `targets[]` —— **形状由声明决定，引擎不嗅探**（ADR-025）。
+
+    | `<build kind>` | `output/` 的形状 | targets[] |
+    |---|---|---|
+    | `docker` | `output/<os>_<ver>/<层>/…` | 每个 `<os>_<ver>` 一个名字 |
+    | `local`  | `output/<层>/…`（没有 target 那一层） | **空** |
+
+    `kind="local"` 时如果照旧扫 `output/*/`，扫出来的是**层名**（"bin"、"main"）
+    —— 那是假信息：对静态链接的产物来说，"这一版是给哪个发行版的"根本不存在。
+    """
+    root = os.path.abspath(project_dir)
+    errors = []
+    meta = None
+    if os.path.isfile(os.path.join(root, "wtool.xml")):
+        meta, _entries = parse_manifest(os.path.join(root, "wtool.xml"), root, errors)
+    kind = ((meta or {}).get("build") or {}).get("kind") or "local"
+    if kind != "docker":
+        return ""
+    out = os.path.join(root, "output")
+    try:
+        names = sorted(d for d in os.listdir(out)
+                       if os.path.isdir(os.path.join(out, d)))
+    except OSError:
+        return ""
+    return ",".join(names)
 
 
 def release_json(args):
@@ -2824,6 +2907,9 @@ def build_parser():
     wd.add_argument("--volume-size", default=DEFAULT_VOLUME_SIZE)
     wd.add_argument("--declare", default="")
 
+    rt = sub.add_parser("release-targets")
+    rt.add_argument("project_dir")
+
     rj = sub.add_parser("release-json")
     rj.add_argument("--release-dir", required=True)
     rj.add_argument("--dist", default="")
@@ -2922,6 +3008,8 @@ def main(argv):
             dist = write_dist(args)
             print("dist      : %s（%d 个文件，%d 个分卷）"
                   % (args.out, len(dist["files"]), len(dist["volumes"])))
+        elif args.cmd == "release-targets":
+            print(release_targets(args.project_dir))
         elif args.cmd == "release-json":
             release_json(args)
         elif args.cmd == "download-doc":
