@@ -193,6 +193,13 @@ chk "软链记成 L:<原值>（不是跟随目标算 sha256）" "L:demo" \
 chk "普通文件记的是 sha256" "$(sha256sum "$O/payload/usr/bin/demo" | cut -d' ' -f1)" \
     "$(awk -F'\t' '$1=="usr/bin/demo"{print $2}' "$O/OWNED.tsv")"
 
+# ★ OWNED.tsv 里**不许**出现扫描器自己的临时文件（它扫完就删了，留着会让 install
+#   去校验一个不存在的文件）。2026-09-28 用真 astronvim 的层彩排时现的原形：每层都多 1 条。
+chk "★OWNED.tsv 里没有扫描器的临时文件" "0" \
+    "$(grep -c 'escaping-links' "$O/OWNED.tsv" 2>/dev/null || true)"
+chk "payload 里也没有它" "0" \
+    "$(find "$O/payload" -name '.escaping-links*' | wc -l | tr -d ' ')"
+
 printf '\n== 7. 指向 payload 外面的软链 = 这一层不能用（直接失败）==\n'
 mkdir -p "$T/bad/root/.wtool/usr/bin"
 ln -s /etc/hostname "$T/bad/root/.wtool/usr/bin/escape"

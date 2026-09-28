@@ -3326,8 +3326,12 @@ INNER_PY
 # ⚠️ 指向 payload **外面**的软链换台机器必然是断的 —— 这一层不能用，直接失败。
 wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径>
     _os_pay=$1; _os_name=$2; _os_out=$3
-    _os_esc="$_os_pay/.escaping-links.$$"
-    : > "$_os_esc"
+    # ‼️ 这个临时文件必须放在 **payload 外面**：放在里面的话，下面那条 find 会把
+    #    **它自己**也扫进去 —— 于是每一层的 OWNED.tsv 都多出一条
+    #    `.escaping-links.<pid>`，而那个文件扫完就被删了。后果不只是脏数据：
+    #    install.sh 会拿它去校验，直接报 "FAILED open or read" 装不上。
+    #    （2026-09-28 用真 astronvim 的层彩排时现的原形：每层都正好多 1 条。）
+    _os_esc=$(mktemp "${TMPDIR:-/tmp}/wtool-esc.XXXXXX")
     ( cd -- "$_os_pay" && find . -type f -o -type l | sed 's|^\./||' | LC_ALL=C sort ) \
     | while IFS= read -r _os_f; do
         _os_p="$_os_pay/$_os_f"
