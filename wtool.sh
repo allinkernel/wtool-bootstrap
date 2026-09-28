@@ -374,10 +374,15 @@ wt_default_min_disk_gb=10
 wt_docker()      { printf '%s\n' "${WTOOL_DOCKER:-docker}"; }
 wt_have_docker() { command -v "$(wt_docker)" >/dev/null 2>&1; }
 
-wt_build_kind() {   # <项目目录> → local | docker
-    _bk=$(python3 "$PY" publish-info "$1" --root "$WTOOL_ROOT" 2>/dev/null \
-          | awk -F'\t' '$1=="build"{print $2; exit}') || true
-    printf '%s\n' "${_bk:-local}"
+wt_build_kind() {   # <项目目录> → local | docker（**清单坏了就 die，不猜**）
+    # ‼️ 不能把解析失败当成"大概是 local"：`<build kind="dockr"/>` 这种拼错的名字
+    #    会让 planner 报错、kind 落回默认值，于是"该在容器里编的项目"在本机就地开编。
+    #    宁可停下来让人去 wtool validate。
+    _bk_out=$(python3 "$PY" publish-info "$1" --root "$WTOOL_ROOT" 2>&1) || {
+        printf '%s\n' "$_bk_out" >&2
+        wt_die "$(basename -- "$1") 的 wtool.xml 有问题 —— 先 wtool validate 看"
+    }
+    printf '%s\n' "$_bk_out" | awk -F'\t' '$1=="build"{print $2; exit}'
 }
 
 wt_check_build_env() {   # <项目目录> <项目 id> → 不满足返回 1
@@ -642,6 +647,13 @@ EOF
         if [ ! -f "$_rl" ]; then
             wt_warn "  没有 scripts/release.json —— 这个项目还没发布过现成的包，"
             wt_warn "  只能自己编：wtool build $_pid"
+            # 声明要容器而本机没有 docker 的话，"只能自己编"是句空话 —— 说清真正的出路
+            if [ "$(wt_build_kind "$_path" 2>/dev/null || echo local)" = docker ] \
+               && ! wt_have_docker; then
+                wt_warn "  而这台机器上没有 docker —— 这条也走不通。出路是："
+                wt_warn "    · 换一台有 docker 的机器 wtool build + pack-release + publish-release"
+                wt_warn "    · 或者等发布页上有现成的包（那之后 download-release 就能用了）"
+            fi
             continue
         fi
 
@@ -767,8 +779,26 @@ cmd_install() {
             *)           _project=$arg ;;
         esac
     done
-    [ -n "$_project" ] || wt_die "用法: wtool.sh install <项目目录> [--dry-run] [--force] [--no-script]"
-    [ -d "$_project" ] || wt_die "项目目录不存在: $_project"
+    [ -n "$_project" ] || wt_die "用法: wtool.sh install <项目目录|项目 id|all> [--dry-run] [--force] [--no-script]"
+
+    # `wtool install all` = 装所有"不需要你决策"的项目（和 wtool bootstrap 同一条路）。
+    # 需求 2 要的就是这个形状：build / install / publish / download 都认 all。
+    if [ "$_project" = all ]; then
+        set --
+        [ "${WTOOL_DRY_RUN:-0}" = 1 ] && set -- "$@" --dry-run
+        [ "${WTOOL_FORCE:-0}" = 1 ] && set -- "$@" --force
+        cmd_bootstrap "$@"
+        return $?
+    fi
+
+    # 参数不是目录时**当成项目 id 找一次** —— build / download-release / publish-release
+    # 都认 id（wt_publish_resolve），install 只认目录的话，"换个命令就得换个写法"
+    # 太容易踩（实测：文档里到处写 `wtool install <项目>`，而它只收目录）。
+    if [ ! -d "$_project" ]; then
+        _row=$(wt_publish_resolve "$_project" 2>/dev/null) || true
+        [ -n "$_row" ] && _project=$(printf '%s\n' "$_row" | cut -f3)
+    fi
+    [ -d "$_project" ] || wt_die "项目目录不存在: $_project（给目录，或给项目 id；wtool 裸跑看全部）"
     _project=$(cd -- "$_project" && pwd)
 
     wt_git_precheck "$_project"
@@ -883,6 +913,15 @@ cmd_uninstall() {
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+
+    if [ -n "$_project" ] && [ ! -d "$_project" ]; then
+        # 不是目录 → 当成项目 id（install / build / download-release / publish-release
+        # 都认 id，只有 uninstall 只认目录的话，`wtool uninstall terminal/demo` 会死在
+        # `cd: can't cd to` 上 —— 实测踩过）。真目录已经被删掉的情况照样用 `--id`：
+        # 那条路走 state 里的账，不需要目录还在。
+        _id=$_project
+        _project=""
+    fi
 
     if [ -n "$_project" ]; then
         _project=$(cd -- "$_project" && pwd)

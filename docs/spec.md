@@ -36,9 +36,9 @@
 
 ```
 用户层（永不 sudo、永不联网）
-  wtool install   <项目目录> [--dry-run] [--force] [--no-script]
-  wtool uninstall <项目目录>|--id <id> [--dry-run] [--force] [--no-script]
-  wtool bootstrap [--dry-run] [--force]            所有项目 install
+  wtool install   <项目目录>|--id <id>|all [--dry-run] [--force] [--no-script]
+  wtool uninstall <项目目录>|--id <id>|all [--dry-run] [--force] [--no-script]
+  wtool bootstrap [--dry-run] [--force]            所有项目 install（= install all）
   wtool check|repair [<项目>|all]                  声明/日志/磁盘对比；只重建不删除
   wtool status | doctor | validate | init | version
 
@@ -338,10 +338,10 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 83 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
+| contract | `tests/contract_test.sh` | 97 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
 | layer | `tests/layer_test.sh` | 39 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **417** 条断言：
+共 **431** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 8 组全跑

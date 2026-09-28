@@ -466,6 +466,15 @@ case $_out in
     *"未知元素"*) bad "validate 仍把 <build> 当未知元素（BL-22 回来了）" "$_out" ;;
     *) ok "<build> 不再是未知元素（BL-22）" ;;
 esac
+# 清单坏了的时候 build **不许猜**：解析失败 = 停下来，不能当成"大概是 local"就地开编
+_rc=0
+_out=$(WTOOL_DOCKER=/nonexistent/wtool-docker "$WT" build "$PD" 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "清单坏了时 build 拒绝跑" || bad "清单坏了也照编（kind 落回默认值）"
+[ -f "$PD/build-ran.txt" ] && bad "清单坏了 build.sh 还是跑了" || ok "清单坏了 build.sh 没跑"
+case $_out in
+    *"wtool.xml 有问题"*) ok "指了路（先 wtool validate）" ;;
+    *) bad "没说清单有问题" "$_out" ;;
+esac
 
 # ② kind=docker + 没有 docker：拒绝、说原因、指路 download-release，**脚本不许跑**
 WTB=$(mkbuildproj "editor/dockerproj" "editor/dockerproj" '<build kind="docker"/>')
@@ -507,6 +516,68 @@ chk "docker 项目的 targets 就是 output/<os>_<ver>/ 的名字" "ubuntu_22.04
 mkdir -p "$PL/output/main" "$PL/output/lang-lua"      # local：层名不是 target
 chk "local 项目就算 output/ 里有多个目录，targets 还是空" "" \
     "$(python3 "$boot/lib/wtool_plan.py" release-targets "$PL")"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 10：install 认项目 id 和 all（需求 2）==\n'
+#   需求 2 的形状是 `wtool [build|install|publish|download] all`。
+#   build/download 早就有 all，install 只有 bootstrap 那条名字 —— 2026-09-28 补上。
+newhome
+# 自己一棵新的工作区根：前面的场景在同一棵树里留了一堆项目，
+# `install all` 会把它们的软链冲突一起扫出来（那是别的场景要验的事）
+export WTOOL_ROOT="$T/ws10"
+mkdir -p "$WTOOL_ROOT/terminal/instid"
+PI="$WTOOL_ROOT/terminal/instid"
+git -C "$PI" init -q
+mkdir -p "$PI/output" "$PI/scripts"
+printf 'hello\n' > "$PI/out.conf"
+printf 'built\n' > "$PI/output/out.bin"
+cat > "$PI/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="terminal/instid" priority="50">
+  <link home="~/.instid.conf" wtool="~/.wtool/.instid.conf" subproject="out.conf"/>
+</wtool>
+EOF
+git -C "$PI" add -A && git -C "$PI" -c user.name=t -c user.email=t@t commit -qm init
+
+# ① 按 id 装（build / download-release / publish-release 都认 id，install 以前只认目录）
+_rc=0
+_out=$("$WT" install terminal/instid 2>&1) || _rc=$?
+chk "install 认项目 id" "$_rc" "0"
+[ -L "$WTOOL_HOME/.instid.conf" ] && ok "按 id 真装上了" || bad "按 id 没装上" "$_out"
+"$WT" uninstall --id terminal/instid >/dev/null 2>&1 || true
+[ -L "$WTOOL_HOME/.instid.conf" ] && bad "uninstall --id 没撤掉" || ok "uninstall --id 撤掉了"
+
+# 不带 --id 的裸 id 也要认（install 认了，uninstall 不认就会死在 cd 上）
+"$WT" install terminal/instid >/dev/null 2>&1 || true
+_rc=0
+_out=$("$WT" uninstall terminal/instid 2>&1) || _rc=$?
+chk "uninstall 也认裸项目 id" "$_rc" "0"
+[ -e "$WTOOL_HOME/.instid.conf" ] && bad "裸 id 没撤掉" || ok "裸 id 撤掉了"
+
+# ② install all（= wtool bootstrap：装所有"不需要你决策"的项目）
+_rc=0
+_out=$("$WT" install all 2>&1) || _rc=$?
+chk "install all 退出码 0" "$_rc" "0"
+[ -L "$WTOOL_HOME/.instid.conf" ] && ok "install all 把项目装上了" || bad "install all 没装上" "$_out"
+# dry-run 要在一个**干净的家目录**里验：刚装过的话"没有需要变更的内容"，
+# 什么都不会打印（那条断言会假失败）
+newhome
+export WTOOL_ROOT="$T/ws10"
+_rc=0
+_out=$("$WT" install all --dry-run 2>&1) || _rc=$?
+chk "install all --dry-run 退出码 0" "$_rc" "0"
+case $_out in
+    *"[dry-run]"*) ok "install all 也吃 --dry-run（打了计划）" ;;
+    *) bad "install all --dry-run 没生效" "$_out" ;;
+esac
+[ -e "$WTOOL_HOME/.instid.conf" ] && bad "dry-run 居然真装了" || ok "dry-run 一个字节没动"
+
+# ③ 找不到时给的是能看懂的错，并且提一句怎么列出全部
+_out=$("$WT" install nosuch-project 2>&1) || true
+case $_out in
+    *"项目目录不存在"*"wtool 裸跑看全部"*) ok "找不到项目时错误信息指了路" ;;
+    *) bad "错误信息不好懂" "$_out" ;;
+esac
 
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
