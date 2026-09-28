@@ -10,8 +10,10 @@
 
   priority=5：最早加载，保证后面所有项目都能用到这些变量。
 
-  注意：构建期专用变量（WTOOL_SRC_DIR / WTOOL_REF 等）**不在这里**，
-  它们由引擎在跑 wsw.sh 前临时注入，不污染交互 shell。
+       ⚠️ 旧注释里写的 WTOOL_SRC_DIR / WTOOL_REF **不存在**（全仓 grep 零命中）；
+       引擎真正导出的是 WTOOL_PROJECT_ID/DIR/ROOT、WTOOL_WORKSPACE、WTOOL_HOME、
+       WTOOL_PREFIX、WTOOL_JOBS/ARCH、WTOOL_OS_*、WTOOL_ARTIFACTS、WTOOL_STATE_DIR；
+       <source> 任务另有 WTOOL_SOURCE_DIR / WTOOL_SOURCE_REF。见 docs/spec.md §10。
 -->
 <wtool schema="1" id="bootstrap" priority="5">
 
