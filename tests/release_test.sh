@@ -3,13 +3,13 @@
 #
 # 全程在临时目录里跑，不碰真 $HOME、不碰真工作区、不连网。
 # 验证点：
-#   1. 源码.zip **真的读了 .gitignore**，而且永远排除 release/ publish/
-#      （不读的话 GB 级的 release/ 会被原样打进源码包 —— 实测过）
+#   1. 源码.zip **真的读了 .gitignore**，而且永远排除 output/ release/
+#      （不读的话 GB 级的 output/ 会被原样打进源码包 —— 实测过）
 #   2. release.zip 带声明面（wtool.xml + env 文件），只下它也能 wtool install
 #   3. dist.json：每卷的名字 / sha256 / 大小，按顺序逐个声明
-#   4. 大包切分卷；分卷后原始大文件不留在 publish/
+#   4. 大包切分卷；分卷后原始大文件不留在 release/
 #   5. scripts/downloads.sh（wt_dl_add 清单）和 docs/download.md 都是文本
-#   6. pack-release → unpack-release 往返：release/ 逐字节回来，声明面回到项目根
+#   6. pack-release → unpack-release 往返：output/ 逐字节回来，声明面回到项目根
 #   7. 卷坏了 / 缺卷 → 拒绝解开（不许装上一个半成品）
 set -eu
 
@@ -44,15 +44,15 @@ zsha()  { sha256sum -- "$1" | cut -d' ' -f1; }
 printf '\n== 场景 1：pack-release 打包一个"要构建"的项目 ==\n'
 WS="$T/ws1"
 P="$WS/terminal/tmux"
-mkdir -p "$P/scripts" "$P/release/ubuntu_24.04/bin" "$P/publish" "$P/junk"
+mkdir -p "$P/scripts" "$P/output/ubuntu_24.04/bin" "$P/release" "$P/junk"
 printf 'set -g mouse on\n'      > "$P/tmux.conf"
 printf 'export DEMO=1\n'        > "$P/env.zsh"
 printf 'export DEMO=1\n'        > "$P/env.bash"
 printf 'junk 不该进包\n'        > "$P/junk/big.log"
 printf 'debug 日志不该进包\n'   > "$P/debug.log"
 printf '#!/bin/sh\ntrue\n'      > "$P/scripts/build.sh"
-printf 'bin\n'                  > "$P/release/ubuntu_24.04/bin/tmux"
-chmod +x "$P/release/ubuntu_24.04/bin/tmux"
+printf 'bin\n'                  > "$P/output/ubuntu_24.04/bin/tmux"
+chmod +x "$P/output/ubuntu_24.04/bin/tmux"
 cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" id="terminal/tmux" priority="50">
@@ -63,8 +63,8 @@ cat > "$P/wtool.xml" <<'EOF'
 EOF
 cat > "$P/.gitignore" <<'EOF'
 # 产物目录本来就是 .gitignore 里的（这就是"必须读 .gitignore"的意义）
+output/
 release/
-publish/
 junk/
 *.log
 EOF
@@ -76,41 +76,41 @@ git -C "$P" -c user.name=t -c user.email=t@t commit -qm init
     || bad "pack-release 执行" "$(cat "$T/pack1.log")"
 
 for f in 源码.zip release.zip dist.json 源码-hash.txt release-hash.txt; do
-    [ -f "$P/publish/$f" ] && ok "publish/$f 产出了" || bad "publish/$f 没产出"
+    [ -f "$P/release/$f" ] && ok "release/$f 产出了" || bad "release/$f 没产出"
 done
 [ -f "$P/scripts/downloads.sh" ] && ok "scripts/downloads.sh 产出了" || bad "scripts/downloads.sh 没产出"
 [ -f "$P/docs/download.md" ] && ok "docs/download.md 产出了" || bad "docs/download.md 没产出"
 
 # 1) 源码包：.gitignore 生效
-SRC="$P/publish/源码.zip"
+SRC="$P/release/源码.zip"
 zhave "$SRC" "wtool/terminal/tmux/tmux.conf" && ok "源码包第一层是 wtool/<项目路径>" \
     || bad "源码包路径不对" "$(zlist "$SRC" | head -5)"
-zlist "$SRC" | grep -q '/release/' && bad "release/ 被打进源码包了" \
-    || ok "release/ 没被打进源码包"
+zlist "$SRC" | grep -q '/output/' && bad "output/ 被打进源码包了" \
+    || ok "output/ 没被打进源码包"
 zlist "$SRC" | grep -q '\.log$' && bad "*.log 被打进源码包了" \
     || ok "*.log 没被打进源码包（.gitignore 生效）"
 zlist "$SRC" | grep -q '/junk/' && bad "junk/ 被打进源码包了" \
     || ok "junk/ 没被打进源码包（.gitignore 生效）"
-zlist "$SRC" | grep -q 'publish/' && bad "publish/ 被打进源码包了" \
-    || ok "publish/ 没被打进源码包"
+zlist "$SRC" | grep -q 'release/' && bad "release/ 被打进源码包了" \
+    || ok "release/ 没被打进源码包"
 zhave "$SRC" "wtool/.wtool-dist/terminal-tmux.json" \
     && ok "源码包带 .wtool-dist 标记（解压副本认得出自己）" \
     || bad "源码包没有 .wtool-dist 标记"
 
 # 2) release 包：payload + 声明面
-REL="$P/publish/release.zip"
-zhave "$REL" "release/ubuntu_24.04/bin/tmux" && ok "release.zip 里有产物" \
+REL="$P/release/release.zip"
+zhave "$REL" "output/ubuntu_24.04/bin/tmux" && ok "release.zip 里有产物" \
     || bad "release.zip 里没有产物"
 for f in wtool.xml env.zsh env.bash; do
     zhave "$REL" "$f" && ok "release.zip 带声明面 $f" || bad "release.zip 缺声明面 $f"
 done
 mkdir -p "$T/x1"
 py "$WT_ZIP" extract "$REL" "$T/x1"
-[ -x "$T/x1/release/ubuntu_24.04/bin/tmux" ] && ok "解出来的可执行位还在" \
+[ -x "$T/x1/output/ubuntu_24.04/bin/tmux" ] && ok "解出来的可执行位还在" \
     || bad "可执行位丢了"
 
 # 3) dist.json
-D="$P/publish/dist.json"
+D="$P/release/dist.json"
 check "dist.json 里 project 对" "terminal/tmux" \
     "$(py -c 'import json,sys;print(json.load(open(sys.argv[1]))["project"])' "$D")"
 check "dist.json 里 tag 对" "v1.0" \
@@ -148,8 +148,8 @@ printf '\n== 场景 2：切分卷 + unpack-release 往返 ==\n'
 
 _nvol=$(py -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["volumes"]))' "$D")
 [ "$_nvol" -ge 2 ] && ok "切出了分卷（$_nvol 卷）" || bad "没切分卷（$_nvol）"
-check "分卷后原始大文件不留在 publish/" "0" \
-    "$(ls "$P/publish"/release.zip 2>/dev/null | grep -c . || true)"
+check "分卷后原始大文件不留在 release/" "0" \
+    "$(ls "$P/release"/release.zip 2>/dev/null | grep -c . || true)"
 check "分卷名叫 <文件>-volNN（第一个是 vol01）" "release.zip-vol01" \
     "$(py -c 'import json,sys
 d=json.load(open(sys.argv[1]))
@@ -159,7 +159,7 @@ chk "每一卷都声明了拼给谁" \
 d=json.load(open(sys.argv[1]))
 names={v["of"] for v in d["volumes"]}
 print(",".join(sorted(names)))' "$D")" "release.zip,源码.zip"
-check "分卷的 sha256 和磁盘一致" "$(zsha "$P/publish/release.zip-vol01")" \
+check "分卷的 sha256 和磁盘一致" "$(zsha "$P/release/release.zip-vol01")" \
     "$(py -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 print([v["sha256"] for v in d["volumes"] if v["name"]=="release.zip-vol01"][0])' "$D")"
@@ -171,36 +171,87 @@ grep -q "^wt_dl_add 'release.zip'" "$P/scripts/downloads.sh" \
 
 # 模拟"另一台只有浏览器的机器"：把 dist.json + 所有分卷放进一个新项目目录
 P2="$T/ws2/terminal/tmux"
-mkdir -p "$P2/publish"
-cp "$P/publish/dist.json" "$P2/publish/"
-cp "$P/publish"/*-vol* "$P2/publish/"
+mkdir -p "$P2/release"
+cp "$P/release/dist.json" "$P2/release/"
+cp "$P/release"/*-vol* "$P2/release/"
 "$WT" unpack-release "$P2" > "$T/unpack2.log" 2>&1 \
     || bad "unpack-release 执行" "$(cat "$T/unpack2.log")"
-[ -x "$P2/release/ubuntu_24.04/bin/tmux" ] && ok "release/ 解出来了（可执行位也在）" \
-    || bad "release/ 没解出来" "$(cat "$T/unpack2.log")"
-check "payload 逐字节一致" "$(cat "$P/release/ubuntu_24.04/bin/tmux")" \
-      "$(cat "$P2/release/ubuntu_24.04/bin/tmux")"
+[ -x "$P2/output/ubuntu_24.04/bin/tmux" ] && ok "output/ 解出来了（可执行位也在）" \
+    || bad "output/ 没解出来" "$(cat "$T/unpack2.log")"
+check "payload 逐字节一致" "$(cat "$P/output/ubuntu_24.04/bin/tmux")" \
+      "$(cat "$P2/output/ubuntu_24.04/bin/tmux")"
 [ -f "$P2/wtool.xml" ] && ok "声明面解到了项目根" || bad "声明面没解到项目根"
 [ -f "$P2/env.zsh" ] && ok "env.zsh 也解到了项目根" || bad "env.zsh 没解到项目根"
+
+# 场景 2b：**改名（2026-09-28，release/ → output/）之前**打的包 —— 顶层是 release/<target>/
+#   线上现成那一版就是这种（真包实测：release.zip-vol01 头两个条目是 env.bash / env.zsh，
+#   第三个是 release/ubuntu_22.04/lang/bash/OWNED.tsv）。
+#   unpack-release 这层不"改路径"（包里有啥解啥），但**必须提示一句** ——
+#   不然下一步 `wtool install` 只会说"output/ 是空的"，人会去重下几百兆。
+P2b="$T/ws2b/terminal/tmux"
+mkdir -p "$P2b/release" "$T/oldpkg"
+# 在**项目的一份拷贝**里打包：直接再 pack 一次 $P 会把场景 2 切好的分卷清掉
+# （pack-release 会删掉它这次要重新生成的那些文件），场景 3 就没得用了。
+P2b_SUB="$T/pj2b/terminal/tmux"
+mkdir -p "$(dirname -- "$P2b_SUB")"
+cp -a "$P" "$P2b_SUB"
+rm -rf -- "$P2b_SUB/release"
+"$WT" pack-release "$P2b_SUB" --tag=v1.0 --repo=fakeowner/wtool-tmux --volume-size=64M \
+    > "$T/pack2b.log" 2>&1 || bad "pack-release（不切卷，拿来做旧布局包）" "$(cat "$T/pack2b.log")"
+cp "$P2b_SUB/release/源码.zip" "$T/oldpkg/"
+py - "$P2b_SUB/release/release.zip" "$T/oldpkg/release.zip" "$P2b_SUB/release/dist.json" "$T/oldpkg/dist.json" <<'PY'
+import hashlib, json, os, shutil, sys, tempfile, zipfile
+src, dst, dsrc, ddst = sys.argv[1:5]
+tmp = tempfile.mkdtemp()
+with zipfile.ZipFile(src) as z:
+    z.extractall(tmp)
+shutil.move(os.path.join(tmp, "output"), os.path.join(tmp, "release"))   # 改名前那一层
+with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+    for dp, dn, fn in os.walk(tmp):
+        for f in sorted(fn):
+            full = os.path.join(dp, f)
+            z.write(full, os.path.relpath(full, tmp))
+shutil.rmtree(tmp)
+data = open(dst, "rb").read()
+d = json.load(open(dsrc, encoding="utf-8"))
+for e in d.get("files", []):
+    if e["name"] == "release.zip":
+        e["sha256"] = hashlib.sha256(data).hexdigest()
+        e["bytes"] = len(data)
+for v in d.get("volumes", []):
+    if v.get("of") == "release.zip":
+        v["sha256"] = hashlib.sha256(data).hexdigest()
+        v["bytes"] = len(data)
+json.dump(d, open(ddst, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+cp "$T/oldpkg/dist.json" "$T/oldpkg/源码.zip" "$T/oldpkg/release.zip" "$P2b/release/"
+"$WT" unpack-release "$P2b" > "$T/unpack2b.log" 2>&1 \
+    || bad "unpack-release 跑旧布局的包" "$(cat "$T/unpack2b.log")"
+grep -q '请 mv release output' "$T/unpack2b.log" \
+    && ok "旧布局的包解开后提示 mv release output（不然下一步只会说 output/ 是空的）" \
+    || bad "解旧布局的包没给迁移提示" "$(tail -3 "$T/unpack2b.log")"
+[ -f "$P2b/release/ubuntu_24.04/bin/tmux" ] \
+    && ok "旧包确实解成了 release/<target>/（提示的前提成立）" \
+    || bad "旧包的布局没按原样解开"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 3：卷坏了 / 缺卷 → 拒绝解开 ==\n'
 P3="$T/ws3/terminal/tmux"
-mkdir -p "$P3/publish"
-cp "$P/publish/dist.json" "$P3/publish/"
-cp "$P/publish"/*-vol* "$P3/publish/"
-printf 'x' >> "$P3/publish/release.zip-vol01"          # 弄坏第一卷
+mkdir -p "$P3/release"
+cp "$P/release/dist.json" "$P3/release/"
+cp "$P/release"/*-vol* "$P3/release/"
+printf 'x' >> "$P3/release/release.zip-vol01"          # 弄坏第一卷
 _rc=0
 "$WT" unpack-release "$P3" > "$T/unpack3.log" 2>&1 || _rc=$?
 [ "$_rc" != 0 ] && ok "卷 sha256 不对 → 拒绝解开（退出码非 0）" \
     || bad "卷坏了居然还解开成功"
 grep -q '校验失败' "$T/unpack3.log" && ok "说清了是校验失败" \
     || bad "没说清失败原因" "$(cat "$T/unpack3.log")"
-[ ! -e "$P3/release" ] && ok "拒绝之后没有留下半个 release/" || bad "留下了半个 release/"
+[ ! -e "$P3/output" ] && ok "拒绝之后没有留下半个 output/" || bad "留下了半个 output/"
 
 P4="$T/ws4/terminal/tmux"
-mkdir -p "$P4/publish"
-cp "$P/publish/dist.json" "$P4/publish/"               # 一卷都不放
+mkdir -p "$P4/release"
+cp "$P/release/dist.json" "$P4/release/"               # 一卷都不放
 _rc=0
 "$WT" unpack-release "$P4" > "$T/unpack4.log" 2>&1 || _rc=$?
 [ "$_rc" != 0 ] && ok "缺分卷 → 拒绝解开" || bad "缺分卷居然还解开成功"
@@ -224,17 +275,17 @@ git -C "$P5" init -q && git -C "$P5" add -A \
     && git -C "$P5" -c user.name=t -c user.email=t@t commit -qm init
 "$WT" pack-release "$P5" --tag=v1 --repo=fakeowner/zsh > "$T/pack5.log" 2>&1 \
     || bad "纯声明式项目 pack-release 执行" "$(cat "$T/pack5.log")"
-[ -f "$P5/publish/源码.zip" ] && ok "源码包照常产出" || bad "源码包没产出"
-[ -f "$P5/publish/release.zip" ] && ok "release.zip 带声明面（只下它也能 install）" \
+[ -f "$P5/release/源码.zip" ] && ok "源码包照常产出" || bad "源码包没产出"
+[ -f "$P5/release/release.zip" ] && ok "release.zip 带声明面（只下它也能 install）" \
     || bad "release.zip 没产出"
-zhave "$P5/publish/release.zip" "wtool.xml" && ok "release.zip 里有 wtool.xml" \
+zhave "$P5/release/release.zip" "wtool.xml" && ok "release.zip 里有 wtool.xml" \
     || bad "release.zip 里没有 wtool.xml"
 
 # 只下 release.zip 的机器：解出来就能 wtool install
 P6="$T/ws6/shell/zsh"
-mkdir -p "$P6/publish"
-cp "$P5/publish/dist.json" "$P6/publish/"
-cp "$P5/publish/release.zip" "$P6/publish/"
+mkdir -p "$P6/release"
+cp "$P5/release/dist.json" "$P6/release/"
+cp "$P5/release/release.zip" "$P6/release/"
 "$WT" unpack-release "$P6" > "$T/unpack6.log" 2>&1 \
     || bad "只下 release.zip 也能 unpack" "$(cat "$T/unpack6.log")"
 [ -f "$P6/wtool.xml" ] && ok "只下 release.zip 也有声明面" || bad "声明面没解出来"
@@ -242,8 +293,8 @@ cp "$P5/publish/release.zip" "$P6/publish/"
 # --------------------------------------------------------------------------
 printf '\n== 场景 5：dry-run 不产文件 ==\n'
 P7="$T/ws7/p"
-mkdir -p "$P7/scripts" "$P7/release"
-printf 'x\n' > "$P7/release/x.bin"
+mkdir -p "$P7/scripts" "$P7/output"
+printf 'x\n' > "$P7/output/x.bin"
 printf 'true\n' > "$P7/scripts/build.sh"
 cat > "$P7/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -253,7 +304,7 @@ git -C "$P7" init -q && git -C "$P7" add -A \
     && git -C "$P7" -c user.name=t -c user.email=t@t commit -qm init
 "$WT" pack-release "$P7" --dry-run --tag=v1 --repo=o/r > "$T/pack7.log" 2>&1 \
     || bad "dry-run 执行" "$(cat "$T/pack7.log")"
-[ ! -d "$P7/publish" ] && ok "dry-run 不建 publish/" || bad "dry-run 建了 publish/"
+[ ! -d "$P7/release" ] && ok "dry-run 不建 release/" || bad "dry-run 建了 release/"
 grep -q 'dry-run' "$T/pack7.log" && ok "dry-run 输出了计划" || bad "dry-run 没输出计划"
 [ ! -f "$P7/scripts/downloads.sh" ] && ok "dry-run 不写 downloads.sh" \
     || bad "dry-run 写了 downloads.sh"

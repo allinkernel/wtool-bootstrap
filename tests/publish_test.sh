@@ -388,10 +388,10 @@ PATH="$T/bin:$PATH" WTOOL_ROOT="$FS5" WTOOL_STATE="$T/state9" \
     "$WT" publish lnk --out="$T/out9" > "$T/log9" 2>&1 || _rc=$?
 chk "发布成功" "$_rc" "0"
 
-# 新契约：pack-release 打的是 <项目>/publish/源码.zip，包内第一层是项目路径
+# 新契约：pack-release 打的是 <项目>/release/源码.zip，包内第一层是项目路径
 # 注意别用 `ls *.zip | head -1`：中文名排在 release.zip 后面，会挑错包。
 LPKG="$T/out9/源码.zip"
-[ -f "$LPKG" ] || LPKG="$T/ws5/lnk/publish/源码.zip"
+[ -f "$LPKG" ] || LPKG="$T/ws5/lnk/release/源码.zip"
 mkdir -p "$T/x9"
 python3 "$WT_ZIP" extract "$LPKG" "$T/x9" || true
 

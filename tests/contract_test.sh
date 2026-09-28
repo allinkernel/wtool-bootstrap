@@ -5,8 +5,8 @@
 #   1. wtool.xml 新标签：<zshrc>/<bashrc>、三段 <link>、<sudo-install>
 #   2. 旧标签仍然认（过渡期），但要**警告**，不能静默
 #   3. <link> 是两跳：<项目>/x → ~/.wtool/x → ~/x（仓库搬家不断链）
-#   4. 执行顺序：install.sh（release/ → ~/.wtool）在前，XML 软链（影子 → $HOME）在后
-#   5. 有 build.sh/download.sh 就必须先有 release/（install 不替你编）
+#   4. 执行顺序：install.sh（output/ → ~/.wtool）在前，XML 软链（影子 → $HOME）在后
+#   5. 有 build.sh/download.sh 就必须先有 output/（install 不替你编）
 #   6. ~/usr → ~/.wtool/usr 这条全局软链：有项目就活着，一个不剩就收走
 #   7. uninstall 拆软链前先问"还有别人要用吗"（判据是磁盘上的 wtool.xml）
 #   8. check / repair：只报不改 / 只重建不删除
@@ -53,8 +53,8 @@ P=$(mkproj "terminal/tmux" "terminal/tmux")
 printf 'set -g mouse on\n' > "$P/tmux.conf"
 printf 'export TMUX_MARK=1\n' > "$P/env.zsh"
 printf 'export TMUX_MARK=1\n' > "$P/env.bash"
-mkdir -p "$P/release" "$P/scripts"
-printf 'payload\n' > "$P/release/foo.conf"
+mkdir -p "$P/output" "$P/scripts"
+printf 'payload\n' > "$P/output/foo.conf"
 cat > "$P/scripts/install.sh" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = "--uninstall" ]; then
@@ -66,9 +66,9 @@ if [ "${1:-}" = "--uninstall" ]; then
     fi
     exit 0
 fi
-# 项目脚本按契约把 release/ 铺到影子 HOME（~/.wtool）
+# 项目脚本按契约把 output/ 铺到影子 HOME（~/.wtool）
 mkdir -p "$WTOOL_HOME/.wtool/.config/foo"
-cp "$WTOOL_PROJECT_DIR/release/foo.conf" "$WTOOL_HOME/.wtool/.config/foo/foo.conf"
+cp "$WTOOL_PROJECT_DIR/output/foo.conf" "$WTOOL_HOME/.wtool/.config/foo/foo.conf"
 # 顺手记一笔：这一刻 $HOME 里那条链**应该还不存在**（执行顺序见 §4.2）
 if [ -e "$WTOOL_HOME/.config/foo/foo.conf" ]; then
     echo "link-existed-too-early" > "$WTOOL_PROJECT_DIR/order.txt"
@@ -173,7 +173,7 @@ check "install.sh --uninstall 跑的时候 \$HOME 软链已经拆了" "links-gon
 [ -e "$WTOOL_HOME/.tmux.conf" ] && bad "卸载后链还在" || ok "卸载后链没了"
 
 # --------------------------------------------------------------------------
-printf '\n== 场景 3：有 build.sh 就必须先有 release/ ==\n'
+printf '\n== 场景 3：有 build.sh 就必须先有 output/ ==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
 P2=$(mkproj "editor/buildme" "editor/buildme")
@@ -190,14 +190,50 @@ git -C "$P2" add -A && git -C "$P2" -c user.name=t -c user.email=t@t commit -qm 
 
 _rc=0
 "$WT" install "$P2" > "$T/i3.log" 2>&1 || _rc=$?
-[ "$_rc" != 0 ] && ok "没有 release/ 时 install 拒绝" || bad "没有 release/ 居然装上了"
-grep -q 'release/ 是空的' "$T/i3.log" && ok "说清了要先 build/download" \
+[ "$_rc" != 0 ] && ok "没有 output/ 时 install 拒绝" || bad "没有 output/ 居然装上了"
+grep -q 'output/ 是空的' "$T/i3.log" && ok "说清了要先 build/download" \
     || bad "没说清原因" "$(cat "$T/i3.log")"
 grep -q 'wtool download' "$T/i3.log" && ok "给了可复制的命令" || bad "没给命令"
-mkdir -p "$P2/release"
-printf 'built\n' > "$P2/release/out.bin"
-"$WT" install "$P2" > "$T/i3b.log" 2>&1 || bad "有 release/ 之后 install 执行" "$(cat "$T/i3b.log")"
-[ -L "$WTOOL_HOME/.x.conf" ] && ok "有 release/ 之后就装上了" || bad "有 release/ 也没装上"
+mkdir -p "$P2/output"
+printf 'built\n' > "$P2/output/out.bin"
+"$WT" install "$P2" > "$T/i3b.log" 2>&1 || bad "有 output/ 之后 install 执行" "$(cat "$T/i3b.log")"
+[ -L "$WTOOL_HOME/.x.conf" ] && ok "有 output/ 之后就装上了" || bad "有 output/ 也没装上"
+
+# 场景 3c：旧目录名（release/ → output/、publish/ → release/）的迁移提示
+#   判据是**形状**：旧 release/ 里是 <os>_<ver>/<层>/，新 release/ 里是 *.zip + dist.json。
+#   ⚠️ 两个都在时必须给出**顺序**（先 mv release output 再 mv publish release）——
+#   反了会把 publish/ 塞进 release/ 里。提示**只 warn，不改退出码**。
+mkdir -p "$P2/publish"; printf 'pkg\n' > "$P2/publish/release.zip"
+mkdir -p "$P2/release/ubuntu_22.04/main/payload"
+_rc=0
+_out=$("$WT" check "$P2" 2>&1) || _rc=$?
+case $_out in
+    *"mv release output && mv publish release"*)
+        ok "两个旧目录都在：给了一条按顺序的命令" ;;
+    *) bad "两个旧目录都在时没说顺序" "$_out" ;;
+esac
+chk "迁移提示不影响 check 的退出码" "$_rc" "0"
+rm -rf "$P2/release"
+_out=$("$WT" check "$P2" 2>&1) || true
+case $_out in
+    *"请 mv publish release"*) ok "只有旧 publish/：提示改名" ;;
+    *) bad "只有旧 publish/ 时没提示" "$_out" ;;
+esac
+rm -rf "$P2/publish"; mkdir -p "$P2/release/ubuntu_24.04/main/payload"
+_out=$("$WT" check "$P2" 2>&1) || true
+case $_out in
+    *"请 mv release output"*) ok "只有旧形状 release/：提示改名" ;;
+    *) bad "只有旧 release/ 时没提示" "$_out" ;;
+esac
+# 新形状的 release/（dist.json + 分卷）不该被误报
+rm -rf "$P2/release"; mkdir -p "$P2/release"
+printf '{}\n' > "$P2/release/dist.json"; printf 'z\n' > "$P2/release/release.zip"
+_out=$("$WT" check "$P2" 2>&1) || true
+case $_out in
+    *"mv release"*) bad "新形状的 release/ 被误报成旧目录" "$_out" ;;
+    *) ok "新形状的 release/ 不误报" ;;
+esac
+rm -rf "$P2/release"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 4：uninstall 先问"还有别人要用吗" ==\n'

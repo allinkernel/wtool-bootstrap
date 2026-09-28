@@ -982,14 +982,14 @@ wt_unpack_one() {   # <包文件> <目标目录>
     esac
 }
 
-# 打一个项目的发布包 → <项目>/publish/
+# 打一个项目的发布包 → <项目>/release/
 #   wt_pack_release <项目目录> <tag> <repo> <卷大小> <scratch> [<项目id>]
 wt_pack_release() {
     _pk_dir=$1; _pk_tag=$2; _pk_repo=$3; _pk_vol=$4; _pk_scratch=$5; _pk_pid=${6:-}
-    _pk_pub="$_pk_dir/publish"
+    _pk_pub="$_pk_dir/release"
 
-    # 1) 算文件表：源码包读 .gitignore（**必须**，否则 GB 级 release/ 会被打进去），
-    #    release 包用 release/ 里的全部东西 + 声明面。
+    # 1) 算文件表：源码包读 .gitignore（**必须**，否则 GB 级 output/ 会被打进去），
+    #    release 包用 output/ 里的全部东西 + 声明面。
     python3 "$PY" pack-plan "$_pk_dir" --scratch "$_pk_scratch" \
         > "$_pk_scratch/pack.log" 2>&1 || {
         cat -- "$_pk_scratch/pack.log" >&2
@@ -1001,7 +1001,7 @@ wt_pack_release() {
     _pk_nrel=$(awk 'END{print NR}' "$_pk_scratch/release.files" 2>/dev/null || echo 0)
 
     if wt_dry; then
-        wt_step "[dry-run] 源码.zip  ← $_pk_nsrc 个文件（已按 .gitignore 过滤，永远排除 release/ publish/）"
+        wt_step "[dry-run] 源码.zip  ← $_pk_nsrc 个文件（已按 .gitignore 过滤，永远排除 output/ release/）"
         wt_step "[dry-run] release.zip ← $_pk_nrel 个文件 + 声明面 ${_pk_declare:-（无）}"
         wt_step "[dry-run] 写 $_pk_pub/：dist.json、源码-hash.txt、release-hash.txt、超 $_pk_vol 就切分卷"
         wt_step "[dry-run] 写 $_pk_dir/scripts/downloads.sh 和 $_pk_dir/docs/download.md"
@@ -1011,17 +1011,17 @@ wt_pack_release() {
 
     if [ "$_pk_nrel" -le 0 ]; then
         # 纯声明式项目（只有 wtool.xml + 配置，没有 build/download）本来就没有产物。
-        # 有 build.sh/download.sh 却拿不出 release/ 才是真错误 —— 那多半是
+        # 有 build.sh/download.sh 却拿不出 output/ 才是真错误 —— 那多半是
         # 忘了 build/download，装出来的会是半成品。
         if [ -f "$_pk_dir/scripts/build.sh" ] || [ -f "$_pk_dir/scripts/download.sh" ] \
            || [ -f "$_pk_dir/build.sh" ] || [ -f "$_pk_dir/download.sh" ]; then
-            wt_die "release/ 里什么都没有 —— 先跑 wtool build 或 wtool download ${_pk_pid:-<项目>}"
+            wt_die "output/ 里什么都没有 —— 先跑 wtool build 或 wtool download ${_pk_pid:-<项目>}"
         fi
-        wt_info "没有 release/（这个项目没有产物）：release.zip 只带声明面"
+        wt_info "没有 output/（这个项目没有产物）：release.zip 只带声明面"
     fi
 
     wt_run mkdir -p -- "$_pk_pub"
-    # 只清掉"这次会重新生成"的文件。publish/ 也可能是 unpack-release 的下载落点，
+    # 只清掉"这次会重新生成"的文件。release/ 也可能是 unpack-release 的下载落点，
     # 把用户下下来的东西删了是最难解释的那种事故。
     rm -f -- "$_pk_pub/源码.zip" "$_pk_pub/release.zip" "$_pk_pub/dist.json" \
              "$_pk_pub/源码-hash.txt" "$_pk_pub/release-hash.txt" 2>/dev/null || true
@@ -1090,7 +1090,7 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
             wt_info "  $_pk_name 有 $((_pk_b / 1048576))M，按 $_pk_vol 一卷切开"
             split -b "$_pk_vol" -d -a 2 --numeric-suffixes=1 \
                 "$_pk_pub/$_pk_name" "$_pk_pub/$_pk_name-vol" || wt_die "切分卷失败: $_pk_name"
-            # 大文件本身不留在 publish/：它正是传不上去的那个。
+            # 大文件本身不留在 release/：它正是传不上去的那个。
             # （留在 scratch 里，调用方的临时目录一删就没了）
             mv -f -- "$_pk_pub/$_pk_name" "$_pk_scratch/$_pk_name"
             for _pk_v in "$_pk_pub/$_pk_name"-vol*; do
@@ -1127,16 +1127,16 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     wt_info "  该提交的（文本，进 Git，不然下一台机器不知道最新一版在哪）："
     wt_info "    scripts/downloads.sh"
     wt_info "    docs/download.md"
-    wt_info "  publish/ 是待上传目录（.gitignore 里，不进 Git）"
+    wt_info "  release/ 是待上传目录（.gitignore 里，不进 Git）"
 }
 
-# 按 dist.json 校验分卷 → 拼接 → 解开到 <项目>/release/ 和项目根
+# 按 dist.json 校验分卷 → 拼接 → 解开到 <项目>/output/ 和项目根
 #   wt_unpack_release <项目目录> <scratch>
 wt_unpack_release() {
     _ur_dir=$1; _ur_scratch=$2
-    _ur_pub="$_ur_dir/publish"
+    _ur_pub="$_ur_dir/release"
     _ur_dist="$_ur_pub/dist.json"
-    [ -f "$_ur_dist" ] || wt_die "没有 $_ur_dist —— 把 dist.json 和所有分卷下到项目 publish/ 里"
+    [ -f "$_ur_dist" ] || wt_die "没有 $_ur_dist —— 把 dist.json 和所有分卷下到项目 release/ 里"
 
     python3 "$PY" read-dist "$_ur_dist" > "$_ur_scratch/dist.rows.tsv" \
         || wt_die "读不了 dist.json: $_ur_dist"
@@ -1190,7 +1190,7 @@ wt_unpack_release() {
                         wt_warn "源码包没下，跳过（install 只认 release.zip）: $_ur_name"
                         continue
                     fi
-                    wt_die "缺文件: $_ur_out（把 dist.json 和它一起下到 publish/）"
+                    wt_die "缺文件: $_ur_out（把 dist.json 和它一起下到 release/）"
                 fi
             fi
             if [ -n "$_ur_sha" ] && [ "$_ur_sha" != "-" ]; then
@@ -1215,7 +1215,7 @@ wt_unpack_release() {
     # 老格式（astronvim 的 publish.sh 自己写的 dist.json）：只有 volumes + compression，
     # 拼接 + 解压出来是一棵 tar。过渡路径，项目迁到 pack-release 之后就不走了。
     if [ "$_ur_got" = 0 ] && [ -n "$(awk -F'\t' '$1=="volume"{print $2}' "$_ur_rows")" ]; then
-        wt_run mkdir -p -- "$_ur_tmp" "$_ur_dir/release"
+        wt_run mkdir -p -- "$_ur_tmp" "$_ur_dir/output"
         _ur_out="$_ur_tmp/legacy.tar"
         : > "$_ur_out"
         for _ur_v in $(awk -F'\t' '$1=="volume"{print $2}' "$_ur_rows"); do
@@ -1225,18 +1225,18 @@ wt_unpack_release() {
             [ "$_ur_have" = "$_ur_exp" ] || wt_die "分卷校验失败: $_ur_v"
             cat -- "$_ur_pub/$_ur_v" >> "$_ur_out"
         done
-        wt_warn "这是老格式的 dist.json（没有 files 段）—— 按整棵 tar 解到 $_ur_dir/release/"
+        wt_warn "这是老格式的 dist.json（没有 files 段）—— 按整棵 tar 解到 $_ur_dir/output/"
         case $_ur_comp in
-            zstd) zstd -dc -- "$_ur_out" | tar -xf - -C "$_ur_dir/release" \
+            zstd) zstd -dc -- "$_ur_out" | tar -xf - -C "$_ur_dir/output" \
                       || wt_die "解开老格式发布包失败" ;;
-            *)    gzip -dc -- "$_ur_out" | tar -xf - -C "$_ur_dir/release" \
+            *)    gzip -dc -- "$_ur_out" | tar -xf - -C "$_ur_dir/output" \
                       || wt_die "解开老格式发布包失败" ;;
         esac
         _ur_got=1
     fi
 
     [ "$_ur_got" -gt 0 ] || wt_die "dist.json 里没有可解的东西: $_ur_dist"
-    wt_info "unpack-release 完成（只校验 + 铺到 release/，不做安装）"
+    wt_info "unpack-release 完成（只校验 + 铺到 output/，不做安装）"
     wt_info "  下一步: wtool install $_ur_dir"
 }
 

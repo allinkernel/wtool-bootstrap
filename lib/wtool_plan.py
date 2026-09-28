@@ -60,7 +60,7 @@ def links_dir_shell(project_id):
 SHADOW_ROOT_NAME = ".wtool"
 # release.zip 里带的"声明面"：只下 release.zip 的机器也要能 wtool install
 DECLARE_FILES = ("wtool.xml", "env.zsh", "env.bash")
-# 分卷大小：网络不稳，卷要小（见 00-architecture.md §5）
+# 分卷大小：网络不稳，卷要小（见 harness/architecture.md §5）
 DEFAULT_VOLUME_SIZE = "32M"
 
 # publish 的默认行为：能力由**文件存在**声明（scripts/publish.sh），
@@ -253,7 +253,7 @@ def _parse_publish(node, meta, manifest_path, errors):
 def effective_publish(path, pub):
     """发布方式的最终判定。
 
-    `<publish>` 标签整个删掉了（见 00-architecture.md §3 改名对照）：
+    `<publish>` 标签整个删掉了（旧标签清单见 docs/manifest-schema.md 末尾）：
     **文件存在即能力声明** —— 项目里有 `scripts/publish.sh` 就是脚本型发布。
     老清单里显式写的 `<publish>` 仍然认（过渡期），用来表达两件文件表达不了的
     事：推到别的仓（`to=`）和"不发布"（`kind="none"`，第三方上游仓要它）。
@@ -437,7 +437,7 @@ def _home_rel(raw, errors, manifest_path, tag):
 
 
 def _parse_link(child, errors, warnings, manifest_path):
-    """<link> 是**三段映射**（见 00-architecture.md §3.2）：
+    """<link> 是**三段映射**（见 harness/architecture.md §3.2）：
 
         <link home="~/.tmux.conf"
               wtool="~/.wtool/.tmux.conf"
@@ -1701,7 +1701,7 @@ def plan_env(args, scratch):
 
     顺带管**唯一一条引擎自己造的全局软链**：`~/usr` → `~/.wtool/usr`。
     它不属于任何项目，一个项目都不剩时随 loader 块一起收走
-    （见 00-architecture.md §8）。
+    （见 harness/architecture.md §8）。
     """
     rows = []
     exclude = getattr(args, "exclude", "") or ""
@@ -2152,7 +2152,7 @@ def publish_info(project_dir, ws_root=None):
 # --------------------------------------------------------------------------
 # 声明认领：一条 $HOME 软链还有没有别的项目要它
 #
-# uninstall 拆软链之前必须先问这一句（见 00-architecture.md §4.2）：
+# uninstall 拆软链之前必须先问这一句（见 harness/architecture.md §4.2）：
 # 判据是**磁盘上所有 wtool 项目的 wtool.xml**，不是 registry ——
 # registry 只能有一个主人，而"两个项目都要 ~/.gitconfig"是完全合理的。
 # --------------------------------------------------------------------------
@@ -2174,12 +2174,12 @@ def claimed_homes(root, exclude_id="", home=""):
 
 
 # --------------------------------------------------------------------------
-# pack-release：把项目打成 publish/ 里的分卷
+# pack-release：把项目打成 release/ 里的分卷
 #
 # Python 只算"打哪些文件"（读 .gitignore 是文本逻辑），实际打包、切卷、
-# 算 sha256 由 shell 侧做（wtool_fs.sh），产物落在 <项目>/publish/。
+# 算 sha256 由 shell 侧做（wtool_fs.sh），产物落在 <项目>/release/。
 # --------------------------------------------------------------------------
-ALWAYS_IGNORED_DIRS = ("release", "publish", ".git", "__pycache__",
+ALWAYS_IGNORED_DIRS = ("output", "release", ".git", "__pycache__",
                        ".mypy_cache", ".pytest_cache", ".ruff_cache")
 
 
@@ -2285,9 +2285,9 @@ def _ignored(rel, is_dir, rules):
 def source_file_list(project_root):
     """源码包里要打进去的文件（相对项目目录，已按路径排序）。
 
-    **一定读 .gitignore**：不读的话 GB 级的 release/ 会被原样打进源码包
+    **一定读 .gitignore**：不读的话 GB 级的 output/ 会被原样打进源码包
     （实测过）。git 可用就让 git 算，否则自己解析 .gitignore。
-    另外无论 .gitignore 怎么写，release/ 和 publish/ 永远排除。
+    另外无论 .gitignore 怎么写，output/ 和 release/ 永远排除。
     """
     root = os.path.abspath(project_root)
     files = _git_ls_files(root)
@@ -2317,9 +2317,9 @@ def source_file_list(project_root):
 
 
 def release_file_list(project_root):
-    """release/ 里的文件（相对项目目录）。文件从这儿来，装到别的机器上去。"""
+    """output/ 里的文件（相对项目目录）。文件从这儿来，装到别的机器上去。"""
     root = os.path.abspath(project_root)
-    rel_root = os.path.join(root, "release")
+    rel_root = os.path.join(root, "output")
     out = []
     if not os.path.isdir(rel_root):
         return out
@@ -2383,7 +2383,7 @@ def write_dist(args):
         # 顺序有意义：volumes 按顺序逐个拼接就是原来的大文件
         "files": files,
         "volumes": volumes,
-        "how": ("把 dist.json 和所有分卷下到项目的 publish/ 目录，然后："
+        "how": ("把 dist.json 和所有分卷下到项目的 release/ 目录，然后："
                 "wtool unpack-release <项目> ；wtool install <项目>"),
     }
     text = json.dumps(dist, ensure_ascii=False, indent=2) + "\n"
@@ -2396,7 +2396,7 @@ def _downloadable_rows(rows):
     """从 rows.tsv 里挑出**真正能下载的东西**。
 
     rows.tsv 的每一行是 `名字 sha256 字节 role of`：
-    被切成卷的大文件（of 非空的行指向它）本身不留在 publish/ 里，
+    被切成卷的大文件（of 非空的行指向它）本身不留在 release/ 里，
     所以下载页和 downloads.sh 都不该列它 —— 列了就是 404。
     """
     split = {row[4] for row in rows if len(row) > 4 and row[4]}
@@ -2407,7 +2407,7 @@ def _downloadable_rows(rows):
         if len(row) > 4 and row[4]:
             out.append(row)                      # 分卷：要下
         elif row[0] in split:
-            continue                             # 被切开的原始大文件：不在 publish/ 里
+            continue                             # 被切开的原始大文件：不在 release/ 里
         else:
             out.append(row)
     return out
@@ -2453,8 +2453,8 @@ def download_doc(args):
             "## 怎么装",
             "",
             "```sh",
-            "# 1) 把 dist.json 和上面所有文件下到项目的 publish/ 目录",
-            "wtool unpack-release %s   # 校验每卷 sha256 → 拼接 → 解到 release/" % args.project_id,
+            "# 1) 把 dist.json 和上面所有文件下到项目的 release/ 目录",
+            "wtool unpack-release %s   # 校验每卷 sha256 → 拼接 → 解到 output/" % args.project_id,
             "wtool install %s          # 再装（登记、软链、shell 集成）" % args.project_id,
             "```",
             "",

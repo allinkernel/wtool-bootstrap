@@ -3,7 +3,7 @@
 #
 # 由 `wtool install @PROJECT_ID@` 调用（§4.2 的执行顺序，编号跟契约一致）：
 #   ① 引擎基建：中转链接 ~/.wtool/wtool-work-dir/links/<id> + 本项目的 env 块
-#   ① 这个脚本：release/ → ~/.wtool/usr（影子 HOME）
+#   ① 这个脚本：output/ → ~/.wtool/usr（影子 HOME）
 #   ② wtool.xml 的 <link>：~/.wtool/… → $HOME/…
 # 也就是说**两件 ① 都比 ② 早**，而本脚本在另一件 ① 之后 ——
 # ②建的软链指向本脚本铺出来的东西，反了就是先建一堆悬空链接。
@@ -28,6 +28,6 @@ say "安装开始"
 
 # TODO: 在这里写 wtool.xml 表达不了的安装步骤：
 #   mkdir -p "$WTOOL_PREFIX/bin"
-#   cp -f release/bin/foo "$WTOOL_PREFIX/bin/foo"
+#   cp -f output/bin/foo "$WTOOL_PREFIX/bin/foo"
 
 say "安装完成"

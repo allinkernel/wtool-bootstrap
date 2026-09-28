@@ -234,7 +234,7 @@ repo 的 manifest 用 `x-*` 把命名空间留给用户，`wtool.xml` **故意�
 | 同一清单内 `home` 不重复 | 拒绝 |
 | `home` 未被其他项目在 `registry.tsv` 里登记 | 拒绝（`--force` 降级为警告） |
 | 落点在磁盘上不存在，或已是正确的软链 | 拒绝（`--force` 备份后接管） |
-| 有 `build.sh`/`download.sh` 就必须有非空的 `release/` | 拒绝（`--force` 降级为警告） |
+| 有 `build.sh`/`download.sh` 就必须有非空的 `output/` | 拒绝（`--force` 降级为警告） |
 | 旧标签 | 警告（能装，但提醒改成新标签） |
 
 ---
@@ -265,7 +265,7 @@ repo 的 manifest 用 `x-*` 把命名空间留给用户，`wtool.xml` **故意�
 ```
 
 要编译 / 要下载产物的项目，再加 `scripts/`（`build.sh` / `download.sh` /
-`install.sh` / `publish.sh`，**按需，别留空壳**）和 `release/`（产物，`.gitignore` 里）。
+`install.sh` / `publish.sh`，**按需，别留空壳**）和 `output/`（产物，`.gitignore` 里）。
 **文件存在即能力声明**：`scripts/` 下有没有那个文件，直接决定项目表里那一列亮不亮。
 
 ---

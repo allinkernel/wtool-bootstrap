@@ -5,7 +5,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ```sh
 # 日常三条（一条铁律：要 sudo 的都叫 sudo-*）
 ./wtool.sh sudo-install <项目>    # 系统层：/etc 下的文件、apt 包、要跑的脚本（可能要 sudo）
-./wtool.sh install      <项目>    # 用户层：release/ → ~/.wtool，再铺 $HOME 软链（永不 sudo）
+./wtool.sh install      <项目>    # 用户层：output/ → ~/.wtool，再铺 $HOME 软链（永不 sudo）
 ./wtool.sh uninstall    <项目>    # 撤销 install（不还原 /etc —— 那是 sudo-uninstall 的事）
 
 # 系统层
@@ -14,13 +14,13 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 
 # 产物与发布
 ./wtool.sh build|download <项目>|all   # 跑项目自己的 scripts/build.sh / download.sh
-./wtool.sh pack-release   <项目>       # → <项目>/publish/（源码.zip / release.zip / 分卷 / dist.json）
-./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 release/
+./wtool.sh pack-release   <项目>       # → <项目>/release/（源码.zip / release.zip / 分卷 / dist.json）
+./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 output/
 ./wtool.sh publish        [<项目>]     # pack-release + 上传（有 scripts/publish.sh 的走那个脚本）
 
 # 层（第二条通道：容器镜像仓库）
-./wtool.sh push-layers  <项目>         # release/ 的层 → 镜像仓库（docker push，构建机上跑）
-./wtool.sh pull-layers  <项目>         # 镜像仓库 → release/（目标机只要 crane，不要 docker）
+./wtool.sh push-layers  <项目>         # output/ 的层 → 镜像仓库（docker push，构建机上跑）
+./wtool.sh pull-layers  <项目>         # 镜像仓库 → output/（目标机只要 crane，不要 docker）
 ./wtool.sh pack-layer   <项目> --layer=<层>          # 单个层 ↔ "镜像形状"的 tar（不联网）
 ./wtool.sh unpack-layer <项目> --from=<文件> --layer=<层>
 
@@ -28,7 +28,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 7 组 / 266 条断言
+./tests/run_all.sh                    # 7 组 / 273 条断言
 ```
 
 ---

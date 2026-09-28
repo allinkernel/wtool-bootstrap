@@ -6,7 +6,7 @@
 （实测 `zip -UN=UTF8 源码.txt` 出来的条目 flag_bits=0，用别的工具解开是乱码），
 而我们的归档名里有中文（`源码.zip` / `release.zip`）。python3 的 zipfile 是
 标准库（引擎本来就依赖 python3），会正确设置 UTF-8 标志，还顺带解决了
-"权限位要不要留住"（release 里的可执行文件必须留住）。
+"权限位要不要留住"（output 里的可执行文件必须留住）。
 
 它和 tar/gzip 一样只是个**工具**：由 lib/wtool_fs.sh 调用，
 只写调用方指定的路径，自己不做任何决定。
