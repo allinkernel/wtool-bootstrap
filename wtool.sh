@@ -483,6 +483,10 @@ wt_docker_layer() {
     _dl_pref=$6; _dl_ref=$7; _dl_cmd=$8; _dl_logdir=$9
     _dl_lay=$(wt_layer_dir "$_dl_dir" "$_dl_t")
     _dl_out="$_dl_dir/output/$_dl_t/$_dl_layer"
+    # 输入指纹的文件名**先定下来**：跳过构建的那次也要用它写产出事实
+    # （指纹本身是上一次跑留下的，还在 state 里）
+    _dl_fp="$_dl_logdir/$(wt_docker_slug "$_dl_layer").fingerprint.json"
+    _dl_exported=0
 
     # 占位层（没有镜像）：只留一个空的 output 层，形状和别的层一样
     if [ "$_dl_ref" = "-" ]; then
@@ -531,7 +535,11 @@ wt_docker_layer() {
         {
             printf '#!/bin/sh\n'
             printf '# 由 wtool 生成 —— %s 这一层在容器里跑的东西（ADR-0029）\n' "$_dl_layer"
-            printf 'set -e\ncd /proj\n%s\n' "$_dl_cmd"
+            printf 'set -e\n'
+            # 这一层的**输入指纹**进镜像：从 registry 拉回来的层因此能自述来历（ADR-026 §4）
+            printf 'mkdir -p /wtool-layer\n'
+            printf 'cp /log/%s.fingerprint.json /wtool-layer/layer.json\n' "$(wt_docker_slug "$_dl_layer")"
+            printf 'cd /proj\n%s\n' "$_dl_cmd"
         } > "$_dl_run"
         : > "$_dl_log"
 
@@ -546,6 +554,13 @@ wt_docker_layer() {
             -v "wtool-build-cache-$(wt_docker_slug "$(basename -- "$_dl_dir")")-$_dl_t:/root/.cache" \
             "$_dl_from" sleep infinity >/dev/null \
             || wt_die "起容器失败（$_dl_from）"
+        # 指纹要在 run **之后**生成：第一层的基镜像此刻才真的在本地（run 会顺手 pull），
+        # 那之前 `docker image inspect` 拿不到 digest
+        WT_FP_PROJ=$_dl_dir WT_FP_PID=$_dl_pid WT_FP_LAYER=$_dl_layer WT_FP_TARGET=$_dl_t \
+        WT_FP_IMAGE=$_dl_ref WT_FP_BASE=$_dl_from WT_FP_PREF=$_dl_pref \
+        WT_FP_CMD=$_dl_cmd WT_FP_ENGINE=$ENGINE_VERSION \
+            wt_docker_fingerprint "$_dl_fp" || wt_die "写不出这一层的指纹（$_dl_fp）"
+
         wt_run "$(wt_docker)" exec -d "$_dl_cname" sh -c \
             "sh /log/$(wt_docker_slug "$_dl_layer").run > /log/$(wt_docker_slug "$_dl_layer").log 2>&1; echo EXIT=\$? >> /log/$(wt_docker_slug "$_dl_layer").log"
 
@@ -592,8 +607,150 @@ wt_docker_layer() {
             "$(wt_docker_export_filter "$_dl_dir")" >/dev/null \
             || wt_die "$_dl_layer 导出失败"
         wt_step "$_dl_layer → output/$_dl_t/$_dl_layer/（$(du -sh -- "$_dl_out" 2>/dev/null | cut -f1)）"
+        _dl_exported=1
+    fi
+
+    # 产出事实跟着层走（不提交）：layer/<target>/<层>.json（ADR-026 §4）。
+    # 只在"刚导出"或"还没有事实文件"时写 —— 否则每次重跑都把 exported_at 刷新一遍，
+    # 那份事实就不再是"什么时候产出来的"了。
+    _dl_facts="$_dl_lay/$(printf '%s' "$_dl_layer" | tr '/' '-').json"
+    if [ "$_dl_exported" = 1 ] || [ ! -f "$_dl_facts" ]; then
+        wt_docker_facts "$_dl_dir" "$_dl_pid" "$_dl_t" "$_dl_layer" "$_dl_ref" \
+            "$_dl_out" "$_dl_fp" || wt_warn "  写不出 $_dl_layer 的产出事实（不影响这一层）"
     fi
     return 0
+}
+
+# 一层的**输入指纹**（ADR-026 §4 的"声明"那一半）：基镜像 + digest、项目自己声明的
+# 外部输入、源码 commit、引擎版本、时间。它写在**容器里跑命令之前**，
+# 所以会留在这一层的差量里（`/wtool-layer/layer.json`）——
+# 从 registry 拉回来的镜像因此能自述"我是谁、什么编的"。
+wt_docker_fingerprint() {   # <输出文件>；其余从 WT_FP_* 环境变量读（见调用点）
+    python3 - "$1" "$WT_FP_PROJ" <<'PYFP'
+import json, os, subprocess, sys, datetime
+out, proj = sys.argv[1], sys.argv[2]
+layer, target = os.environ["WT_FP_LAYER"], os.environ["WT_FP_TARGET"]
+base = os.environ["WT_FP_BASE"]
+pref = os.environ["WT_FP_PREF"]
+cmd = os.environ["WT_FP_CMD"]
+pid = os.environ["WT_FP_PID"]
+engine = os.environ["WT_FP_ENGINE"]
+
+
+def sh(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              timeout=30).stdout.strip()
+    except Exception:
+        return ""
+
+
+# 基镜像记 **digest**，不只记 tag：tag 可以被重新指向（docker tag 就能挪），digest 不能
+repo_digest = sh("docker", "image", "inspect", "--format",
+                 "{{range .RepoDigests}}{{.}}\n{{end}}", base).splitlines()
+inputs = {
+    "base_image": base,
+    "base_digest": repo_digest[0] if repo_digest else "",
+    "base_image_id": sh("docker", "image", "inspect", "--format", "{{.Id}}", base),
+    "parent_image": pref,
+    "command": cmd,
+}
+# 项目自己声明的输入（build/fingerprints.tsv：<键> <TAB> <值>）—— apt 包版本、
+# 上游源码的 commit、外部下载物的 sha256 都记在这儿
+fpath = os.path.join(proj, "build", "fingerprints.tsv")
+extra = {}
+try:
+    with open(fpath, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            parts = [x.strip() for x in line.split("\t")]
+            if len(parts) >= 2 and parts[0]:
+                extra[parts[0]] = parts[1]
+except OSError:
+    pass
+if extra:
+    inputs["project"] = extra
+inputs["source_commit"] = sh("git", "-C", proj, "rev-parse", "HEAD")
+inputs["source_dirty"] = bool(sh("git", "-C", proj, "status", "--porcelain"))
+doc = {
+    "schema": 1,
+    "project": pid,
+    "layer": layer,
+    "target": target,
+    "image": os.environ["WT_FP_IMAGE"],
+    "built_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+    "wtool_engine": engine,
+    "inputs": inputs,
+}
+tmp = out + ".new"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+os.replace(tmp, out)
+PYFP
+}
+
+# 一层的**产出事实**（ADR-026 §4 的"事实"那一半）：跟着层走，不提交。
+# 落在 layer/<target>/<层>.json —— 实测 `docker load` 容忍布局目录里多出来的文件，
+# 所以不用另起一个目录（那会让"哪一层"和文件对不上号）。
+wt_docker_facts() {   # <项目目录> <项目 id> <target> <层> <镜像引用> <输出层目录> <指纹文件>
+    _fc_dir=$1; _fc_pid=$2; _fc_t=$3; _fc_layer=$4; _fc_ref=$5; _fc_out=$6; _fc_fp=$7
+    _fc_lay=$(wt_layer_dir "$_fc_dir" "$_fc_t")
+    _fc_dst="$_fc_lay/$(printf '%s' "$_fc_layer" | tr '/' '-').json"
+    WT_FP_LAYER=$_fc_layer WT_FP_TARGET=$_fc_t WT_FP_IMAGE=$_fc_ref \
+    WT_FP_ENGINE=$ENGINE_VERSION python3 - "$_fc_dst" "$_fc_dir" "$_fc_out" "$_fc_fp" <<'PYFACTS'
+import json, os, subprocess, sys, datetime
+dst, proj, out, fp = sys.argv[1:5]
+
+
+def sh(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              timeout=60).stdout.strip()
+    except Exception:
+        return ""
+
+
+input_doc = {}
+try:
+    with open(fp, encoding="utf-8") as fh:
+        input_doc = json.load(fh)
+except Exception:
+    pass
+
+# 产出事实：**OWNED.tsv 就是"每个文件的 sha256"**（还带软链的目标），
+# 所以它的 sha256 传递地覆盖了整个 payload 的内容 —— 不必再读一遍 GB 级的目录。
+owned = os.path.join(out, "OWNED.tsv")
+files = 0
+try:
+    with open(owned, encoding="utf-8") as fh:
+        files = sum(1 for line in fh if line.strip() and not line.startswith("#"))
+except OSError:
+    pass
+size = sh("du", "-sb", os.path.join(out, "payload")).split("\t")[0] or ""
+
+doc = dict(input_doc)
+doc["produced"] = {
+    "exported_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+    "payload_files": files,
+    "payload_bytes": int(size) if size.isdigit() else None,
+    "payload_sha256": sh("sha256sum", owned).split(" ")[0],
+    "owned_tsv": os.path.basename(owned),
+    "export_filter": os.path.basename(
+        os.path.join(proj, "build", "export.filter"))
+        if os.path.isfile(os.path.join(proj, "build", "export.filter")) else "",
+    # 验证到什么程度：**结构**（条目数 / 软链不悬空 / 没有白障残留）。
+    # 逐文件比对 sha256 是**装到目标机时** install.sh 干的活（这儿再读一遍 GB 级目录不值得）。
+    "verified": "structure",
+}
+tmp = dst + ".new"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+os.replace(tmp, dst)
+PYFACTS
 }
 
 wt_docker_export_filter() {   # <项目目录> → 过滤清单路径（没有就输出空）

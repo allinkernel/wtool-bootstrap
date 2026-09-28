@@ -83,7 +83,22 @@ printf '%s\n' "$*" >> "$DOCKER_LOG"
 case "$1" in
     image)
         [ "$2" = inspect ] || exit 0
-        grep -qx -- "$3" "$DOCKER_IMAGES" 2>/dev/null && exit 0 || exit 1 ;;
+        _ref=$3
+        if [ "$_ref" = "--format" ]; then
+            _ref=$5
+            case "$4" in
+                *RepoDigests*)
+                    printf 'demo/base@sha256:%s\n' \
+                        "$(printf '%s' "$_ref" | tr -c 'A-Za-z0-9' 'a' | cut -c1-16)"
+                    exit 0 ;;
+                *'.Id'*)
+                    printf 'sha256:%s\n' \
+                        "id$(printf '%s' "$_ref" | tr -c 'A-Za-z0-9' 'a' | cut -c1-12)"
+                    exit 0 ;;
+            esac
+            exit 1
+        fi
+        grep -qx -- "$_ref" "$DOCKER_IMAGES" 2>/dev/null && exit 0 || exit 1 ;;
     volume) exit 0 ;;
     ps)     cat "$DOCKER_PS" 2>/dev/null; exit 0 ;;
     run)
@@ -102,8 +117,11 @@ case "$1" in
         _out="$LOG_DIR/$(basename "$(printf '%s' "$_script" | sed 's/^.*> //; s/ 2>&1.*//')")"
         : > "$_out"
         # 把包装脚本里的 `cd /proj` 换成本机上的项目目录 —— 桩没有容器
-        # 容器里 `/proj` 是挂载点；桩在宿主机上，把它换成本机的项目目录
-        sed "s|/proj|$DOCKER_PROJ|g" "$_run" > "$T_FAKE_RUN"
+        # 容器里的 /proj 是挂载点、/log 也是挂载点、/wtool-layer 是层里的。
+        # 桩在宿主机上，把这三个都换成本机路径（等价于"容器真的这么跑"）
+        sed -e "s|/wtool-layer|$WTOOL_TEST_ROOT/wtool-layer|g" \
+            -e "s|/log|$LOG_DIR|g" \
+            -e "s|/proj|$DOCKER_PROJ|g" "$_run" > "$T_FAKE_RUN"
         ( cd "$WTOOL_TEST_ROOT" && find . \( -type f -o -type l \) 2>/dev/null |
               sed 's|^\./||' | LC_ALL=C sort ) > "$T_BEFORE"
         _rc=0
@@ -187,6 +205,40 @@ chk "白障（.wh.）不落进 payload" \
 grep -q '^run -d' "$DOCKER_LOG" && ok "真的起了容器（docker run -d）" || bad "没起容器"
 grep -q -- '--network=host' "$DOCKER_LOG" && ok "容器用 host 网络（代理要它）" || bad "没加 --network=host"
 grep -q ':/proj:ro' "$DOCKER_LOG" && ok "项目只读挂进 /proj" || bad "没挂 /proj"
+
+echo "== 2b. 输入指纹（进镜像）+ 产出事实（跟着层走）（ADR-026 §4）=="
+chk "镜像里有 /wtool-layer/layer.json（从 registry 拉回来能自述来历）" "yes" \
+    "$([ -f "$WTOOL_TEST_ROOT/wtool-layer/layer.json" ] && echo yes || echo no)"
+# 每层都往 /wtool-layer/ 写自己那份，最后一层写在最上面 —— 所以看到的是最后一层的
+chk "它记的是最后一层（每层各写各的，最后那份在最上面）" "other" \
+    "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["layer"])' \
+       "$WTOOL_TEST_ROOT/wtool-layer/layer.json")"
+chk "基镜像记的是 digest，不只记 tag" "yes" \
+    "$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))["inputs"]
+print("yes" if d.get("base_digest") else "no")' "$WTOOL_TEST_ROOT/wtool-layer/layer.json")"
+chk "★它不落进 payload（导出只取 root/.wtool/*）" "0" \
+    "$(find "$P/output/ubuntu_24.04" -name 'layer.json' | wc -l | tr -d ' ')"
+chk "产出事实跟着层走：layer/<target>/<层>.json" "yes" \
+    "$([ -f "$P/layer/ubuntu_24.04/one.json" ] && echo yes || echo no)"
+chk "产出事实里有 payload 的 sha256（OWNED.tsv 的 sha256，覆盖每个文件的内容）" "64" \
+    "$(python3 -c 'import json,sys
+print(len(json.load(open(sys.argv[1]))["produced"]["payload_sha256"]))' \
+       "$P/layer/ubuntu_24.04/one.json")"
+chk "产出事实里有文件数（>0）" "yes" \
+    "$(python3 -c 'import json,sys
+print("yes" if json.load(open(sys.argv[1]))["produced"]["payload_files"] > 0 else "no")' \
+       "$P/layer/ubuntu_24.04/one.json")"
+# 事实文件就放在布局目录里（实测 `docker load` **容忍**多出来的文件，见 journal 第 10 轮）；
+# 而 `layer-load` / `push-layer` 是 `tar -c -C 布局 . | docker load`，所以要确认它真在 tar 里
+chk "事实文件和布局在同一个目录里" "yes" \
+    "$([ -f "$P/layer/ubuntu_24.04/one.json" ] && [ -f "$P/layer/ubuntu_24.04/index.json" ] \
+       && echo yes || echo no)"
+_tar_probe=$(mktemp)
+tar -c -C "$P/layer/ubuntu_24.04" . > "$_tar_probe"
+chk "喂给 docker load 的 tar 里带着它（多出来的文件 docker 会忽略）" "yes" \
+    "$(tar -tf "$_tar_probe" | grep -qx './one.json' && echo yes || echo no)"
+rm -f "$_tar_probe"
 
 echo "== 3. 续跑：什么都不用重做 =="
 : > "$DOCKER_LOG"

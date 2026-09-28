@@ -339,10 +339,10 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
 | contract | `tests/contract_test.sh` | 97 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
-| docker-build | `tests/docker_build_test.sh` | 33 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
+| docker-build | `tests/docker_build_test.sh` | 42 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 39 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **464** 条断言：
+共 **473** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 9 组全跑
@@ -538,6 +538,17 @@ apt-get update && apt-get install -y --no-install-recommends \
 引擎对每一层：**没有镜像就起容器 commit → 存进 `layer/<target>/` → 从顶层 blob 导出
 `output/<target>/<层>/`**。三步的判据都是"磁盘上有没有"，所以重跑 `wtool build`
 **接着走、不重编**；`docker` 存储被 prune 掉也能从 `layer/` 装回来。
+
+契约文件分两半（ADR-026 §4）：
+
+| | 放哪 | 内容 |
+|---|---|---|
+| **输入指纹** | **镜像里** `/wtool-layer/layer.json`（跑命令之前写进这一层） | 基镜像 + **digest**（不只记 tag）、`build/fingerprints.tsv` 里项目声明的外部输入、源码 commit / dirty、引擎版本、时间 —— 从 registry 拉回来的层因此**能自述来历** |
+| **产出事实** | `layer/<target>/<层名>.json`（跟着层走，不提交） | `payload_files` / `payload_bytes` / `payload_sha256`（= `OWNED.tsv` 的 sha256，而它逐条记着每个文件的 sha256 / 软链目标）/ 导出时间 / 结构校验结果 |
+
+事实文件就放在布局目录里 —— 实测 `docker load` **容忍**多出来的文件
+（`tar -c -C 布局 . | docker load` 照样装得上）。`build/fingerprints.tsv` 是可选的，
+一行一条 `<键> <TAB> <值>`（apt 包版本、上游 commit、外部下载物 sha256 都记这儿）。
 
 谁驱动看**层清单在不在**：`kind=docker` 且有 `build/layers.tsv` → 引擎驱动；
 只有 `build.sh` → 跑它（迁移前的形态）；两个都没有 → 拒绝（退出码非 0）。
