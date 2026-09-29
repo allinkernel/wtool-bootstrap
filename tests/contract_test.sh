@@ -698,6 +698,70 @@ case $_out in
 esac
 
 # --------------------------------------------------------------------------
+printf '\n== 场景 12：全局写锁（BL-17）==\n'
+#   两个终端同时 install 会撞 registry.tsv / journal.tsv 的"读—改—写"：
+#   各自读旧的、各写各的，最后落盘的那个把前一个的条目抹掉。
+#   四条要守：跑完自动放锁 / 别人占着就不硬闯 / 占用者死了能接管 / 子进程不抢自己人的锁。
+newhome
+mkdir -p "$WTOOL_ROOT"
+PW=$(mkproj "terminal/lockproj" "terminal/lockproj")
+mkdir -p "$PW/scripts"
+printf 'w\n' > "$PW/w.conf"
+cat > "$PW/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="terminal/lockproj" priority="50">
+  <link home="~/.lockproj.conf" wtool="~/.wtool/.lockproj.conf" subproject="w.conf"/>
+</wtool>
+EOF
+git -C "$PW" add -A && git -C "$PW" -c user.name=t -c user.email=t@t commit -qm init
+
+# ① 正常跑完，锁要放掉（不放的话下一次 install 会等到超时）
+"$WT" install "$PW" >/dev/null 2>&1 || bad "装没装上（后面的断言都不成立）"
+[ -e "$WTOOL_STATE/.lock" ] && bad "跑完锁还留在状态目录里（下一次会白等）" \
+    || ok "跑完自动放锁"
+
+# ② 有人正占着（holder pid 是活的）：**不硬闯**，报清楚，什么都不动
+mkdir -p "$WTOOL_STATE/.lock"
+printf '%s\n' "$$" > "$WTOOL_STATE/.lock/pid"
+rm -f "$WTOOL_HOME/.lockproj.conf"
+_rc=0
+_out=$(WTOOL_LOCK_TIMEOUT=0 "$WT" install "$PW" 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "锁被占着时拒绝跑（不当成成功）" || bad "锁被占着还照跑"
+case $_out in
+    *"正在改状态目录"*) ok "说清了是谁占着、怎么办" ;;
+    *) bad "等锁失败时没说清" "$_out" ;;
+esac
+[ -L "$WTOOL_HOME/.lockproj.conf" ] && bad "抢锁失败却已经动手改了东西" \
+    || ok "抢锁失败时一个字节都没动"
+rm -rf "$WTOOL_STATE/.lock"
+
+# ③ 占用者已经死了 → 接管（不会永久卡住）
+mkdir -p "$WTOOL_STATE/.lock"
+printf '999999\n' > "$WTOOL_STATE/.lock/pid"
+_rc=0
+_out=$(WTOOL_LOCK_TIMEOUT=0 "$WT" install "$PW" 2>&1) || _rc=$?
+chk "占用者死了时自动接管" "$_rc" "0"
+[ -L "$WTOOL_HOME/.lockproj.conf" ] && ok "接管之后正常装上了" || bad "接管了却没装上" "$_out"
+[ -e "$WTOOL_STATE/.lock" ] && bad "接管之后没放锁" || ok "接管之后照样放锁"
+
+# ④ 可重入：子进程（继承 WTOOL_LOCK_OWNER）不抢自己人的锁，也不替父进程放锁
+mkdir -p "$WTOOL_STATE/.lock"
+printf '1\n' > "$WTOOL_STATE/.lock/pid"
+_rc=0
+_out=$(WTOOL_LOCK_OWNER=1 "$WT" install "$PW" 2>&1) || _rc=$?
+chk "继承 WTOOL_LOCK_OWNER 时不抢锁" "$_rc" "0"
+[ -e "$WTOOL_STATE/.lock" ] && ok "也不替父进程放锁" || bad "子进程把父进程的锁放了"
+rm -rf "$WTOOL_STATE/.lock"
+
+# ⑤ dry-run 不锁：不写任何东西的命令没必要互斥（否则看个计划也要等）
+mkdir -p "$WTOOL_STATE/.lock"
+printf '%s\n' "$$" > "$WTOOL_STATE/.lock/pid"
+_rc=0
+_out=$(WTOOL_LOCK_TIMEOUT=0 "$WT" install "$PW" --dry-run 2>&1) || _rc=$?
+chk "dry-run 不等锁（只读，不写状态）" "$_rc" "0"
+rm -rf "$WTOOL_STATE/.lock"
+
+# --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 printf 'contract_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

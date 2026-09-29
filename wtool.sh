@@ -60,6 +60,11 @@
 #
 # 一条铁律：**要 sudo 的都叫 sudo-\*；不叫 sudo-\* 的永远不要 sudo，也永远不碰网络。**
 # 设计原则：Python 只算不写（除 scratch），Shell 只写不算（除读 journal）。
+#
+# 会改状态目录的命令（install / uninstall / bootstrap / sudo-* / repair /
+# kill-self-forever）共用一把写锁（$WTOOL_STATE/.lock）：同一台机器上同时跑两个，
+# 后一个会等前一个（默认等 300 秒）。等多久用 WTOOL_LOCK_TIMEOUT=<秒> 调，
+# 设 0 = 不等、立刻失败。--dry-run 不拿锁。
 # 详见 docs/spec.md。
 set -eu
 
@@ -3166,7 +3171,7 @@ wt_layer_dir() { printf '%s/layer/%s\n' "$1" "$2"; }   # <项目目录> <target>
 # layout 里有 3 个镜像"）。
 #   · 用 mkdir：POSIX、原子、不用外部命令
 #   · 锁里记 pid：占用者半路死了（wt_die / 被 kill）也**不会永久卡住**，后来者抢过来
-wt_lock() {   # <锁目录> [超时秒]
+wt_lock() {   # <锁目录> [超时秒] [超时说明]
     _lk_dir=$1; _lk_to=${2:-120}; _lk_n=0
     while ! mkdir -- "$_lk_dir" 2>/dev/null; do
         _lk_owner=$(cat "$_lk_dir/pid" 2>/dev/null || echo "")
@@ -3176,13 +3181,50 @@ wt_lock() {   # <锁目录> [超时秒]
         fi
         _lk_n=$((_lk_n + 1))
         [ "$_lk_n" -lt "$((_lk_to * 5))" ] \
-            || wt_die "等锁超时：$_lk_dir（占用者 pid ${_lk_owner:-?}）"
+            || wt_die "${3:-等锁超时：$_lk_dir（占用者 pid ${_lk_owner:-?}）}"
         sleep 0.2
     done
     printf '%s\n' "$$" > "$_lk_dir/pid"
     return 0
 }
 wt_unlock() { rm -rf -- "$1"; }
+
+# --------------------------------------------------------------------------
+# 全局写锁（BL-17）：两个终端同时改状态目录，会撞 registry.tsv / journal.tsv 的
+# "读—改—写" —— 各自读旧的、各写各的，最后落盘的那个把前一个的条目抹掉
+# （和 layer/index.json 那次是同一类问题，见 hazards H17）。
+#
+#   · 只锁**会改状态目录**的命令（install / uninstall / bootstrap / sudo-* /
+#     repair / kill-self-forever）。build / download 那种几十分钟的命令不锁 ——
+#     锁住一整轮构建会让人白等，而它们改的是 output/ 和 layer/，不是账本。
+#   · **可重入**：锁在自己手里时导出的 WTOOL_LOCK_OWNER 会被子进程继承；
+#     子进程（项目脚本里再调 wtool）看到它就知道"自己人在里面"，既不抢锁、
+#     也不替父进程放锁。
+#   · dry-run 不锁：一个字节都不写，没有互斥的必要。
+#   · 占用者半路死了（wt_die / 被 kill）由 pid 检查兜底，不会永久卡住。
+wt_state_lock_acquire() {
+    wt_dry && return 0
+    [ -z "${WTOOL_LOCK_OWNER:-}" ] || return 0     # 已经在某个 wtool 的临界区里
+    mkdir -p -- "$WTOOL_STATE" 2>/dev/null || true
+    wt_lock "$WTOOL_STATE/.lock" "${WTOOL_LOCK_TIMEOUT:-300}" \
+        "另一个 wtool 正在改状态目录（占用者 pid ${_lk_owner:-?}）—— 等它跑完再来；
+  不想等就 WTOOL_LOCK_TIMEOUT=0（立刻失败，什么都不动）"
+    WTOOL_LOCK_OWNER=$$
+    export WTOOL_LOCK_OWNER
+}
+wt_state_lock_release() {
+    [ "${WTOOL_LOCK_OWNER:-}" = "$$" ] || return 0
+    wt_unlock "$WTOOL_STATE/.lock"
+    WTOOL_LOCK_OWNER=""
+    export WTOOL_LOCK_OWNER
+}
+wt_run_locked() {   # <命令...>
+    wt_state_lock_acquire
+    "$@"
+    _wl_rc=$?
+    wt_state_lock_release
+    return $_wl_rc
+}
 
 # 把一个 docker 镜像写进 layer/<target>/。同一棵 layout 里的 index.json 要**合并**
 # —— 直接把后一个 save 的 index.json 覆盖上去，前一个镜像的条目就没了（实测过）。
@@ -3675,14 +3717,22 @@ cmd_unpack_layer() {
 _cmd=${1:-}
 [ $# -gt 0 ] && shift
 
+# `--dry-run` 是**全局**开关，而且要在拿锁之前就认出来：dry-run 一个字节都不写，
+# 没有互斥的必要 —— 否则"只想看看计划"也得排在别人的锁后面（BL-17 实测踩过）。
+for _a in "$@"; do
+    [ "$_a" = "--dry-run" ] && WTOOL_DRY_RUN=1
+done
+
 case $_cmd in
     build)     cmd_build "$@" ;;
     download-release) cmd_download_release "$@" ;;
-    install)   cmd_install "$@" ;;
-    uninstall) cmd_uninstall "$@" ;;
-    sudo-install)   cmd_sudo_install "$@" ;;
-    sudo-uninstall) cmd_sudo_uninstall "$@" ;;
-    sudo-bootstrap) cmd_sudo_bootstrap "$@" ;;
+    # 下面这几条都走 wt_run_locked：它们会**改状态目录**（registry / journal / env
+    # 汇总），两个终端同时跑就会互相抹掉对方的条目 —— 见 BL-17
+    install)   wt_run_locked cmd_install "$@" ;;
+    uninstall) wt_run_locked cmd_uninstall "$@" ;;
+    sudo-install)   wt_run_locked cmd_sudo_install "$@" ;;
+    sudo-uninstall) wt_run_locked cmd_sudo_uninstall "$@" ;;
+    sudo-bootstrap) wt_run_locked cmd_sudo_bootstrap "$@" ;;
     download) wt_die "download 已改名 download-release，而且**语义变了**：它现在只把包下到 release/，不解包。
   接着敲：wtool unpack-release <项目>      # 解到 output/，再 wtool install
   （理由见 harness/docs/adr/0023）" ;;
@@ -3711,10 +3761,10 @@ case $_cmd in
     layer-save)    cmd_layer_save "$@" ;;
     layer-load)    cmd_layer_load "$@" ;;
     unpack-layer)  cmd_unpack_layer "$@" ;;
-    bootstrap) cmd_bootstrap "$@" ;;
+    bootstrap) wt_run_locked cmd_bootstrap "$@" ;;
     check)     cmd_check "$@" ;;
-    repair)    cmd_repair "$@" ;;
-    kill-self-forever) cmd_kill_self_forever "$@" ;;
+    repair)    wt_run_locked cmd_repair "$@" ;;
+    kill-self-forever) wt_run_locked cmd_kill_self_forever "$@" ;;
     status)    cmd_status "$@" ;;
     doctor)    cmd_doctor "$@" ;;
     docs)      shift; [ "${1:-}" = "refresh" ] && shift

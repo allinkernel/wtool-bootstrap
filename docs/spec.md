@@ -276,6 +276,26 @@ install <项目>
 - **只删软链，不动 `~/.wtool/usr` 里的实体** —— 那是编译/下载产物，归 `uninstall` 和项目脚本管
 - 它**不进 registry**（进去的话，最后一个项目卸完它还挂着，`~/usr` 就永远收不走）
 
+### 全局写锁（BL-17）
+
+`registry.tsv` / `journal.tsv` / env 汇总都是"读—改—写"：两个终端同时改，
+最后落盘的那个会把前一个的条目抹掉（和 `layer/index.json` 那次是同一类问题，
+见 `harness/docs/hazards.md` H17）。所以**改状态目录的命令**统一走一把目录锁：
+
+| 谁拿锁 | `install` / `uninstall` / `bootstrap` / `sudo-install` / `sudo-uninstall` /
+`sudo-bootstrap` / `repair` / `kill-self-forever` |
+|---|---|
+| 锁在哪 | `$WTOOL_STATE/.lock`（目录当锁，里面写占用者的 pid） |
+| 等多久 | 默认 300 秒，`WTOOL_LOCK_TIMEOUT=<秒>` 可改；`=0` 表示立刻失败 |
+| 谁不拿锁 | `build` / `download-release` / `pack-release` 这类**长命令**（它们改的是
+`output/` 和 `layer/`，不是账本；锁一整轮构建会让人白等）和 `--dry-run`（一个字节都不写） |
+| 占用者死了 | pid 检查兜底：`kill -0` 不通就把锁抢过来，**不会永久卡住** |
+| 可重入 | 拿锁的进程导出 `WTOOL_LOCK_OWNER=$$`；子进程（项目脚本里再调 `wtool`）
+看到它就既不抢锁、也不替父进程放锁 |
+
+超时时的报错是一条能照做的信息（谁占着、等它跑完、或 `WTOOL_LOCK_TIMEOUT=0`），
+不是一个光秃秃的"失败"。
+
 ---
 
 ## 5. 受管块格式
@@ -348,9 +368,9 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 ## 8. 未来方向（预留，尚未实现）
 
 > **这张表已经移到 `harness/BACKLOG.md`**（2026-09-27 文档体系调整）——
-> 对应那里的 **BL-16**（`--exact`）、**BL-17**（并发锁），
+> 对应那里的 **BL-16**（`--exact`），
 > 以及"预留设计"一节（system scope / 多 shell / `wtool` 命令本身）。
-> （**BL-15 `--prune` 已经实现**，见 §4。）
+> （**BL-15 `--prune` 与 BL-17 全局写锁已经实现** —— 见 §4 和 §4 末尾「全局写锁」。）
 >
 > 理由：契约文档只写**已经成立**的东西；"打算怎么做"属于 BACKLOG。
 
@@ -366,11 +386,11 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 114 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等） |
+| contract | `tests/contract_test.sh` | 124 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁） |
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 46 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **499** 条断言：
+共 **509** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 9 组全跑

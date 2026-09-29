@@ -31,9 +31,9 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 9 组 / 499 条断言
+./tests/run_all.sh                    # 9 组 / 509 条断言
                                       # pairing 35 / sudo-install 24 / publish 114 / table 43
-                                      # release-copy 17 / release 62 / contract 114 / layer 46
+                                      # release-copy 17 / release 62 / contract 124 / layer 46
                                       # docker-build 44（kind=docker 的引擎驱动构建）
 ```
 
@@ -161,7 +161,7 @@ wtool doctor
 （`<zshrc>` / `<bashrc>` / 三段 `<link>` / `<sudo-install>`）就删掉兼容分支。
 
 **还没做**（见 `harness/BACKLOG.md`）：
-`check --json`、`--exact`、并发锁、fish 支持。
+`check --json`、`--exact`、fish 支持。
 
 **已实现但需要 root**：`/etc` 改动备份的**第二份** `/var/backups/wtool/<原始路径>`
 （`lib/wtool_fs.sh:379-441`）—— 非 root 时跳过这一份并打印说明，
