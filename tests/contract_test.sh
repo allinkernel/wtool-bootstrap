@@ -605,6 +605,91 @@ case $_out in
 esac
 [ -e "$WTOOL_HOME/.instid.conf" ] && bad "dry-run 居然真装了" || ok "dry-run 一个字节没动"
 
+# --------------------------------------------------------------------------
+printf '\n== 场景 11：install --prune 清掉"清单里已经删掉"的软链（BL-15）==\n'
+#   症状：从 wtool.xml 里删掉一条 <link> 之后重装，旧软链还留在磁盘上
+#   （journal 里也还在），一直到 uninstall 才清。--prune 以 journal 为基准收掉它们。
+#   判据必须是 **journal**（"我做过什么"）而不是扫磁盘 —— 扫磁盘会删掉用户自己的东西。
+newhome
+mkdir -p "$WTOOL_ROOT"
+PP=$(mkproj "terminal/pruneproj" "terminal/pruneproj")
+mkdir -p "$PP/scripts"
+printf 'a\n' > "$PP/a.conf"
+printf 'b\n' > "$PP/b.conf"
+printf 'x\n' > "$PP/x.conf"
+prune_manifest() {   # <要写进去的 link 行…>：没给就写"只有 a 那一行"
+    {
+        printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+        printf '<wtool schema="1" id="terminal/pruneproj" priority="50">\n'
+        printf '%s\n' "$@"
+        printf '</wtool>\n'
+    } > "$PP/wtool.xml"
+    git -C "$PP" add -A
+    git -C "$PP" -c user.name=t -c user.email=t@t commit -qm "manifest"
+}
+prune_manifest \
+  '<link home="~/.prune-a.conf" wtool="~/.wtool/.prune-a.conf" subproject="a.conf"/>' \
+  '<link home="~/.prune-b.conf" wtool="~/.wtool/.prune-b.conf" subproject="b.conf"/>' \
+  '<link home="~/.prune-dir/x.conf" wtool="~/.wtool/.prune-x.conf" subproject="x.conf"/>'
+"$WT" install "$PP" >/dev/null 2>&1 || bad "第一遍没装上（后面的断言都不成立）"
+{ [ -L "$WTOOL_HOME/.prune-a.conf" ] && [ -L "$WTOOL_HOME/.prune-b.conf" ] \
+  && [ -L "$WTOOL_HOME/.prune-dir/x.conf" ]; } \
+    && ok "三条软链都建了" || bad "第一遍没建全"
+[ -d "$WTOOL_HOME/.prune-dir" ] && ok "嵌套落点的父目录是引擎建的（--prune 要能收走）" \
+    || bad "父目录没建"
+# 用户自己（不是 wtool）放的一条软链：--prune 一个字节都不许碰
+ln -s /etc/hostname "$WTOOL_HOME/.prune-user.conf"
+
+# 清单里删掉 b，重装
+prune_manifest '<link home="~/.prune-a.conf" wtool="~/.wtool/.prune-a.conf" subproject="a.conf"/>'
+"$WT" install "$PP" >/dev/null 2>&1 || bad "删掉 b 之后重装失败"
+[ -L "$WTOOL_HOME/.prune-b.conf" ] && ok "不带 --prune 时旧软链留着（BL-15 的症状，故意的）" \
+    || bad "什么都没做旧链就没了（那这条不是可选项了）"
+
+# ① --dry-run 只说不做
+"$WT" install "$PP" --prune --dry-run >/dev/null 2>&1 || bad "--prune --dry-run 失败"
+[ -L "$WTOOL_HOME/.prune-b.conf" ] && ok "--prune --dry-run 一个字节没动" || bad "dry-run 居然真删了"
+
+# ② --prune 真删，而且只删该删的
+_rc=0
+_out=$("$WT" install "$PP" --prune 2>&1) || _rc=$?
+chk "--prune 退出码 0" "$_rc" "0"
+[ -L "$WTOOL_HOME/.prune-b.conf" ] && bad "--prune 没删掉旧软链" "$_out" \
+    || ok "--prune 删掉了旧软链（清单里没有 b 了）"
+[ -L "$WTOOL_HOME/.prune-a.conf" ] && ok "清单里还有的那条留着" || bad "--prune 连在册的也删了"
+[ -L "$WTOOL_HOME/.prune-user.conf" ] && ok "不是我们建的软链不碰" || bad "--prune 删了用户自己的软链"
+[ -e "$WTOOL_HOME/.prune-dir" ] && bad "嵌套落点的空目录没收走（prune-dir 没跑）" \
+    || ok "嵌套落点的空目录也收走了"
+grep -q 'prune-b' "$WTOOL_STATE/terminal/pruneproj/journal.tsv" 2>/dev/null \
+    && bad "账还留在 journal 里（下次 --prune 会再删一遍）" || ok "journal 里那条账销掉了"
+grep -q 'prune-b' "$WTOOL_STATE/registry.tsv" 2>/dev/null \
+    && bad "registry 里还占着落点（别的项目想用会撞冲突）" || ok "registry 里那条清了"
+
+# ③ 幂等：再来一次不报错、也不动别的东西
+_rc=0
+_out=$("$WT" install "$PP" --prune 2>&1) || _rc=$?
+chk "重复 --prune 退出码 0" "$_rc" "0"
+[ -L "$WTOOL_HOME/.prune-a.conf" ] && [ -L "$WTOOL_HOME/.prune-user.conf" ] \
+    && ok "重复 --prune 没伤到别人" || bad "重复 --prune 删多了"
+
+# ④ 刹车：落点已经归了**另一个项目**（链接搬了家）→ 不删，留给那个项目
+PQ=$(mkproj "terminal/pruneproj2" "terminal/pruneproj2")
+mkdir -p "$PQ/scripts"
+printf 'c\n' > "$PQ/c.conf"
+cat > "$PQ/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="terminal/pruneproj2" priority="50">
+  <link home="~/.prune-a.conf" wtool="~/.wtool/.prune-a2.conf" subproject="c.conf"/>
+</wtool>
+EOF
+git -C "$PQ" add -A && git -C "$PQ" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" install "$PQ" --force >/dev/null 2>&1 || bad "第二个项目（同一个落点）没装上"
+prune_manifest '<link home="~/.stay.conf" wtool="~/.wtool/.stay.conf" subproject="a.conf"/>'
+"$WT" install "$PP" --prune >/dev/null 2>&1 || bad "第二个项目装上之后 --prune 失败"
+[ -L "$WTOOL_HOME/.prune-a.conf" ] && ok "落点归了别的项目时不越权（链接留着）" \
+    || bad "--prune 删了别的项目正在用的软链"
+
+# --------------------------------------------------------------------------
 # ③ 找不到时给的是能看懂的错，并且提一句怎么列出全部
 _out=$("$WT" install nosuch-project 2>&1) || true
 case $_out in

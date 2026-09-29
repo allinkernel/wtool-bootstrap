@@ -5,9 +5,10 @@
 #   wtool sudo-install <项目>... [--dry-run] [--force]
 #                      系统层：/etc 下的文件 + 要跑的脚本/playbook + apt 包。
 #                      **可能要 sudo、要联网**；和 install 永不互相调用
-#   wtool install      <项目目录> [--dry-run] [--force] [--no-script]
+#   wtool install      <项目目录> [--dry-run] [--force] [--no-script] [--prune]
 #                      用户层：项目 install.sh（output/ → ~/.wtool）→
 #                      wtool.xml 的 link（影子 HOME → $HOME）。**永不 sudo、永不联网**
+#                      --prune：顺手清掉"清单里已经删掉、磁盘上还在"的软链（BL-15）
 #   wtool uninstall    <项目目录>|--id <id> [--dry-run] [--force] [--no-script]
 #                      撤销上一条（不还原 /etc —— 那是 sudo-uninstall 的事）
 #
@@ -227,6 +228,7 @@ wt_print_plan() {
         case $_action in
             link) wt_step "link  $_dest -> $_source" ;;
             rc)   wt_step "rc    $_dest" ;;
+            prune) wt_step "prune $_dest（清单里已经没有，删掉这条软链）" ;;
         esac
     done < "$_plan"
 }
@@ -1295,11 +1297,12 @@ cmd_install() {
             --dry-run)   WTOOL_DRY_RUN=1 ;;
             --force)     WTOOL_FORCE=1 ;;
             --no-script) _no_script=1 ;;
+            --prune)     WTOOL_PRUNE=1 ;;
             -*)          wt_die "未知参数: $arg" ;;
             *)           _project=$arg ;;
         esac
     done
-    [ -n "$_project" ] || wt_die "用法: wtool.sh install <项目目录|项目 id|all> [--dry-run] [--force] [--no-script]"
+    [ -n "$_project" ] || wt_die "用法: wtool.sh install <项目目录|项目 id|all> [--dry-run] [--force] [--no-script] [--prune]"
 
     # `wtool install all` = 装所有"不需要你决策"的项目（和 wtool bootstrap 同一条路）。
     # 需求 2 要的就是这个形状：build / install / publish / download 都认 all。
@@ -1307,6 +1310,7 @@ cmd_install() {
         set --
         [ "${WTOOL_DRY_RUN:-0}" = 1 ] && set -- "$@" --dry-run
         [ "${WTOOL_FORCE:-0}" = 1 ] && set -- "$@" --force
+        [ "${WTOOL_PRUNE:-0}" = 1 ] && set -- "$@" --prune
         cmd_bootstrap "$@"
         return $?
     fi
@@ -1348,7 +1352,8 @@ install 不替你做这个决定 —— 它永不联网。"
     python3 "$PY" plan-install "$_project" \
         --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
         --head "$WTOOL_HEAD" --at "$(wt_now)" \
-        $([ "$WTOOL_FORCE" = 1 ] && echo --force) || exit $?
+        $([ "$WTOOL_FORCE" = 1 ] && echo --force) \
+        $([ "${WTOOL_PRUNE:-0}" = 1 ] && echo --prune) || exit $?
 
     wt_load_project "$_scratch"
     wt_info "project: $WTOOL_PROJECT_ID"
@@ -1881,6 +1886,7 @@ cmd_bootstrap() {
         case $arg in
             --dry-run)      WTOOL_DRY_RUN=1 ;;
             --force)        WTOOL_FORCE=1 ;;
+            --prune)        WTOOL_PRUNE=1 ;;   # 每个项目都顺手清一次旧软链（BL-15）
             --with-system)  wt_die "--with-system 已经删掉：系统层请用 wtool sudo-bootstrap
 （bootstrap 只做用户层，永不 sudo、永不联网）" ;;
             --no-system)    wt_die "--no-system 已经删掉：bootstrap 本来就不做系统层" ;;
@@ -1930,6 +1936,7 @@ cmd_bootstrap() {
         _common=""
         [ "$WTOOL_FORCE" = 1 ] && _common="$_common --force"
         [ "$WTOOL_DRY_RUN" = 1 ] && _common="$_common --dry-run"
+        [ "${WTOOL_PRUNE:-0}" = 1 ] && _common="$_common --prune"
         # shellcheck disable=SC2086
         cmd_install "$_path" $_common || wt_die "install 失败: $_pid"
     done < "$_list"

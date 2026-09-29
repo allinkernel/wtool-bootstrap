@@ -54,6 +54,18 @@ wt_journal_reverse() {
         || grep -v '^#' "$WTOOL_JOURNAL" | sed '/^$/d' | tail -r
 }
 
+# 忘掉一条账（--prune 删掉软链之后用）：journal 描述的是"当前该撤销什么"，
+# 东西已经主动撤了，这条就该消失 —— 留着它下次 --prune 还会再删一遍（无害但会撒谎）。
+wt_journal_del() {   # <action> <dest>
+    wt_dry && return 0
+    [ -n "${WTOOL_JOURNAL:-}" ] || return 0
+    [ -f "$WTOOL_JOURNAL" ] || return 0
+    _jd_a=$1; _jd_d=$2
+    _jd_tmp="$WTOOL_JOURNAL.tmp.$$"
+    awk -F'\t' -v a="$_jd_a" -v d="$_jd_d" '!($1 == a && $3 == d)' \
+        "$WTOOL_JOURNAL" > "$_jd_tmp" && mv -f -- "$_jd_tmp" "$WTOOL_JOURNAL"
+}
+
 # --------------------------------------------------------------------------
 # registry：全局登记 dest -> 项目，用来发现跨项目冲突
 # 格式: dest \t project_id \t kind
@@ -235,6 +247,24 @@ wt_plan_exec() {
                     wt_run rm -f -- "$_dest"
                     wt_registry_del "$_dest"
                 fi
+                ;;
+            prune)
+                # `install --prune`（BL-15）：删掉"清单里已经删掉、磁盘上还在"的软链。
+                # 和 unlink 的区别：这条是 journal 里的旧账，删完要**把账也销掉**。
+                # 三道验：还是软链、还指向当初那个目标、账上确实有它 —— 缺一条就不动。
+                if [ -L "$_dest" ] \
+                   && { [ "$_source" = "-" ] || [ "$(readlink -- "$_dest")" = "$_source" ]; } \
+                   && wt_journal_owns link "$_dest"; then
+                    wt_run rm -f -- "$_dest"
+                    wt_registry_del "$_dest"
+                    wt_journal_del link "$_dest"
+                    wt_step "prune $_dest（清单里已经没有）"
+                fi
+                ;;
+            prune-dir)
+                # 顺带收走空目录。非空的**一律留着** —— 里面可能是用户自己的东西
+                wt_remove_dir_if_empty "$_dest"
+                wt_journal_del mkdir "$_dest"
                 ;;
             rc)
                 # 老版本写在用户 rc 里的块。现在只用于迁移清理，

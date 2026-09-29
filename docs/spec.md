@@ -188,6 +188,17 @@ install <项目>
 | `reg` | `dir`/`file` | 要登记的绝对路径 | — | — | — |
 | `link` | `dir`/`file` | 软链位置 | 软链目标 | — | — |
 | `rc` | `file` | rc 文件 | scratch 里的新内容 | 新内容 sha256 | 被替换掉的旧块 sha256 或 `-` |
+| `envblock` | `zsh`/`bash` | 状态目录里的块文件 | scratch 里的新内容 | 新内容 sha256 | 项目内的 env 相对路径 |
+| `unlink` | `dir`/`file` | 软链位置 | 期望指向（`-` = 不看） | — | — |
+| `prune` | `dir`/`file` | journal 里的旧落点 | 当初的指向 | — | — |
+| `prune-dir` | `dir` | journal 里"我们建过"的目录 | — | — | — |
+| `regdel` | `dir`/`file` | 要注销的落点 | — | — | — |
+| `write` / `remove` | `file` | 汇总文件 / loader 块 | scratch 里的新内容 | — | — |
+| `envblock-del` | `zsh`/`bash` | 状态目录里的块文件 | — | — | — |
+
+`link`/`reg` 出现在 `plan.tsv`（引擎基建）和 `plan.home.tsv`（声明面）两张表里；
+`prune` / `prune-dir` **只有 `install --prune` 才会发**；`unlink` / `regdel` 是引擎收自己造的
+全局软链（`~/usr`）用的。
 
 **为什么用 TSV 而不是 shell 代码**：py 生成 shell 代码需要自己做引号转义，路径里一个空格就出事故；TSV + `IFS='\t' read` 没有这个问题。
 
@@ -220,6 +231,22 @@ install <项目>
 4. **落账**：写 `meta.tsv`、更新 `registry.tsv`、追加 journal（按 `(action,dest)` 去重）。
 
 重复 install = **restow**（等价于 GNU Stow 的 `stow -R`）：已正确的软链不重建，rc 块原地更新，plan 为空时打印"没有需要变更的内容"。
+
+#### `install --prune`（BL-15）
+
+从 `wtool.xml` 里**删掉**一条 `<link>` 之后重装，旧软链还留在磁盘上（journal 里也还在），
+一直到 uninstall 才清 —— 这是默认行为（restow 不删别人没让它删的东西）。
+`--prune` 是显式的收尾清理，判据是 **journal**（"我做过什么"）而不是扫磁盘：
+
+| 情况 | 动作 |
+|---|---|
+| journal 里有 `link`、这次清单里没有它 | `prune`：删软链（**先验还指向当初那个目标**）+ 清 registry + 销掉这条账 |
+| journal 里有 `mkdir`、目录已经没人用 | `prune-dir`：**只有空目录**才 `rmdir`（非空一律留着），并把账销掉 |
+| 落点在 registry 里已经归**别的项目** | 不删（链接搬了家，留给那个项目） |
+| 不是我们建的软链（journal 里没有） | 不碰 —— 扫磁盘"看着像我们的就删"会删掉用户自己的东西 |
+
+默认关（opt-in）：`wtool install <项目> --prune`、`wtool install all --prune` 都认；
+`--dry-run` 只打印计划。
 
 ### uninstall
 
@@ -321,8 +348,9 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 ## 8. 未来方向（预留，尚未实现）
 
 > **这张表已经移到 `harness/BACKLOG.md`**（2026-09-27 文档体系调整）——
-> 对应那里的 **BL-15**（`--prune`）、**BL-16**（`--exact`）、**BL-17**（并发锁），
+> 对应那里的 **BL-16**（`--exact`）、**BL-17**（并发锁），
 > 以及"预留设计"一节（system scope / 多 shell / `wtool` 命令本身）。
+> （**BL-15 `--prune` 已经实现**，见 §4。）
 >
 > 理由：契约文档只写**已经成立**的东西；"打算怎么做"属于 BACKLOG。
 
@@ -338,11 +366,11 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 100 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
+| contract | `tests/contract_test.sh` | 114 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等） |
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 46 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **485** 条断言：
+共 **499** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 9 组全跑

@@ -6,6 +6,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 # 日常三条（一条铁律：要 sudo 的都叫 sudo-*）
 ./wtool.sh sudo-install <项目>    # 系统层：/etc 下的文件、apt 包、要跑的脚本（可能要 sudo）
 ./wtool.sh install      <项目>    # 用户层：output/ → ~/.wtool，再铺 $HOME 软链（永不 sudo）
+                                  # --prune：顺手清掉"清单里已经删掉"的旧软链（BL-15）
 ./wtool.sh uninstall    <项目>    # 撤销 install（不还原 /etc —— 那是 sudo-uninstall 的事）
 
 # 系统层
@@ -30,9 +31,9 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 9 组 / 485 条断言
+./tests/run_all.sh                    # 9 组 / 499 条断言
                                       # pairing 35 / sudo-install 24 / publish 114 / table 43
-                                      # release-copy 17 / release 62 / contract 100 / layer 46
+                                      # release-copy 17 / release 62 / contract 114 / layer 46
                                       # docker-build 44（kind=docker 的引擎驱动构建）
 ```
 
@@ -50,7 +51,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 | `lib/wtool_plan.py` | 规划器：解析 `wtool.xml`、校验、算 rc 新内容、算发布文件表（只写 scratch） |
 | `lib/wtool_fs.sh` | 执行器：软链、原子写、journal、registry、打包/解包（**受管**写入都走这里） |
 | `lib/wtool_zip.py` | 打包工具：zip 的读写（中文名要 UTF-8 标志，系统的 zip 不设） |
-| `tests/` | 7 组断言：pairing / sudo-install / publish / table / release-copy / release / contract |
+| `tests/` | 9 组断言：pairing / sudo-install / publish / table / release-copy / release / contract / docker-build / layer |
 | `docs/spec.md` | **接口契约**（改代码前先看） |
 | `docs/manifest-schema.md` | `wtool.xml` 完整字段表 |
 | `docs/roadmap.md` | 只剩一个指针 —— 内容已并入 `harness/BACKLOG.md` |
@@ -160,7 +161,7 @@ wtool doctor
 （`<zshrc>` / `<bashrc>` / 三段 `<link>` / `<sudo-install>`）就删掉兼容分支。
 
 **还没做**（见 `harness/BACKLOG.md`）：
-`check --json`、`--prune`、`--exact`、并发锁、fish 支持。
+`check --json`、`--exact`、并发锁、fish 支持。
 
 **已实现但需要 root**：`/etc` 改动备份的**第二份** `/var/backups/wtool/<原始路径>`
 （`lib/wtool_fs.sh:379-441`）—— 非 root 时跳过这一份并打印说明，

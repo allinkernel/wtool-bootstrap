@@ -940,6 +940,50 @@ def _link_hops(entry, link_dir):
     return hops
 
 
+def _prune_rows(state_dir, project_id, owned, registry, link_dir):
+    """`install --prune`：清掉「清单里已经删掉、磁盘上还在」的软链（BL-15）。
+
+    判据是 **journal**（"我做过什么"）而不是磁盘扫描：只有我们自己记过账的落点
+    才动。这样别人的软链、用户自己建的东西，一概不碰 —— 扫磁盘"看着像我们的就删"
+    会删掉用户的东西，那是不可逆的错。
+
+    三道刹车：
+      · 落点这次清单里还有（owned）→ 不删
+      · registry 说这条属于**另一个项目**（链接搬家了）→ 不删，留给那个项目
+      · 磁盘上指向已经变了（用户改过）→ sh 那一侧再验一次才删
+    """
+    journal = os.path.join(state_dir, project_id, "journal.tsv")
+    rows = []
+    text = read_text(journal)
+    if not text:
+        return rows
+    stale_dirs = []
+    for line in text.split("\n"):
+        if not line or line.startswith("#"):
+            continue
+        f = line.split("\t")
+        if len(f) < 4:
+            continue
+        action, dest, target = f[0], f[2], f[3]
+        if action == "link":
+            if dest in owned or dest == link_dir:
+                continue
+            owner = registry.get(dest)
+            if owner and owner != project_id:
+                continue          # 这条现在归别人（或改装到别人名下）—— 别越权
+            rows.append(("prune", f[1] if len(f) > 1 and f[1] else "file",
+                         dest, target or "-", "", ""))
+        elif action == "mkdir":
+            # 顺手收走"这条软链的父目录是我们建的"那种空目录。
+            # 只有空目录会被删（wt_remove_dir_if_empty），非空一律留着。
+            if not any(o == dest or o.startswith(dest.rstrip("/") + "/") for o in owned):
+                stale_dirs.append(dest)
+    # 深的先删：先删 ~/.config/foo/bar，才轮得到 ~/.config/foo
+    for d in sorted(set(stale_dirs), key=len, reverse=True):
+        rows.append(("prune-dir", "dir", d, "", "", ""))
+    return rows
+
+
 def plan_install(args, scratch):
     project_root = os.path.abspath(args.project)
     home = os.path.abspath(args.home)
@@ -991,11 +1035,13 @@ def plan_install(args, scratch):
 
     rows = []          # 引擎基建：中转链接 + env 块（项目 install.sh **之前**）
     home_rows = []     # 声明面：$HOME 里的软链（install.sh **之后**，见 §4.2）
+    owned = set()      # 这次清单声明要有的落点（--prune 用它判断"哪些已经不该在"）
 
     def add_link(bucket, kind, dest, target):
         """reg 行始终发出（保持 registry 与磁盘一致）；
         link 行只在软链缺失/指向不对时才发出，这样重复 install 才是真正的 no-op。"""
         bucket.append(("reg", kind, dest, "", "", ""))
+        owned.add(os.path.normpath(dest))
         want = os.path.normpath(target)
         if os.path.islink(dest) and os.path.normpath(os.readlink(dest)) == want:
             return
@@ -1047,6 +1093,10 @@ def plan_install(args, scratch):
             fh.write(new_text)
         rows.append(("envblock", shell, dest, blk_file,
                      sha256_text(new_text), env_rel))
+
+    # 可选的收尾清理（BL-15）：`wtool install <项目> --prune`
+    if getattr(args, "prune", False):
+        rows.extend(_prune_rows(state_dir, project_id, owned, registry, link_dir))
 
     _write_plan(scratch, rows)
     _write_plan(scratch, home_rows, "plan.home.tsv")
@@ -2976,6 +3026,8 @@ def build_parser():
 
     ip = sub.add_parser("plan-install")
     common(ip)
+    # BL-15：清掉"清单里已经删掉、磁盘上还在"的软链（默认关，opt-in）
+    ip.add_argument("--prune", action="store_true")
     up = sub.add_parser("plan-uninstall")
     common(up)
     pp = sub.add_parser("plan-provision")
@@ -3101,9 +3153,12 @@ def main(argv):
             n_link = sum(1 for r in res["rows"] if r[0] == "link")
             n_home = sum(1 for r in res.get("home_rows", []) if r[0] == "link")
             n_rc = sum(1 for r in res["rows"] if r[0] in ("rc", "envblock"))
+            n_prune = sum(1 for r in res["rows"] if r[0] in ("prune", "prune-dir"))
             print("project   : %s" % res["project_id"])
             print("root      : %s" % res["project_root"])
             print("actions   : %d link, %d home-link, %d rc" % (n_link, n_home, n_rc))
+            if n_prune:
+                print("prune     : %d 条（清单里已经没有）" % n_prune)
         elif args.cmd == "plan-uninstall":
             res = plan_uninstall(args, args.scratch)
             for w in res["warnings"]:
