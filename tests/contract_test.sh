@@ -518,6 +518,39 @@ chk "local 项目就算 output/ 里有多个目录，targets 还是空" "" \
     "$(python3 "$boot/lib/wtool_plan.py" release-targets "$PL")"
 
 # --------------------------------------------------------------------------
+printf '\n== 场景 9b：check 两个 shell 的汇总文件都查（BL-24）==\n'
+#   生成那一侧两个 shell 都做了（render_env + _loader_block），
+#   但 check 原来只查 ~/.wtool/.zshrc —— .bashrc 被误删时它一声不吭，
+#   而 bash 用户的环境变量就静默失效了（最难查的半装状态）。
+newhome
+mkdir -p "$WTOOL_ROOT"
+PB=$(mkproj "terminal/bashonly" "terminal/bashonly")
+printf 'export BASH_ONLY=1\n' > "$PB/env.bash"
+printf 'export BASH_ONLY=1\n' > "$PB/env.zsh"
+cat > "$PB/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="terminal/bashonly" priority="50">
+  <zshrc  src="env.zsh"/>
+  <bashrc src="env.bash"/>
+</wtool>
+EOF
+git -C "$PB" add -A && git -C "$PB" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" install "$PB" >/dev/null 2>&1 || bad "装了却失败" "$(cat "$T/../x" 2>/dev/null)"
+_out=$("$WT" check "$PB" 2>&1) || true
+case $_out in
+    *bashrc*) bad "两个汇总文件都在时就报 bashrc 有问题" "$_out" ;;
+    *) ok "两个汇总文件都在时 check 不报" ;;
+esac
+rm -f "$WTOOL_HOME/.wtool/.bashrc"
+_rc=0
+_out=$("$WT" check "$PB" 2>&1) || _rc=$?
+case $_out in
+    *".wtool/.bashrc 不见了"*) ok "★删掉 ~/.wtool/.bashrc 之后 check 报出来（BL-24 修好）" ;;
+    *) bad "删了 .bashrc check 还是不吭声" "$_out" ;;
+esac
+[ "$_rc" != 0 ] && ok "check 退出码非 0" || bad "报了问题却退 0"
+
+# --------------------------------------------------------------------------
 printf '\n== 场景 10：install 认项目 id 和 all（需求 2）==\n'
 #   需求 2 的形状是 `wtool [build|install|publish|download] all`。
 #   build/download 早就有 all，install 只有 bootstrap 那条名字 —— 2026-09-28 补上。

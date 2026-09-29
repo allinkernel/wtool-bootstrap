@@ -338,11 +338,11 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 97 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
+| contract | `tests/contract_test.sh` | 100 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets） |
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 46 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **482** 条断言：
+共 **485** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 9 组全跑

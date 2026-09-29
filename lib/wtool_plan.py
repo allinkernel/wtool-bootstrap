@@ -2800,11 +2800,14 @@ def do_check(args):
         bad("-", "~/usr 不见了（有项目装着，它应该在）")
 
     # ---- 全局：env 汇总与 loader 块
-    agg_zsh = os.path.join(home, SHADOW_ROOT_NAME, ".zshrc")
-    blocks = collect_env_blocks(state, "zsh")
-    if blocks and not os.path.isfile(agg_zsh):
-        bad("-", "~/.wtool/.zshrc 不见了，但还有 %d 个项目的 env 块" % len(blocks))
+    # 汇总文件两个 shell 都要查：只查 zsh 的话，`~/.wtool/.bashrc` 被误删时
+    # check 一声不吭，而"那个 shell 的用户敲命令 command not found"——
+    # 正是最难查的半装状态（BL-24；生成那一侧本来就两个 shell 都做了）。
     for shell in ("zsh", "bash"):
+        agg = os.path.join(home, SHADOW_ROOT_NAME, ".%src" % shell)
+        blocks = collect_env_blocks(state, shell)
+        if blocks and not os.path.isfile(agg):
+            bad("-", "~/.wtool/.%src 不见了，但还有 %d 个项目的 env 块" % (shell, len(blocks)))
         rc = os.path.join(home, ".%src" % shell)
         text = read_text(rc) or ""
         has_loader = any(l.strip() == LOADER_BEGIN for l in text.split("\n"))
