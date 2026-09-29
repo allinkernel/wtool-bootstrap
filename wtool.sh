@@ -2895,6 +2895,39 @@ cmd_publish_release() {
             continue
         fi
 
+        # ── 同名 commit 重发（BL-03）────────────────────────────────────
+        # 发布声明里记着"这一版是哪个 commit 编的"。当前 HEAD 就是它，说明
+        # **内容一个字都不会变**，重发只是把同样的字节再传一遍 —— 十有八九是手滑
+        # （或者上一次传到一半断了）。所以问一句；**非交互环境下不猜你的意思**，
+        # 直接拒绝：脚本里跑的命令绝不该卡在等输入上（和 astronvim 的 publish.sh
+        # 处理"目标系统"是同一套规矩）。
+        _prev_commit=$(python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("commit") or "")
+except Exception:
+    print("")' "$_path/scripts/release.json" 2>/dev/null || true)
+        _head=$(git -C "$_path" rev-parse HEAD 2>/dev/null || true)
+        if [ -n "$_prev_commit" ] && [ -n "$_head" ] \
+           && [ "$_prev_commit" = "$_head" ] && [ "${WTOOL_FORCE:-0}" != 1 ]; then
+            _short=$(printf '%s' "$_head" | cut -c1-12)
+            if [ ! -t 0 ]; then
+                wt_warn "  HEAD（$_short）已经发布过：发布页上的归档就是它编的，内容不会有变化"
+                wt_warn "  非交互环境不猜你的意思 —— 确认要重发就加 --force；"
+                wt_warn "  内容真的变了就先提交，再 pack-release 一次"
+                _failed=$((_failed + 1))
+                continue
+            fi
+            printf '  发布页上的归档就是这个 commit（%s）编的，内容不会有变化。\n' "$_short"
+            printf '  确定重发吗？[y/N] '
+            _ans=""
+            read -r _ans || _ans=""
+            case $_ans in
+                y|Y|yes|YES) wt_info "  好，重发这一版" ;;
+                *) wt_warn "  取消：什么都没上传"; continue ;;
+            esac
+        fi
+
         if wt_dry; then
             wt_step "[dry-run] 上传 $_n 个文件 → $_repo $_tag"
             wt_step "[dry-run] 之后写 scripts/release.json（记得提交）"

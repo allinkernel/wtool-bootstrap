@@ -382,7 +382,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 |---|---|---|---|
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
 | sudo-install | `tests/provision_test.sh` | 24 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
-| publish | `tests/publish_test.sh` | 114 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用 |
+| publish | `tests/publish_test.sh` | 124 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行） |
 | table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
@@ -390,7 +390,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 46 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **509** 条断言：
+共 **519** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 9 组全跑
@@ -772,6 +772,15 @@ wtool publish-release tmux --out=/tmp/pkg      # 发布完把 release/ 里的产
   说明怎么改（写 `<publish to="自己的仓"/>` 或 `kind="none"`；`--allow-foreign` 可以强行试）
 - 上传失败**不 die、不删产物**：警告、保住 `release/`、继续下一个项目，可直接补传
   （不必重新构建）
+- **同一个 commit 重发要问一句**（BL-03）：准备发布时拿 `scripts/release.json` 里记的
+  `commit`（= 打包时那个 commit，来自 `dist.json`）和当前 HEAD 比 ——
+  相同说明**内容一个字都不会变**，重发十有八九是手滑，或者上次传到一半断了：
+  - **交互**（stdin 是终端）：打印这个 commit，问 `确定重发吗？[y/N]`，不答 y 就跳过这个项目；
+  - **非交互**（stdin 不是终端，比如脚本 / 容器里跑）：**不猜**，直接拒绝并要求 `--force`
+    —— 脚本里跑的命令绝不该卡在等输入上；
+  - **`--force`**：跳过这个检查（"上次没传完，原样重传"就是这种）。
+  注意它比的是**打包时那个 commit**，所以"改了代码但没重新 `pack-release`"不会被拦 ——
+  那种情况发出去的还是老包，声明里也如实记着老 commit。
 - **上传成功之后**才写 `scripts/release.json`（下载声明），并提醒你提交：
   清单必须等于"真传上去的那些文件"，所以要等上传结果
 - `--out=DIR` 把这次发出去的产物**另拷一份**到 DIR（`release/` 本来就留着，这只是方便你把

@@ -304,6 +304,59 @@ else
     bad "没有 scripts/release.json"
 fi
 
+echo "== 5b. 同一个 commit 重发：非交互拒绝、--force 才放行（BL-03）=="
+#   release.json 里记着"这一版是哪个 commit 编的"。当前 HEAD 就是它 = 内容一个字
+#   都不会变，重发十有八九是手滑 → 交互时问一句，**非交互时不猜**（脚本里跑的
+#   命令绝不该卡在等输入上）。所以这里显式把 stdin 接到 /dev/null。
+if [ -f "$RJ" ]; then
+    chk "前置：release.json 记的 commit 就是 HEAD" \
+        "$(J 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$RJ")" \
+        "$(git -C "$P1" rev-parse HEAD)"
+    _packed_commit=$(J 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$RJ")
+
+    : > "$T/gh.log"
+    _rc=0
+    wt "$T/bin" "$WS1" "$ST1" publish-release terminal/tmux --tag=v-1 \
+        < /dev/null > "$T/log5b" 2>&1 || _rc=$?
+    [ "$_rc" != 0 ] && ok "同名 commit 重发：非交互直接拒绝（退出码非 0）" \
+        || bad "同名 commit 重发居然放行了"
+    case "$(cat "$T/log5b")" in
+        *"已经发布过"*"--force"*) ok "说清了原因（commit 没变）和出路（--force）" ;;
+        *) bad "没说清为什么拒绝、该怎么办"; sed 's/^/     /' "$T/log5b" ;;
+    esac
+    chk "拒绝时一个字节都没上传" \
+        "$(grep -cE 'release (create|upload)' "$T/gh.log" || true)" "0"
+
+    # 内容真的变了（新 commit）→ 不拦
+    echo 'set -g status on' >> "$P1/tmux.conf"
+    git -C "$P1" add -A
+    git -C "$P1" -c user.name=t -c user.email=t@t commit -q -m change
+    : > "$T/gh.log"
+    _rc=0
+    wt "$T/bin" "$WS1" "$ST1" publish-release terminal/tmux --tag=v-2 \
+        < /dev/null > "$T/log5b2" 2>&1 || _rc=$?
+    chk "新 commit 照常发布（不拦）" "$_rc" "0"
+    grep -q 'release upload v-2' "$T/gh.log" && ok "新 commit 真的传了" \
+        || { bad "新 commit 没传（不该拦的拦住了）"; sed 's/^/     /' "$T/log5b2"; }
+    # ⚠️ 声明里记的是**打包时那个 commit**（dist.json 的 commit），不是当前 HEAD：
+    #    这次没重新 pack，发出去的就是老包 —— 声明必须如实说"这一版是哪个 commit 编的"。
+    chk "发布声明仍记打包时那个 commit（没重打包就不假装是新版）" \
+        "$(J 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$RJ")" "$_packed_commit"
+    chk "而当前 HEAD 确实已经不是它了（所以刚才没被拦）" \
+        "$([ "$(git -C "$P1" rev-parse HEAD)" != "$_packed_commit" ] && echo yes || echo no)" "yes"
+
+    # --force：明知同名也放行（"上次传到一半断了，原样重传"就是这种）
+    : > "$T/gh.log"
+    _rc=0
+    wt "$T/bin" "$WS1" "$ST1" publish-release terminal/tmux --tag=v-2 --force \
+        < /dev/null > "$T/log5b3" 2>&1 || _rc=$?
+    chk "--force 放行同名 commit" "$_rc" "0"
+    grep -q 'release upload v-2' "$T/gh.log" && ok "--force 之后真的重传了" \
+        || bad "--force 了还是没传"
+else
+    bad "没有 scripts/release.json（5b 没法验）"
+fi
+
 echo "== 6. ★测试没有碰真工作区的文档 =="
 # 这条断言是为了防住"测试改写真实文件"这类问题——它真的发生过一次。
 _real_doc="$WS/wtool-base/README.md"
@@ -423,7 +476,9 @@ chmod +x "$T/bin-flaky/gh"
 rm -f "$T/flaky-seen"
 : > "$T/gh.log"
 _rc=0
-wt "$T/bin-flaky" "$WS9" "$ST9" publish-release racy > "$T/log9b" 2>&1 || _rc=$?
+# 同一份包再发一次：这就是 BL-03 要问一句的场景（同一 commit 重发），
+# 这里是脚本、非交互，所以显式 --force —— 它本来就是"重试上一次没传完的"那个意思。
+wt "$T/bin-flaky" "$WS9" "$ST9" publish-release racy --force > "$T/log9b" 2>&1 || _rc=$?
 chk "view 恢复之后认出已存在 → 复用（退出码 0）" "$_rc" "0"
 grep -q 'view 现在能看到了' "$T/log9b" && ok "走的是 view 恢复那条判断" \
     || { bad "没有走 view 恢复那条路"; sed 's/^/     /' "$T/log9b"; }
