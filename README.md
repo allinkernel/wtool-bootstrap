@@ -33,7 +33,8 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh status | doctor | validate | init | kill-self-forever
 ./tests/run_all.sh                    # 10 组 / 694 条断言
                                       # pairing 35 / sudo-install 40 / publish 124 / table 94
-                                      # release-copy 17 / release 63 / contract 162 / layer 46 / install-env 67
+                                      # release-copy 17 / release 63 / contract 164 / layer 46 / install-env 67
+                                      # （run_all.sh 文件头那几行逐组条数是过期的，以它跑出来的为准）
                                       # docker-build 44（kind=docker 的引擎驱动构建）
 ```
 
