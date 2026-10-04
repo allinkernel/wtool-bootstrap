@@ -388,9 +388,10 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | release | `tests/release_test.sh` | 63 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
 | contract | `tests/contract_test.sh` | 127 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁） |
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
+| install-env | `tests/install_env_test.sh` | 59 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 46 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **635** 条断言：
+共 **644** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 10 组全跑
@@ -451,8 +452,12 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 
 **挑过一次就不再测**：结果记在 `<state>/mirror.txt`，第二次跑 `install.sh` 直接接着用
 （省掉 7 个索引、每个最多 3 秒的探测）。想重新测速：`WTOOL_MIRROR=pick ./install.sh`。
-容器里的 `container-raw.sh --user <名字>` 也是走这套（它把记录写进**那个用户**的 state，
-所以后面 `install.sh` 读到的是同一份）。
+容器里的 `container-raw.sh --user <名字>` 也是走这套：它**只做三件事** ——
+建那个普通用户（密码 `root`、`/etc/sudoers.d` 免密、uid 尽量对齐宿主）、
+测速挑源（记录写进**那个用户**的 state，`install.sh` 之后读到的是同一份）、
+装 `sudo` 这个包（基础镜像里**没有**它）。它**不跑 `./install.sh`**，
+也不装 python3 / git / curl / ansible —— 那些是你进去之后自己敲的。
+`install_env_test.sh` 第 8 节守着这条（多装一样、或者它自己跑了 install.sh，测试就红）。
 
 ---
 

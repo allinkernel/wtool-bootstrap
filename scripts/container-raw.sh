@@ -11,13 +11,18 @@
 #     -v ~/self/wtool:/wtool:ro \
 #     ubuntu:24.04 bash /wtool/bootstrap/scripts/container-raw.sh --user mindul
 #
-#   `--user <名字>` 会（顺序有意义）：
-#     1. 先照 install-env.sh 那套**测速挑 apt 源**（结果记进新用户的 state，
-#        install.sh 之后直接接着用，不再测第二遍）
-#     2. 装 sudo（基础镜像里**没有**它，不装就没法 sudo apt-get）
-#     3. 建这个用户（家目录、bash、密码 root、sudo 免密）
-#     4. `su - <名字>` 进它的 shell —— 后面所有命令都是普通用户跑的
-#   这是唯一会让本脚本"装点东西"的开关；不带 --user 时行为一个字没变。
+#   `--user <名字>` **只做这三件事**（顺序有意义），做完就把 shell 交给它：
+#     1. 建这个普通用户（家目录、bash、**密码 root**、`/etc/sudoers.d` 免密；
+#        uid 尽量对齐宿主工作区的属主，git 才不会说 dubious ownership）
+#     2. **测速挑 apt 源**：国内几个镜像站各下一个索引比速度，让你挑一个
+#        （不挑就自动选最快的），换好源 —— 结果记进**这个用户**的 state，
+#        后面 `./install.sh` 直接接着用，不再测第二遍
+#     3. 装 `sudo` 这个包（基础镜像里**没有**它：有 sudo 组、没 sudo 命令）
+#   然后 `su - <名字>` 进去。
+#
+#   ⚠️ **它不跑 `./install.sh`**，也不装 python3 / git / curl / ansible、
+#      不碰工作区 —— 那些都是你进去之后照着提示自己敲的事。
+#   不带 --user 时行为一个字没变（root 进去，这三件事一件都不做）。
 #
 # 和 container-shell.sh 的分工：
 #
@@ -133,7 +138,7 @@ done
 # install-env.sh 里"上次挑过就接着用"那段），不会在这台机器上测第二遍。
 # ─────────────────────────────────────────────────────────────
 if [ -n "$USER_NAME" ]; then
-    say "--user $USER_NAME：装 sudo + 建用户（密码 root、sudo 免密）"
+    say "--user $USER_NAME：建用户 + 挑 apt 源 + 装 sudo（就这三件）"
     USER_HOME="/home/$USER_NAME"
 
     # ① **先建用户**，顺序很重要（实测踩过）：
@@ -234,12 +239,12 @@ cat <<'TIP'
   然后才装包 —— 官方源在容器里通常比国内镜像慢十几倍。不想挑就 WTOOL_MIRROR=official。
   想看它到底干了什么：./install.sh --dry-run
 
-  ── 以普通用户进去的（--user <名字>）额外知道这几条 ──
-      · 你就是那个用户（`whoami` 看一眼）；密码是 **root**
-        （`su -` 回 root、`sudo -k` 之后再用，都是它）
-      · sudo **免密**：`sudo apt-get update` 直接能跑，不会问你密码
-      · 当前目录是它的家目录；工作区在 /wtool（只读挂载）
-      · 回 root：`su -`；再回普通用户：`su - <名字>`
+  ── 你这次是以普通用户进来的（--user <名字>）──
+      · 你就是那个用户；密码 **root**（`su -` 回 root 也用它），sudo **免密**
+      · apt 源**已经挑好换好了**（上面那张测速表）—— `./install.sh` 会接着用，
+        不会再测一遍；想重挑：WTOOL_MIRROR=pick ./install.sh
+      · 上面那四条命令照敲就行 —— 和 root 进来时**一模一样**
+        （`--user` 没替你跑 install.sh，只多建了这个用户）
 
   ⚠️ apt 的锁：**别同时开两个都用这个 apt 卷的容器**（`-v wtool-apt-cache:/var/cache/apt`），
      一边在装、另一边 apt 就会报 "Could not get lock ... held by process 0"

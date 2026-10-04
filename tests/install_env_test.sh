@@ -290,23 +290,45 @@ fi
 grep -qF "wtool sudo-uninstall <项目>|all" "$_scripts/install.sh" \
     && ok "写清了 sudo-uninstall 收 <项目>|all" || bad "sudo-uninstall 的用法没写清"
 
-# container-raw.sh --user：提示里必须写清用户名/密码/sudo 这几件事
-#   （用户 2026-10-04 要求：加 --user 参数并"把默认密码写进提示里"）
-if grep -qF -- "--user <用户名>" "$_scripts/container-raw.sh" \
-   && grep -qF '密码是 **root**' "$_scripts/container-raw.sh" \
-   && grep -qF 'sudo **免密**' "$_scripts/container-raw.sh"; then
-    ok "container-raw.sh 有 --user 用法，且提示里写了密码 root / sudo 免密"
-else
-    bad "container-raw.sh 的 --user 用法或密码提示不全"
-fi
-grep -qF 'chpasswd' "$_scripts/container-raw.sh" && grep -qF 'NOPASSWD:ALL' "$_scripts/container-raw.sh" \
+# container-raw.sh --user：**只做三件事** —— 建用户 / 挑源 / 装 sudo
+#   （用户 2026-10-04 确认过的清单："支持新增了一个 mindul 用户，此外为了
+#     下载快一些，让用户选择了源，还安装了 sudo …除此之外就没有了"）
+_CR="$_scripts/container-raw.sh"
+grep -qF -- "--user <用户名>" "$_CR" && grep -qF '密码 **root**' "$_CR" \
+    && grep -qF 'sudo **免密**' "$_CR" \
+    && ok "container-raw.sh 有 --user 用法，提示里写了密码 root / sudo 免密" \
+    || bad "container-raw.sh 的 --user 用法或密码提示不全"
+grep -qF 'chpasswd' "$_CR" && grep -qF 'NOPASSWD:ALL' "$_CR" \
     && ok "--user 真的会设密码 + 写 sudoers 免密" || bad "--user 缺 chpasswd / NOPASSWD"
-grep -qF 'exec su - "$USER_NAME"' "$_scripts/container-raw.sh" \
+grep -qF 'exec su - "$USER_NAME"' "$_CR" \
     && ok "--user 最后切到那个用户（su -）" || bad "--user 没有切用户"
-# 不带 --user 时不能装东西（老行为"什么都不装"）
-grep -qE '^if \[ -n "\$USER_NAME" \]; then$' "$_scripts/container-raw.sh" \
-    && ok "装 sudo / 建用户都在 --user 分支里（不带参数不装东西）" \
-    || bad "--user 的分支结构不对（可能不带参数也会装东西）"
+grep -qE '^if \[ -n "\$USER_NAME" \]; then$' "$_CR" \
+    && ok "三件事都在 --user 分支里（不带参数一件都不做）" \
+    || bad "--user 的分支结构不对（可能不带参数也会动手）"
+# 三件事之二：挑源（借用 install-env.sh 的测速 + 记录给 install.sh 复用）
+grep -qF 'env_apt_ready' "$_CR" && ok "--user 会挑源（env_apt_ready）" \
+    || bad "--user 没挑源（用户清单里的第二件事）"
+grep -qF 'WTOOL_STATE="$USER_HOME/.local/state/wtool"' "$_CR" \
+    && ok "挑源结果记在**那个用户**的 state 里（install.sh 接着用）" \
+    || bad "挑源结果没记到新用户名下"
+grep -qF 'command -v sudo' "$_CR" && grep -qF -- '--no-install-recommends sudo' "$_CR" \
+    && ok "--user 会装 sudo 这个包（基础镜像里没有）" || bad "--user 没装 sudo"
+# 三件事**之外**的：不跑 install.sh、不装别的包、不碰工作区
+grep -qE '^[[:space:]]*(\./|bash |sh )?/?\$?\{?WTOOL_DIR\}?/install\.sh' "$_CR" \
+    && bad "container-raw.sh 自己跑了 ./install.sh（用户说那是他自己敲的）" \
+    || ok "container-raw.sh 不自己跑 ./install.sh"
+for _pkg in python3 ' git ' curl ansible; do
+    if grep -qE "apt-get install[^\n]*$_pkg" "$_CR"; then
+        bad "container-raw.sh 装了 $_pkg（那该是 install.sh 第 0 步的事）"
+    else
+        ok "container-raw.sh 不装 $_pkg"
+    fi
+done
+# 提示里那四条命令必须和不带 --user 时一样
+for _c in "./install.sh" "exec \$SHELL" "wtool sudo-bootstrap" "wtool bootstrap"; do
+    grep -qF -- "$_c" "$_CR" || bad "提示里少了「$_c」"
+done
+ok "四条命令仍在（--user 前后同一条路）"
 
 # 反向：容器脚本里不该再出现已经退休/改名的老命令
 for _old in "wtool download " "wtool publish " "wtool provision"; do
