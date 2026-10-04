@@ -2393,9 +2393,11 @@ cmd_unpack_release() {
             *)         _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_targets" ] || wt_die "用法: wtool unpack-release <项目>... [--from=下载目录]
+    [ -n "$_targets" ] || wt_die "用法: wtool unpack-release <项目>... [--from=<下载目录>]
 
-  默认从 <项目>/__release/ 读 dist.json 和分卷；--from= 可以指到别处。" \
+  按 dist.json 校验分卷 → 拼接 → 解到 <项目>/__output/（不联网、不做安装）。
+  输入（dist.json + 分卷）默认在 <项目>/__release/；--from=<目录> 指到别处（下载目录）。
+  --dry-run 只打印计划：**不拼卷、不写 __output/**。" \
         ""
     [ -z "$_from" ] || _from=$(cd -- "$_from" && pwd) || wt_die "目录不存在: $_from"
 
@@ -2420,11 +2422,10 @@ cmd_unpack_release() {
             _path=$(printf '%s\n' "$_row" | cut -f3)
         fi
         wt_info "── $_pid"
-        if [ -n "$_from" ]; then
-            wt_unpack_release "$_path" "$_scratch" "$_from"
-        else
-            wt_unpack_release "$_path" "$_scratch"
-        fi
+        # $3 就是 --from=（空 = 默认 <项目>/__release/）。以前这里分两个分支调，
+        # 而函数**根本没读第三个参数** —— `--from=` 被静默丢掉（B1 之外的另一个
+        # "参数收了但没人用"）。现在第三个参数是函数真读的那个。
+        wt_unpack_release "$_path" "$_scratch" "$_from"
         # 改名之前打的包，解开后顶层是旧的目录名（2026-09 那次是 release/<target>/）。
         # 这里顺手提示一句 —— 不然下一步 `wtool install` 只会说"__output/ 是空的"，
         # 人会去重下几百兆，而其实只要 mv 一下。提示的四种旧名字见 wt_check_old_dir_names。

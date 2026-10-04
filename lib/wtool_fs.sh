@@ -1311,12 +1311,16 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 }
 
 # 按 dist.json 校验分卷 → 拼接 → 解开到 <项目>/__output/ 和项目根
-#   wt_unpack_release <项目目录> <scratch>
+#   wt_unpack_release <项目目录> <scratch> [发布目录]
+# $3 = dist.json 和分卷所在的目录（默认 <项目>/__release/）。`cmd_unpack_release` 的
+# `--from=` 就是它 —— ‼️ 这个参数原来**没人读**（函数只看 $1/$2）：`--from=` 被静默
+# 丢掉，于是"指定了下载目录、却去 <项目>/__release/ 找 dist.json"（报"没有 dist.json"）。
 wt_unpack_release() {
-    _ur_dir=$1; _ur_scratch=$2
-    _ur_pub="$_ur_dir/__release"
+    _ur_dir=$1; _ur_scratch=$2; _ur_pub=${3:-}
+    [ -n "$_ur_pub" ] || _ur_pub="$_ur_dir/__release"
     _ur_dist="$_ur_pub/dist.json"
-    [ -f "$_ur_dist" ] || wt_die "没有 $_ur_dist —— 把 dist.json 和所有分卷下到项目 __release/ 里"
+    [ -f "$_ur_dist" ] || wt_die "没有 $_ur_dist —— 把 dist.json 和所有分卷放到同一个目录里
+  （默认是 <项目>/__release/；用 --from=<目录> 可以指到别处）"
 
     python3 "$PY" read-dist "$_ur_dist" > "$_ur_scratch/dist.rows.tsv" \
         || wt_die "读不了 dist.json: $_ur_dist"
@@ -1356,6 +1360,34 @@ wt_unpack_release() {
                 fi
                 wt_die "缺分卷: $_ur_pub/$_ur_lack"
             fi
+        else
+            _ur_out="$_ur_pub/$_ur_name"
+            if [ ! -f "$_ur_out" ]; then
+                if [ "$_ur_role" = "source" ]; then
+                    wt_warn "源码包没下，跳过（install 只认 release.zip）: $_ur_name"
+                    continue
+                fi
+                wt_die "缺文件: $_ur_out（把 dist.json 和它一起下到 __release/）"
+            fi
+        fi
+        # ★ dry-run 在这里分岔：上面全是**只读**检查（文件在不在、卷够不够），
+        #   下面全是**写**（拼卷进 scratch、: > 输出文件、wt_unpack_one 铺 __output/）。
+        #   原来没有这道守卫 → `unpack-release --dry-run` **真的解包**
+        #   （实测：跑完 __output/<target>/… 里东西都在，和真跑逐字相同），
+        #   而文档说的是"只出计划"。拼卷之后的 sha256 校验在 dry-run 里做不了
+        #   （要先拼出来）—— 所以这里明说"没校验"，不假装验过。
+        if wt_dry; then
+            if [ "$_ur_role" = "source" ]; then
+                wt_step "[dry-run] 源码包（只校验、不铺开）: $_ur_name"
+            elif [ -n "$_ur_vols" ]; then
+                wt_step "[dry-run] 拼接分卷并解开 $_ur_name → $_ur_dir/__output/"
+            else
+                wt_step "[dry-run] 解开 $_ur_name → $_ur_dir/__output/"
+            fi
+            _ur_got=$((_ur_got + 1))
+            continue
+        fi
+        if [ -n "$_ur_vols" ]; then
             wt_run mkdir -p -- "$_ur_tmp"
             _ur_out="$_ur_tmp/$_ur_name"
             : > "$_ur_out"
@@ -1370,15 +1402,6 @@ wt_unpack_release() {
                 _ur_k=$((_ur_k + 1))
             done
             wt_step "拼接 $_ur_k 卷 → $_ur_name"
-        else
-            _ur_out="$_ur_pub/$_ur_name"
-            if [ ! -f "$_ur_out" ]; then
-                if [ "$_ur_role" = "source" ]; then
-                    wt_warn "源码包没下，跳过（install 只认 release.zip）: $_ur_name"
-                    continue
-                fi
-                wt_die "缺文件: $_ur_out（把 dist.json 和它一起下到 __release/）"
-            fi
         fi
         if [ -n "$_ur_sha" ] && [ "$_ur_sha" != "-" ]; then
             _ur_have=$(wt_sha256 "$_ur_out")
@@ -1400,6 +1423,11 @@ wt_unpack_release() {
 
 
     [ "$_ur_got" -gt 0 ] || wt_die "dist.json 里没有可解的东西: $_ur_dist"
+    if wt_dry; then
+        # dry-run 的收尾语不能复用真跑那句（"铺到 __output/"）：一个字节都没写
+        wt_info "dry-run：以上 $_ur_got 个文件的计划，什么都没解开（__output/ 一个字节都没写）"
+        return 0
+    fi
     wt_info "unpack-release 完成（只校验 + 铺到 __output/，不做安装）"
     wt_info "  下一步: wtool install $_ur_dir"
 }

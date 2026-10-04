@@ -183,6 +183,43 @@ check "payload 逐字节一致" "$(cat "$P/__output/ubuntu_24.04/bin/tmux")" \
 [ -f "$P2/wtool.xml" ] && ok "声明面解到了项目根" || bad "声明面没解到项目根"
 [ -f "$P2/env.zsh" ] && ok "env.zsh 也解到了项目根" || bad "env.zsh 没解到项目根"
 
+printf '\n== 场景 2c：unpack-release 的 --dry-run（不许真解包）与 --from=（不许被忽略）==\n'
+#   ① 原来 `--dry-run` 只被 cmd_unpack_release 解析掉，写入在 wt_unpack_release 里：
+#      拼卷（`: > $out` + `cat >>`）和 wt_unpack_one 都**没有 dry 守卫** →
+#      dry-run 会真的把产物铺进 __output/（和真跑逐字相同，文档却说它"只出计划"）。
+#   ② 原来 `--from=<目录>` 被当第 3 个参数传进去，而函数只读 $1/$2 → 静默丢掉：
+#      "指定了下载目录，却去 <项目>/__release/ 找 dist.json"。
+P2c="$T/ws2c/terminal/tmux"
+export WTOOL_ROOT="$T/ws2c"
+mkdir -p "$P2c/__release" "$T/fromdir"
+cp "$P/__release/dist.json" "$P2c/__release/"
+cp "$P/__release"/*-vol* "$P2c/__release/"
+cp "$P/__release/dist.json" "$T/fromdir/"
+cp "$P/__release"/*-vol* "$T/fromdir/"
+_rc=0
+"$WT" unpack-release "$P2c" --dry-run > "$T/unpack2c.log" 2>&1 || _rc=$?
+[ "$_rc" = 0 ] && ok "dry-run 退出码 0" || bad "dry-run 失败" "$(cat "$T/unpack2c.log")"
+chk "★--dry-run 之后 __output/ 里零文件（一个字节都不许写）" "0" \
+    "$(find "$P2c" -path '*/__output/*' -type f 2>/dev/null | wc -l | tr -d ' ')"
+[ -e "$P2c/__output" ] && bad "dry-run 建了 __output/" || ok "dry-run 连 __output/ 都不建"
+grep -q '什么都没解开' "$T/unpack2c.log" && ok "dry-run 的收尾语说清了没解开" \
+    || bad "dry-run 收尾语在撒谎" "$(tail -3 "$T/unpack2c.log")"
+# --from=：新项目目录里**没有** __release/，dist.json 与分卷只在 $T/fromdir/ 里
+P2d="$T/ws2d/terminal/tmux"
+mkdir -p "$P2d"
+_rc=0
+"$WT" unpack-release "$P2d" > "$T/unpack2d.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "没有 __release/ 也没给 --from → 拒绝（不猜）" || bad "居然成功了"
+grep -q 'dist.json' "$T/unpack2d.log" && grep -q -- '--from=' "$T/unpack2d.log" \
+    && ok "报错说清缺什么、指了 --from=" || bad "报错没说清" "$(cat "$T/unpack2d.log")"
+_rc=0
+"$WT" unpack-release "$P2d" --from="$T/fromdir" > "$T/unpack2d2.log" 2>&1 || _rc=$?
+[ "$_rc" = 0 ] && ok "★--from=<目录> 真的被用上了（不再被静默忽略）" \
+    || bad "--from 没生效（参数被丢掉）" "$(cat "$T/unpack2d2.log")"
+[ -x "$P2d/__output/ubuntu_24.04/bin/tmux" ] && ok "--from 那个目录里的包解出来了" \
+    || bad "没解出来" "$(tail -5 "$T/unpack2d2.log")"
+
+
 # 场景 2b：**改名（2026-09-28，__release/ → __output/）之前**打的包 —— 顶层是 __release/<target>/
 #   线上现成那一版就是这种（真包实测：release.zip-vol01 头两个条目是 env.bash / env.zsh，
 #   第三个是 __release/ubuntu_22.04/lang/bash/OWNED.tsv）。
