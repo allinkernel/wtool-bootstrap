@@ -15,6 +15,14 @@
 #   * stdin 是 /dev/null —— 不要写交互式提问，没人应答
 #   * 要可重入：跑第二遍不能炸
 #   * 产物路径要能说清楚：publish.sh 和 install.sh 都要用
+#
+# --dry-run（**可选**，引擎不会传这个开关）：
+#   `wtool build <项目> --dry-run` 时，引擎打印"要跑哪条脚本 + 参数 + 工作目录 +
+#   环境变量"就结束，**不执行本脚本** —— 所以这里什么都不写也满足契约。
+#   想让"人工直接跑 sh scripts/build.sh --dry-run"也能只看计划，照这个来：
+#     _dry=0
+#     for _a in "$@"; do [ "$_a" = "--dry-run" ] && _dry=1; done
+#     [ "$_dry" = 1 ] && { echo "会做：cmake --build build -j$WTOOL_JOBS"; exit 0; }
 set -eu
 
 say() { printf '%s: %s\n' "@PROJECT_ID@" "$*"; }

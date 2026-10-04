@@ -791,8 +791,9 @@ printf '\n== 场景 13：Tab 补全（wtool <TAB> 立刻列命令）==\n'
 #   用户 2026-10-04：wtool 生效后按 Tab 不该去补当前目录的文件，要列可选命令；
 #   bash / zsh 都要。候选由引擎自己算（`wtool _complete`），补全脚本只转发。
 _cmds=$(WTOOL_SUDO=yes "$WT" _complete "" 2>/dev/null | tr '\n' ' ')
-for want in install uninstall bootstrap build check doctor status pack-release \
-            publish-release download-release unpack-release \
+for want in install uninstall bootstrap build check repair doctor status \
+            validate init version kill-self-forever refresh-downloads \
+            pack-release publish-release download-release unpack-release \
             sudo-install sudo-uninstall sudo-bootstrap \
             unpack-layer push-layer pull-layer; do
     case " $_cmds " in
@@ -803,6 +804,12 @@ done
 case " $_cmds " in
     *" _layer-save "*) bad "内部命令 _layer-save 不该进补全" ;;
     *) ok "内部命令不进补全（和 --help 口径一致）" ;;
+esac
+# `docs` 反过来：它是真命令，但 --help 故意不列它 —— 那补全里也**不该**有
+#   （用户 2026-10-04 定的口径："--help 故意不列 docs，那就别加 docs"）
+case " $_cmds " in
+    *" docs "*) bad "补全里出现了 docs —— 和 --help 的口径不一致" ;;
+    *) ok "docs 不进补全（--help 故意不列它，它只是 refresh-downloads 的别名）" ;;
 esac
 # `wtool status` 两种形态（用户 2026-10-04 定：就这样共存）
 case "$("$WT" status 2>&1)" in
@@ -828,6 +835,34 @@ case "$(WTOOL_SUDO=yes "$WT" _complete "-" pack-release 2>/dev/null)" in
     *--tag=*) ok "pack-release 的开关也补得出来（行首那条别漏）" ;;
     *) bad "pack-release 的开关补不出来（多半是列表匹配把换行当分隔符了）" ;;
 esac
+# 表里的开关必须**真的存在**（表自己的注释：补出一个不存在的开关，比不补更坏）。
+#   判据：把 `wtool _complete "-" <命令>` 打出来的候选**原样**当参数跑一遍，
+#   只断言输出里没有"未知参数" —— 各命令自己的用法报错不算失败。
+#   安全边界：假 HOME / 假 state / **空 root**、不给位置参数、stdin 接 /dev/null
+#   （kill-self-forever 会等人逐字确认，不接 /dev/null 会挂住）、不探 sudo-*
+#   （那几条可能真的去提权）。
+#   ⚠️ 只认空格形式的值开关（--id / --priority）要单独补一个 dummy，别拼成 --id=。
+_probe_home="$T/probe-home"; _probe_state="$T/probe-state"; _probe_ws="$T/probe-ws"
+mkdir -p "$_probe_home" "$_probe_ws"
+for _pc in install uninstall bootstrap build check repair doctor status \
+           validate init version kill-self-forever refresh-downloads \
+           pack-release publish-release download-release unpack-release \
+           unpack-layer push-layer pull-layer; do
+    _pf=""
+    for _cand in $(WTOOL_SUDO=yes "$WT" _complete "-" "$_pc" 2>/dev/null); do
+        case $_cand in
+            *=|--id|--priority) _pf="$_pf $_cand dummy" ;;
+            *)                  _pf="$_pf $_cand" ;;
+        esac
+    done
+    _rc=0
+    _out=$(HOME="$_probe_home" WTOOL_HOME="$_probe_home" WTOOL_STATE="$_probe_state" \
+           WTOOL_ROOT="$_probe_ws" "$WT" "$_pc" $_pf < /dev/null 2>&1) || _rc=$?
+    case $_out in
+        *"未知参数"*) bad "补全表里的开关，命令其实不认：$_pc$_pf" "$_out" ;;
+        *) ok "补全表的开关都对得上：$_pc" ;;
+    esac
+done
 for f in completion/wtool.bash completion/wtool.zsh; do
     [ -r "$boot/$f" ] && ok "有 $f" || bad "缺 $f"
 done
@@ -888,6 +923,123 @@ esac
 case $_dash_nosudo in
     *"没有 sudo"*) ok "说清了为什么少两列" ;;
     *) bad "没说明少列的原因" ;;
+esac
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 15：--dry-run 不跑项目脚本（一个字节都不写）==\n'
+#   用户 2026-10-04 拍板（原话"要改！！"）：--dry-run 只打印计划，**不执行操作**。
+#   老做法是把 --dry-run 转给项目脚本、指望脚本自己支持 —— 那是空头支票：
+#   templates/{install,build}.sh.tpl 里 0 处 dry-run，
+#   `tools/gerrit-gate/scripts/install.sh --dry-run` 照样 ln -s 建软链。
+#   复现那条（改之前会真建软链，判据 = 末尾 ls 有输出）：
+#     T=$(mktemp -d); mkdir -p "$T/home/.wtool/links/tools/gerrit-gate/bin" "$T/prefix"
+#     printf '#!/bin/sh\necho hi\n' > "$T/home/.wtool/links/tools/gerrit-gate/bin/gerrit-gate"
+#     chmod +x "$T/home/.wtool/links/tools/gerrit-gate/bin/gerrit-gate"
+#     HOME="$T/home" WTOOL_PREFIX="$T/prefix" sh tools/gerrit-gate/scripts/install.sh --dry-run
+#     ls -l "$T/prefix/bin"
+#   ⚠️ 那个脚本读的是**老路径** $HOME/.wtool/links/...；拿新路径
+#     （wtool-work-dir/links/…）去建 src，它会打一句"找不到"就退出 0，看不到问题。
+#   本场景的判据：项目脚本**故意不认** --dry-run（被调用就落地），
+#   dry-run 前后文件清单必须逐行相同。
+newhome
+mkdir -p "$WTOOL_ROOT"
+P4=$(mkproj "dry/proj" "dry/proj")
+mkdir -p "$P4/__output" "$P4/scripts"
+printf 'payload\n' > "$P4/__output/out.bin"
+printf 'conf\n' > "$P4/dry.conf"
+cat > "$P4/scripts/install.sh" <<'EOF'
+#!/bin/sh
+# 故意不认 --dry-run：只要被调用就留下证据（老引擎会把 --dry-run 喂进来）
+echo "install $*" >> "$WTOOL_PROJECT_DIR/install-called.txt"
+case ${1:-} in
+    --uninstall)
+        echo "uninstall $*" >> "$WTOOL_PROJECT_DIR/uninstall-called.txt"
+        rm -f -- "$WTOOL_PREFIX/bin/dry.conf"
+        exit 0 ;;
+esac
+mkdir -p -- "$WTOOL_PREFIX/bin"
+ln -sfn -- "$WTOOL_PROJECT_DIR/dry.conf" "$WTOOL_PREFIX/bin/dry.conf"
+EOF
+cat > "$P4/scripts/build.sh" <<'EOF'
+#!/bin/sh
+echo "build $*" >> "$WTOOL_PROJECT_DIR/build-called.txt"
+EOF
+cat > "$P4/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="dry/proj" priority="50">
+  <link home="~/.dry.conf" wtool="~/.wtool/.dry.conf" subproject="dry.conf"/>
+</wtool>
+EOF
+git -C "$P4" add -A && git -C "$P4" -c user.name=t -c user.email=t@t commit -qm init
+
+_snap() {   # 这个场景自己的三棵树：项目目录 / 影子 HOME / state
+    { find "$P4" "$WTOOL_HOME" "$WTOOL_STATE" -mindepth 1 2>/dev/null || true; } | sort
+}
+
+_before=$(_snap)
+_rc=0
+_out=$("$WT" install dry/proj --dry-run 2>&1) || _rc=$?
+chk "install --dry-run 退出 0" "$_rc" "0"
+chk "install --dry-run 前后文件清单逐行相同（零副作用）" "$_before" "$(_snap)"
+if [ -e "$P4/install-called.txt" ]; then
+    bad "install --dry-run 居然跑了 scripts/install.sh"
+else
+    ok "install --dry-run 没跑 scripts/install.sh"
+fi
+case $_out in
+    *"scripts/install.sh"*) ok "打印了要跑的脚本路径" ;;
+    *) bad "没打印脚本路径" "$_out" ;;
+esac
+case $_out in
+    *"$P4"*) ok "打印了工作目录" ;;
+    *) bad "没打印工作目录" "$_out" ;;
+esac
+case $_out in
+    *"WTOOL_PREFIX="*) ok "打印了关键环境变量（WTOOL_PREFIX 等）" ;;
+    *) bad "没打印环境变量" "$_out" ;;
+esac
+if [ -e "$WTOOL_HOME/.wtool/usr/bin/dry.conf" ]; then
+    bad "install --dry-run 真落了软链"
+else
+    ok "install --dry-run 一个软链都没落"
+fi
+
+_before=$(_snap)
+_rc=0
+_out=$("$WT" build dry/proj --dry-run 2>&1) || _rc=$?
+chk "build --dry-run 退出 0" "$_rc" "0"
+chk "build --dry-run 前后文件清单逐行相同（零副作用）" "$_before" "$(_snap)"
+if [ -e "$P4/build-called.txt" ]; then
+    bad "build --dry-run 居然跑了 scripts/build.sh"
+else
+    ok "build --dry-run 没跑 scripts/build.sh"
+fi
+case $_out in
+    *"scripts/build.sh"*) ok "build --dry-run 也打印了脚本路径" ;;
+    *) bad "build --dry-run 没打印脚本路径" "$_out" ;;
+esac
+
+# uninstall 得先真装上才有东西可撤（上面全是 dry-run，磁盘上还什么都没有）
+"$WT" install dry/proj > "$T/i15.log" 2>&1 || bad "（前置）真装一遍失败" "$(cat "$T/i15.log")"
+[ -L "$WTOOL_HOME/.dry.conf" ] && ok "（前置）真装之后 \$HOME 软链在" \
+    || bad "（前置）真装没建成"
+#   ⚠️ 这里必须用**目录**（不是 id）：`wtool uninstall <id>` 拿不到 project_root，
+#   项目脚本那一步会被静默跳过（2026-10-04 实测，见本次提交的报告）。
+_before=$(_snap)
+_rc=0
+_out=$("$WT" uninstall "$P4" --dry-run 2>&1) || _rc=$?
+chk "uninstall --dry-run 退出 0" "$_rc" "0"
+chk "uninstall --dry-run 前后文件清单逐行相同（零副作用）" "$_before" "$(_snap)"
+if [ -e "$P4/uninstall-called.txt" ]; then
+    bad "uninstall --dry-run 居然跑了 install.sh --uninstall"
+else
+    ok "uninstall --dry-run 没跑项目脚本"
+fi
+[ -L "$WTOOL_HOME/.dry.conf" ] && ok "uninstall --dry-run 之后 \$HOME 软链还在" \
+    || bad "uninstall --dry-run 把软链拆了"
+case $_out in
+    *"install.sh"*) ok "uninstall --dry-run 也打印了脚本路径" ;;
+    *) bad "uninstall --dry-run 没打印脚本路径" "$_out" ;;
 esac
 
 printf '\n----------------------------------------\n'

@@ -249,6 +249,40 @@ install <项目>
 默认关（opt-in）：`wtool install <项目> --prune`、`wtool install all --prune` 都认；
 `--dry-run` 只打印计划。
 
+### `--dry-run` 的语义（现状，2026-10-04 用户拍板）
+
+**只打印计划，绝不执行操作。**（用户原话："`--dry-run` 只打印计划就够，不要执行操作"。）
+`--dry-run` 是**全局**开关：分发处先扫一遍参数，各命令不用自己认。
+
+| 谁 | dry-run 时的行为 |
+|---|---|
+| 引擎自己的动作（软链 / rc / env 块 / journal / registry / 状态目录 / 删路径 / 打包 / 层） | 只打 `[dry-run] …` 的计划行，一个字节都不写；**不拿写锁**（§「全局写锁」） |
+| **项目自己的 `scripts/install.sh` / `scripts/build.sh`** | **不执行**。引擎打印"真跑的话会跑哪条"（见下），然后跳过 |
+| 项目自己的 `install.sh --uninstall`（`wtool uninstall`） | 同上，打印的参数是 `--uninstall` |
+| `sudo-install` 层的任务脚本 / apt / 系统文件 | 各分支自己打计划（`[dry-run]` 行），不执行 —— 和项目脚本那条路无关 |
+
+项目脚本那条打印的形状（`wt_run_project_script`，`wtool.sh`）：
+
+```
+wtool: 项目脚本: 不执行（--dry-run）—— 真跑的话是这条：
+wtool:   - 命令     : sh /path/to/scripts/install.sh --uninstall
+wtool:   - 工作目录 : /path/to/project
+wtool:   - 环境     : WTOOL_PREFIX=… WTOOL_HOME=… WTOOL_PROJECT_ID=…
+wtool:              WTOOL_ARTIFACTS=… WTOOL_STATE_DIR=…
+```
+
+**为什么不"把 `--dry-run` 转给项目脚本，让脚本自己打计划"**
+（2026-10-04 之前的做法，也是那句错误注释的来源）：
+**项目脚本认不认这个开关，引擎管不了。** 实测：`templates/{install,build}.sh.tpl`
+里 0 处 dry-run；`tools/gerrit-gate/scripts/install.sh --dry-run` 照样 `ln -s` 建软链。
+引擎能保证的只有自己这一层，所以干脆不进脚本这条路。复现命令与判据见
+`tests/contract_test.sh` 场景 15 的文件头；断言在场景 15（前后 `find` 清单逐行相同 +
+没跑脚本 + 打印了脚本路径 / 工作目录 / `WTOOL_PREFIX`）。
+
+> 项目脚本**仍然可以**自己支持 `--dry-run`（人工直接跑 `sh scripts/build.sh --dry-run`
+> 时有用），但引擎**不再依赖**它，也不会替它传这个开关 —— 支持不支持都不影响
+> `wtool <命令> --dry-run` 的零副作用。模板里有一段照抄用的写法。
+
 ### uninstall
 
 1. 先算出"**还有别的项目要这条软链吗**"：判据是磁盘上所有 wtool 项目的 `wtool.xml`
@@ -387,13 +421,13 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | table | `tests/table_test.sh` | 94 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 63 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 164 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（候选 + 内部命令不进候选 + `status` 两种形态） |
+| contract | `tests/contract_test.sh` | 208 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同） |
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 46 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **694** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
-`run_all.sh` **文件头**注释里那几行逐组条数是过期的，以它跑出来的 PASS 行为准）：
+共 **738** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
+`run_all.sh` **文件头**注释里那几行逐组条数也同步成了这一版，但**以它跑出来的 PASS 行为准**）：
 
 ```sh
 ./tests/run_all.sh            # 10 组全跑

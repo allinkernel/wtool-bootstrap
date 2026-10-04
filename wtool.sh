@@ -332,17 +332,34 @@ wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
     # 脚本可能在容器/独立环境里跑，所以路径提前算好喂给它，
     # 不要求脚本自己去推 WTOOL_STATE 和项目 id
     WTOOL_ARTIFACTS="$WTOOL_STATE/${WTOOL_PROJECT_ID:-$(basename -- "$_rs_dir")}/artifacts.tsv"
-    if ! wt_dry; then
-        mkdir -p -- "$(dirname -- "$WTOOL_ARTIFACTS")"
+
+    # dry-run：**不跑项目脚本**，只打印"真跑的话会跑什么"。
+    #
+    # 这里原来是"把 --dry-run 转给脚本，让脚本自己打计划"（当时那句注释写着
+    # "脚本要支持 --dry-run（模板里有）"）—— 那是假的：
+    # templates/{install,build}.sh.tpl 里 0 处 dry-run，
+    # `tools/gerrit-gate/scripts/install.sh --dry-run` 照样 ln -s 建软链
+    # （用户 2026-10-04 实测后拍板："要改！！"）。
+    # 项目脚本认不认这个开关，引擎管不了；引擎能保证的只有自己这一层，
+    # 所以 dry-run 干脆不进脚本这条路 —— 一个字节都不写。
+    # 复现与断言：tests/contract_test.sh 场景 15、docs/spec.md「--dry-run 的语义」。
+    if wt_dry; then
+        _rs_id=${WTOOL_PROJECT_ID:-$(basename -- "$_rs_dir")}
+        wt_info "项目脚本: 不执行（--dry-run）—— 真跑的话是这条："
+        if [ $# -gt 0 ]; then
+            wt_step "命令     : sh $_rs_path $*"
+        else
+            wt_step "命令     : sh $_rs_path"
+        fi
+        wt_step "工作目录 : $_rs_dir"
+        wt_step "环境     : WTOOL_PREFIX=${WTOOL_PREFIX:-} WTOOL_HOME=$WTOOL_HOME WTOOL_PROJECT_ID=$_rs_id"
+        wt_step "           WTOOL_ARTIFACTS=$WTOOL_ARTIFACTS WTOOL_STATE_DIR=$WTOOL_STATE/$_rs_id"
+        return 0
     fi
 
-    # dry-run 时把 --dry-run 转给脚本，让它自己把计划打出来。
-    # 直接跳过的话，"wtool build xxx --dry-run"就只会说一句"要执行 build.sh"，
-    # 等于什么都没告诉你。脚本要支持 --dry-run（模板里有）。
+    mkdir -p -- "$(dirname -- "$WTOOL_ARTIFACTS")"
+
     _rs_args="$*"
-    if wt_dry; then
-        _rs_args="$_rs_args --dry-run"
-    fi
 
     (
         # 项目脚本能拿到的环境（和 provision 任务的约定保持一致）
@@ -2454,9 +2471,16 @@ cmd_status_registry() {
 # tests/contract_test.sh 会拿下面 case 分发里的分支名和 WTOOL_SUBCOMMANDS
 # 对一遍：少一条/多一条都会红（表过期比没有补全更糟）。
 # 下划线开头的是内部命令，**不进补全**（和 --help 的口径一致）。
+#
+# 2026-10-04 用户拍板补进来的 5 条：validate / init / version /
+# kill-self-forever / refresh-downloads —— 它们一直是真命令，只是漏在表外。
+#   ⚠️ `docs` **故意不在这张表里**：--help 的口径就是不列它
+#      （它只是 refresh-downloads 的别名，两种敲法都走 wt_refresh_downloads）。
+#      `refresh-downloads` 虽然 --help 里也没有，但用户拍板要列 —— 它是真命令。
 # ==========================================================================
 WTOOL_SUBCOMMANDS="build install uninstall bootstrap
 status check repair doctor
+validate init version kill-self-forever refresh-downloads
 pack-release unpack-release publish-release download-release
 sudo-install sudo-uninstall sudo-bootstrap
 unpack-layer push-layer pull-layer"
@@ -2498,28 +2522,33 @@ wt_list_has() {   # <值> <空格/换行分隔的列表>
 
 wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列真的存在的**）
     # ⚠️ 这张表要和各自的参数解析对得上：补出一个不存在的开关，比不补更坏。
-    #    tests/contract_test.sh 会逐个 `wtool <命令> <开关>` 试一遍（--dry-run 那种
-    #    无害的），确保表里的开关都能被认出来。
+    #    tests/contract_test.sh 会把这里打出来的候选**原样**喂给对应命令试一遍
+    #    （假 HOME / 假 state / 空 root、不给位置参数、不探 sudo-*），谁报
+    #    "未知参数"就红 —— 所以改了参数解析就要同步改这里。
+    #    ⚠️ 值只认**空格形式**的开关（`--id foo`）不能写成 `--id=`：带 = 的那种
+    #    在这几条命令里是"未知参数"（2026-10-04 实测 `wtool uninstall --id=foo`
+    #    → `未知参数: --id=foo`）。带 = 的那些（`--tag=` 等）才是解析器认的形式。
     case $1 in
-        install)            printf '%s\n' --dry-run --force --prune --no-script --head= --home= --state= ;;
-        uninstall)          printf '%s\n' --dry-run --force --no-script --id= --home= --state= ;;
+        install)            printf '%s\n' --dry-run --force --prune --no-script ;;
+        uninstall)          printf '%s\n' --dry-run --force --no-script --id ;;
         bootstrap)          printf '%s\n' --dry-run --force --prune ;;
-        build)              printf '%s\n' --dry-run --force --jobs= --target= --root= ;;
-        pack-release)       printf '%s\n' --dry-run --tag= --volume-size= --repo= ;;
-        publish-release)    printf '%s\n' --dry-run --force --tag= --allow-foreign ;;
-        download-release)   printf '%s\n' --dry-run --root= ;;
+        build)              printf '%s\n' --dry-run --force --jobs= --target= ;;
+        pack-release)       printf '%s\n' --dry-run --force --tag= --volume-size= --repo= ;;
+        publish-release)    printf '%s\n' --dry-run --force --tag= --allow-foreign --out= ;;
+        download-release)   printf '%s\n' --dry-run ;;
         unpack-release)     printf '%s\n' --dry-run --from= ;;
         sudo-install)       printf '%s\n' --dry-run --force ;;
-        sudo-uninstall)     printf '%s\n' --dry-run --force --id= ;;
+        sudo-uninstall)     printf '%s\n' --dry-run --force --id ;;
         sudo-bootstrap)     printf '%s\n' --dry-run --force ;;
         unpack-layer)       printf '%s\n' --dry-run --target= --layer= --output= ;;
-        push-layer)         printf '%s\n' --dry-run --registry= --target= --layer= --image= ;;
-        pull-layer)         printf '%s\n' --dry-run --registry= --target= --layer= --username= ;;
-        check)              printf '%s\n' --json --home= --state= --root= ;;
-        repair)             printf '%s\n' --dry-run --force --head= --home= --state= ;;
-        doctor)             printf '%s\n' --quiet --json --brief --version ;;
+        push-layer)         printf '%s\n' --dry-run --registry= --target= --layer= ;;
+        pull-layer)         printf '%s\n' --dry-run --registry= --target= --layer= ;;
+        check)              : ;;   # 一个开关都不认（--json 是"还没实现"，见 cmd_check）
+        repair)             printf '%s\n' --dry-run ;;
+        doctor)             printf '%s\n' --quiet --json ;;
         status)             printf '%s\n' --color= ;;
-        init)               printf '%s\n' --id= --priority= --all --with-install --with-build --with-download --with-publish ;;
+        init)               printf '%s\n' --id --priority --all --with-install --with-build ;;
+        validate)           printf '%s\n' --force ;;
     esac
 }
 
@@ -3773,7 +3802,7 @@ cmd_push_layer() {
   推的是**真镜像**（基础层 + 每层一个 commit），blob 按 sha256 去重 ——
   共享父链只在第一个镜像里传一次。
 
-  ⚠️ 要 docker：`crane push` 推大 blob 会 connection reset（hazards O1），
+  ⚠️ 要 docker：\`crane push\` 推大 blob 会 connection reset（hazards O1），
      docker push 分块 5MB 才过得去。构建机上本来就有 docker（ADR-024 §8）。"
     [ -n "$_reg" ] || _reg=${WTOOL_LAYER_REGISTRY:-}
     [ -n "$_reg" ] || wt_die "没给 registry：--registry=<前缀> 或 export WTOOL_LAYER_REGISTRY=<前缀>"
