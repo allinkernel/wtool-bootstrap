@@ -342,6 +342,11 @@ chk "dry-run 不碰 docker" "$(grep -c '^run \|^commit \|^save ' "$DOCKER_LOG" |
 [ -d "$P/__output" ] && bad "dry-run 建了 __output/" || ok "dry-run 不建 __output/"
 [ -d "$P/__layer" ] && bad "dry-run 建了 __layer/" || ok "dry-run 不建 __layer/"
 grep -q 'dry-run' "$T/dry.log" && ok "dry-run 打了计划" || bad "dry-run 没打计划"
+# dry-run 的收尾语不能说"就绪"：那时候 __layer/ 和 __output/ 里**可能什么都没有**
+grep -q '个目标就绪' "$T/dry.log" && bad "dry-run 说了『N 个目标就绪』（那时候什么都没写）" \
+    || ok "★dry-run 不说『就绪』"
+grep -q '什么都没执行' "$T/dry.log" && ok "★dry-run 的收尾语说清了『什么都没执行』" \
+    || bad "dry-run 收尾语不对" "$(tail -2 "$T/dry.log")"
 
 echo "== 7. 清单写错时的说法 =="
 cp "$P/build/layers.tsv" "$T/layers.bak"

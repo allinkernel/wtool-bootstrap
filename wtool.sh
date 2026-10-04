@@ -1016,6 +1016,12 @@ wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--jobs=N
 $_db_targets
 EOF
     [ "$_db_n" -gt 0 ] || wt_die "$_db_pid 一个目标都没编"
+    if wt_dry; then
+        # dry-run 的收尾语不能复用真跑那一句：那时候 __layer/ 和 __output/ 里
+        # **可能什么都没有**（dry-run 一个字节都不写），说"就绪"是撒谎。
+        wt_info "dry-run：以上 $_db_n 个目标的计划，什么都没执行（没有起容器、没写 __layer/ / __output/）"
+        return 0
+    fi
     wt_info "$_db_pid：$_db_n 个目标就绪（层在 __layer/，安装产物在 __output/）"
     return 0
 }

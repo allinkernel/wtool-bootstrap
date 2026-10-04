@@ -733,9 +733,15 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 谁驱动看**层清单在不在**：`kind=docker` 且有 `build/layers.tsv` → 引擎驱动；
 只有 `build.sh` → 跑它（迁移前的形态）；两个都没有 → 拒绝（退出码非 0）。
-`wtool build` 对 `docker` 项目多认 `--target=<目标系统>` 和 `--jobs=N`（层的并行上限）。
+`wtool build` 对 `docker` 项目多认 `--target=<目标系统>` 和 `--jobs=N`（层的并行上限），
+以及 `--rebuild`（无视"已经编好了"的三条判据，强制重编）。
 **层按依赖并行跑**：父层就绪即可开跑，上限 `--jobs=N` > `$WTOOL_LAYER_JOBS` > 2（默认 2）；
 某层失败就不再开新的、等在跑的落地，整批算失败。
+`--dry-run` 打印每一层的计划（外加一行 `--rebuild` 的说明），收尾语是
+"dry-run：以上 N 个目标的计划，什么都没执行"—— **不是**"N 个目标就绪"（那时候
+`__layer/` 和 `__output/` 里可能什么都没有）。
+
+
 
 ---
 
