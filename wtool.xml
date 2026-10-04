@@ -15,7 +15,7 @@
        WTOOL_PREFIX、WTOOL_JOBS/ARCH、WTOOL_OS_*、WTOOL_ARTIFACTS、WTOOL_STATE_DIR；
        <source> 任务另有 WTOOL_SOURCE_DIR / WTOOL_SOURCE_REF。见 docs/spec.md §10。
 -->
-<wtool schema="1" id="bootstrap" priority="5">
+<wtool schema="1" priority="5">
 
   <!-- shell 集成：两个 shell 各一份，内容等价。
        priority=5 也写在这儿（priority 越小越早加载），保证后面所有项目

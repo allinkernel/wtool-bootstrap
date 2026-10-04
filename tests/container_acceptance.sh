@@ -53,7 +53,7 @@ printf 'hello\n' > "$P/__output/ubuntu_24.04/main/payload/usr/bin/demo"; chmod +
 printf 'demo=1\n' > "$P/demo.conf"
 cat > "$P/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/demo" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.demo.conf" wtool="~/.wtool/.demo.conf" subproject="demo.conf"/>
 </wtool>
 XML
@@ -116,7 +116,7 @@ say "3f. 没有 docker 的机器上，声明 kind=docker 的项目必须在动�
 mkdir -p "$W/ws/editor/dockerdemo/scripts"
 cat > "$W/ws/editor/dockerdemo/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="editor/dockerdemo" priority="50"><build kind="docker"/></wtool>
+<wtool schema="1" priority="50"><build kind="docker"/></wtool>
 XML
 printf '#!/bin/sh\ntouch "$WTOOL_PROJECT_DIR/ran-anyway.txt"\n' > "$W/ws/editor/dockerdemo/scripts/build.sh"
 chmod +x "$W/ws/editor/dockerdemo/scripts/build.sh"
@@ -142,8 +142,8 @@ wtool layer-save terminal/demo --image=whatever 2>&1 | head -3 || true
 
 say "3h. 需求 2 的形状：install 认项目 id，也认 all"
 wtool install terminal/demo >/dev/null && echo "✅ install <项目 id> 能装" || { echo "❌ install <id> 不行"; exit 1; }
-wtool uninstall --id terminal/demo >/dev/null 2>&1 || true
-[ -e "$WTOOL_HOME/.demo.conf" ] && { echo "❌ uninstall 没撤掉"; exit 1; } || echo "✅ uninstall --id 撤掉了"
+wtool uninstall terminal/demo >/dev/null 2>&1 || true
+[ -e "$WTOOL_HOME/.demo.conf" ] && { echo "❌ uninstall 没撤掉"; exit 1; } || echo "✅ uninstall <路径> 撤掉了"
 wtool install all 2>&1 | tail -3
 [ -f "$WTOOL_HOME/.wtool/.demo.conf" ] && echo "✅ install all 装上了（= wtool bootstrap）" || { echo "❌ install all 不行"; exit 1; }
 
@@ -167,7 +167,7 @@ printf '#!/bin/sh\ntouch "$WTOOL_PROJECT_DIR/task-ran.txt"\n' > "$ZS/provision/b
 printf 'demo-system-file\n' > "$ZS/demo.conf"
 cat > "$ZS/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/sudodemo" priority="50">
+<wtool schema="1" priority="50">
   <sudo-install src="demo.conf" dest="/tmp/wtool-accept-demo.conf" mode="replace" backup="true"
                 desc="验收用系统文件"/>
   <sudo-install src="provision/base.sh" marker="accept-base" desc="验收用任务"/>

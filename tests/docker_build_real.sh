@@ -48,7 +48,7 @@ P="$WTOOL_ROOT/demo"
 mkdir -p "$P/build" "$P/scripts"
 cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="demo" priority="50"><build kind="docker"/></wtool>
+<wtool schema="1" priority="50"><build kind="docker"/></wtool>
 EOF
 printf '%s\t%s\n' "$TARGET" "$IMG" > "$P/build/targets.tsv"
 cat > "$P/build/layers.tsv" <<EOF

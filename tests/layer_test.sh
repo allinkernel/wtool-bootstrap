@@ -40,7 +40,7 @@ mkdir -p "$WTOOL_ROOT/terminal/demo/scripts" "$WTOOL_ROOT/terminal/demo/__output
 P="$WTOOL_ROOT/terminal/demo"
 cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/demo" priority="50"/>
+<wtool schema="1" priority="50"/>
 EOF
 printf '__output/\nrelease/\n' > "$P/.gitignore"
 git -C "$P" init -q && git -C "$P" add -A \

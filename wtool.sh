@@ -9,8 +9,12 @@
 #                      用户层：项目 install.sh（__output/ → ~/.wtool）→
 #                      wtool.xml 的 link（影子 HOME → $HOME）。**永不 sudo、永不联网**
 #                      --prune：顺手清掉"清单里已经删掉、磁盘上还在"的软链（BL-15）
-#   wtool uninstall    <项目目录>|--id <id> [--dry-run] [--force] [--no-script]
+#   wtool uninstall    <项目路径>|all [--dry-run] [--force] [--no-script]
 #                      撤销上一条（不还原 /etc —— 那是 sudo-uninstall 的事）
+#   wtool move         <旧路径> <新路径> [--dry-run] [--force] [--no-script]
+#                      项目改名：卸旧的 → mv 目录 → 装新的（一条命令收干净）
+#                      ⚠️ 项目身份**就是它的路径**，改目录 = 换身份，
+#                         所以要真的走一遍卸载/安装，不能只 mv（见 ADR-0037）
 #
 #   ── 系统层 ─────────────────────────────────────────────────
 #   wtool sudo-uninstall <项目>...|all    撤系统层：/etc 还原 + 卸掉这次装的 apt 包
@@ -60,7 +64,7 @@
 #   wtool status  [<项目>]        无参：登记表 + 软链检查；给了项目：逐列状态 + 依据
 #   wtool doctor                  环境诊断（含环境变量与项目表）
 #   wtool validate <项目目录>     检查 wtool.xml 写得对不对
-#   wtool init    <目录> [--id ID] [--priority N] [--all]
+#   wtool init    <目录> [--priority N] [--all]
 #   wtool kill-self-forever       删掉 wtool 的一切痕迹（含 state；要逐字确认）
 #   wtool version
 #
@@ -1347,14 +1351,21 @@ cmd_install() {
         return $?
     fi
 
-    # 参数不是目录时**当成项目 id 找一次** —— build / download-release / publish-release
-    # 都认 id（wt_publish_resolve），install 只认目录的话，"换个命令就得换个写法"
+    # 参数不是目录时**当项目路径找一次** —— build / download-release / publish-release
+    # 都认路径（wt_publish_resolve），install 只认目录的话，"换个命令就得换个写法"
     # 太容易踩（实测：文档里到处写 `wtool install <项目>`，而它只收目录）。
+    #
+    # ‼️ **先当工作区相对路径试**，再查项目表。顺序反了的话，清单坏掉的项目
+    #    （比如还写着 `id=`）根本不在表里（scan_projects 会跳过坏清单），
+    #    用户看到的是"项目目录不存在"——完全不提清单哪里错了。
+    if [ ! -d "$_project" ] && [ -d "$WTOOL_ROOT/$_project" ]; then
+        _project=$WTOOL_ROOT/$_project
+    fi
     if [ ! -d "$_project" ]; then
         _row=$(wt_publish_resolve "$_project" 2>/dev/null) || true
         [ -n "$_row" ] && _project=$(printf '%s\n' "$_row" | cut -f3)
     fi
-    [ -d "$_project" ] || wt_die "项目目录不存在: $_project（给目录，或给项目 id；wtool 裸跑看全部）"
+    [ -d "$_project" ] || wt_die "项目路径不存在: $_project（给工作区相对路径或绝对路径；wtool 裸跑看全部）"
     _project=$(cd -- "$_project" && pwd)
 
     wt_git_precheck "$_project"
@@ -1383,6 +1394,7 @@ install 不替你做这个决定 —— 它永不联网。"
     wt_info "规划 $_project"
     python3 "$PY" plan-install "$_project" \
         --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
+        --root "$WTOOL_ROOT" \
         --head "$WTOOL_HEAD" --at "$(wt_now)" \
         $([ "$WTOOL_FORCE" = 1 ] && echo --force) \
         $([ "${WTOOL_PRUNE:-0}" = 1 ] && echo --prune) || exit $?
@@ -1428,19 +1440,29 @@ install 不替你做这个决定 —— 它永不联网。"
 # --------------------------------------------------------------------------
 cmd_uninstall() {
     _project=""
-    _id=""
     while [ $# -gt 0 ]; do
         case $1 in
             --dry-run) WTOOL_DRY_RUN=1 ;;
             --force)   WTOOL_FORCE=1 ;;
             --no-script) WTOOL_NO_SCRIPT=1 ;;   # 跳过项目自己的 install.sh --uninstall
-            --id)      shift; _id=${1:-} ;;
+            --id|--id=*)
+                # 老写法（2026-10-04 用户拍板删掉，ADR-0037）。**指路**，别只说
+                # "未知参数" —— 而且要把用户**自己敲的那个路径**回显出来，
+                # 他才能原样复制去跑。
+                _old=${1#--id=}
+                [ "$1" = "--id" ] && _old=${2:-}
+                [ -n "$_old" ] || _old="<项目路径>"
+                wt_die "--id 已经删掉：项目身份就是它的路径，直接写路径就行
+  wtool uninstall $_old        （原来是 wtool uninstall --id $_old）" ;;
             -*)        wt_die "未知参数: $1" ;;
             *)         _project=$1 ;;
         esac
         shift
     done
-    [ -n "$_project" ] || [ -n "$_id" ] || wt_die "用法: wtool uninstall <项目目录>|--id <id>|all [--dry-run] [--force] [--no-script]"
+    [ -n "$_project" ] || wt_die "用法: wtool uninstall <项目路径>|all [--dry-run] [--force] [--no-script]
+
+  项目路径 = 相对工作区根的路径（terminal/tmux），或者一个真实的目录。
+  目录已经不在了也能卸 —— 那条路走 state 里记的账。"
 
     # `all` = 卸掉所有装过的项目（判据是 state 里的账，不是项目表：
     # 项目目录可能已经不在磁盘上了 —— 那种情况下面显式降级成 `--no-script`
@@ -1465,11 +1487,11 @@ cmd_uninstall() {
             # 项目目录可能已经被删掉（场景 5b：仓库没了也得卸得掉）。那种情况
             # 没有脚本可跑 —— 降级成 `--no-script` 走 state 的账，由下面那条路
             # 打一句警告说明是哪个项目（BL-47：解析不出来必须报错，不许静默跳过）。
-            if [ -z "$_noscript_all" ] && ! wt_resolve_uninstall_id "$_ai" >/dev/null 2>&1; then
+            if [ -z "$_noscript_all" ] && ! wt_resolve_uninstall_path "$_ai" >/dev/null 2>&1; then
                 _noscript_all="--no-script"
             fi
             # shellcheck disable=SC2086
-            cmd_uninstall --id "$_ai" $_force_all $_noscript_all || _rc_all=1
+            cmd_uninstall "$_ai" $_force_all $_noscript_all || _rc_all=1
         done
         [ "$_rc_all" = 0 ] && wt_info "uninstall all 完成" || wt_warn "有些项目没卸干净"
         return $_rc_all
@@ -1478,44 +1500,35 @@ cmd_uninstall() {
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
 
-    if [ -n "$_project" ] && [ ! -d "$_project" ]; then
-        # 不是目录 → 当成项目 id（install / build / download-release / publish-release
-        # 都认 id，只有 uninstall 只认目录的话，`wtool uninstall terminal/demo` 会死在
-        # `cd: can't cd to` 上 —— 实测踩过）。真目录已经被删掉的情况照样用 `--id`：
-        # 那条路走 state 里的账，不需要目录还在。
-        _id=$_project
-        _project=""
-    fi
-
-    if [ -n "$_project" ]; then
-        _project=$(cd -- "$_project" && pwd)
-        python3 "$PY" plan-uninstall "$_project" \
-            --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
-            $([ "$WTOOL_FORCE" = 1 ] && echo --force) || exit $?
+    # 项目**路径**。目录还在就直接用它；不在了（被删掉 / 改过名）就当成
+    # 相对工作区根的路径，去项目表和 state 的账里找 —— 那条路不需要目录还在。
+    _proj_arg=$_project
+    _proj_root=""
+    if [ -d "$_project" ]; then
+        _proj_root=$(cd -- "$_project" && pwd)
     else
-        # ‼️ `--id` / 裸 id 这条路必须先把**项目根**解析出来（BL-47）。
-        #    以前这里不解析，meta 里的 project_root 是 `-`，第 3 步
-        #    "跑项目自己的 install.sh --uninstall"就**静默跳过**了 ——
-        #    不报错、不警告，用户以为卸干净了；只有目录形式才真跑（实测复现）。
-        #    解析不出来时**明确报错**（除非 --no-script 已经说了不跑脚本）。
-        _id_root=""
-        _id_res=$(wt_resolve_uninstall_id "$_id") || _id_res=""
-        if [ -n "$_id_res" ]; then
-            _id=$(printf '%s\n' "$_id_res" | cut -f1)
-            _id_root=$(printf '%s\n' "$_id_res" | cut -f2)
+        # ‼️ 目录不在时，必须先把**项目根**解析出来（BL-47/BL-48）。
+        #    解析不出来时**明确报错**（除非 --no-script 已经说了不跑脚本）——
+        #    静默跳过项目脚本是这条路上踩过的坑：不报错、不警告，
+        #    用户以为卸干净了。
+        _res=$(wt_resolve_uninstall_path "$_project") || _res=""
+        if [ -n "$_res" ]; then
+            _proj_arg=$(printf '%s\n' "$_res" | cut -f1)
+            _proj_root=$(printf '%s\n' "$_res" | cut -f2)
         elif [ "${WTOOL_NO_SCRIPT:-0}" = 1 ]; then
-            wt_warn "找不到项目「$_id」的工作区目录（项目表里没有、state 里记的路径也不在了）；"
+            wt_warn "找不到项目「$_project」的工作区目录（项目表里没有、state 里记的路径也不在了）；"
             wt_warn "  --no-script 已给，跳过项目脚本，只撤 state 的账"
         else
-            wt_die "找不到项目「$_id」：工作区项目表里没有它，state 里也没记过它的项目根 ——
+            wt_die "找不到项目「$_project」：工作区项目表里没有它，state 里也没记过它的项目根 ——
 项目脚本（install.sh --uninstall）没法跑，不会静默跳过。
-确认 id 拼写；或直接给项目目录：wtool uninstall <项目目录>；
+确认路径拼写（要写完整：terminal/tmux，不是 tmux）；或直接给项目目录；
 确实不需要跑项目脚本，加 --no-script。"
         fi
-        python3 "$PY" plan-uninstall --id "$_id" --project-root "$_id_root" \
-            --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
-            $([ "$WTOOL_FORCE" = 1 ] && echo --force) || exit $?
     fi
+    python3 "$PY" plan-uninstall "$_proj_arg" --project-root "$_proj_root" \
+        --root "$WTOOL_ROOT" \
+        --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
+        $([ "$WTOOL_FORCE" = 1 ] && echo --force) || exit $?
 
     wt_load_project "$_scratch"
     wt_info "project: $WTOOL_PROJECT_ID"
@@ -1692,6 +1705,131 @@ cmd_uninstall() {
 }
 
 # --------------------------------------------------------------------------
+# move：项目改名（= 卸旧的 + mv 目录 + 装新的）
+#
+# 为什么不能只 `mv`：**项目身份就是它的路径**（ADR-0037）。目录一改，
+# 这三处按**旧路径**建的东西就全对不上了：
+#   * `$WTOOL_STATE/<路径>/`（journal / env 块 / meta 都在这儿）
+#   * `~/.wtool/wtool-work-dir/links/<路径>` 中转软链
+#   * `~/.wtool/.zshrc` 里那段 `# >>> wtool:<路径>` env 块
+# 而且 registry 里还挂着旧路径 —— 下次 `install <新路径>` 会直接报
+# "dest 已被项目 <旧路径> 占用"（要 --force 才过，过完还留一堆孤儿）。
+# 所以改名必须**真的走一遍卸载和安装**，这就是这条命令存在的理由。
+#
+# `--dry-run` **一个字节都不动**（目录、state、$HOME 都不碰），只打印计划。
+# --------------------------------------------------------------------------
+cmd_move() {
+    _mv_old=""; _mv_new=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --dry-run)   WTOOL_DRY_RUN=1 ;;
+            --force)     WTOOL_FORCE=1 ;;
+            --no-script) WTOOL_NO_SCRIPT=1 ;;
+            --id|--id=*) wt_die "--id 已经删掉（ADR-0037）：move 收的是**两个路径**
+  wtool move terminal/tmux terminal/tmux2" ;;
+            -*)          wt_die "未知参数: $1" ;;
+            *)           if [ -z "$_mv_old" ]; then _mv_old=$1
+                         elif [ -z "$_mv_new" ]; then _mv_new=$1
+                         else wt_die "多给了一个参数: $1（只要 <旧路径> <新路径>）"; fi ;;
+        esac
+        shift
+    done
+    [ -n "$_mv_old" ] && [ -n "$_mv_new" ] || wt_die "用法: wtool move <旧路径> <新路径> [--dry-run] [--force] [--no-script]
+
+  项目**改名**：卸掉旧的 → 把目录 mv 过去 → 按新路径装一遍。
+  两个路径都可以写相对工作区根的（terminal/foo），也可以写绝对路径。
+
+  为什么要整条走一遍：项目身份就是它的路径，改目录 = 换身份 ——
+  状态目录、中转软链 links/<路径>、env 块名都是按旧路径建的。
+  只 mv 会留下一整套对不上的孤儿（wtool check 会把它们报出来）。"
+
+    # ---- 解析成绝对路径 ----
+    case $_mv_old in
+        /*) _mv_old_abs=$_mv_old ;;
+        *)  _mv_old_abs=$WTOOL_ROOT/$_mv_old ;;
+    esac
+    [ -d "$_mv_old_abs" ] || wt_die "旧项目目录不存在: $_mv_old_abs"
+    _mv_old_abs=$(cd -- "$_mv_old_abs" && pwd)
+
+    case $_mv_new in
+        /*) _mv_new_abs=$_mv_new ;;
+        *)  _mv_new_abs=$WTOOL_ROOT/$_mv_new ;;
+    esac
+    # 新目录还不存在，cd 不进去，只能把字符串规整（去掉 ./ 和结尾的 /）
+    _mv_new_abs=$(python3 -c 'import os,sys; print(os.path.normpath(os.path.abspath(sys.argv[1])))' \
+                  "$_mv_new_abs")
+
+    [ "$_mv_old_abs" != "$_mv_new_abs" ] || wt_die "新旧是同一个目录: $_mv_old_abs"
+    [ -e "$_mv_new_abs" ] && wt_die "新路径已经存在: $_mv_new_abs（move 不覆盖任何东西）"
+
+    # ---- 身份（= 相对工作区根的路径）。两个都必须**在工作区里** ----
+    _mv_old_id=$(python3 "$PY" project-id "$_mv_old_abs" --root "$WTOOL_ROOT" 2>/dev/null) || _mv_old_id=""
+    _mv_new_id=$(python3 "$PY" project-id "$_mv_new_abs" --root "$WTOOL_ROOT" 2>/dev/null) || _mv_new_id=""
+    [ -n "$_mv_old_id" ] || wt_die "旧项目不在工作区里: $_mv_old_abs（工作区 $WTOOL_ROOT）
+工作区外面的项目没法用 move —— 它的身份不该是一个路径，先 wtool install 进来。"
+    [ -n "$_mv_new_id" ] || wt_die "新路径得在工作区里: $_mv_new_abs（工作区 $WTOOL_ROOT）"
+
+    # ---- 能搬得动吗？**先问清楚再卸** ----
+    # 反例：卸完了才发现父目录不可写 —— 那时旧路径已经卸干净、目录还在原地，
+    # 用户面对一个"卸了但没搬"的项目。宁可现在就不动。
+    _mv_new_dir=$(dirname -- "$_mv_new_abs")
+    _mv_probe=$_mv_new_dir
+    while [ ! -d "$_mv_probe" ]; do
+        _mv_up=$(dirname -- "$_mv_probe")
+        [ "$_mv_up" = "$_mv_probe" ] && break
+        _mv_probe=$_mv_up
+    done
+    [ -w "$_mv_probe" ] || wt_die "新路径建不了（$_mv_probe 不可写）：$_mv_new_abs"
+
+    # ---- dry-run：只打印，一个字节都不动 ----
+    if wt_dry; then
+        wt_info "[dry-run] 改名计划：$_mv_old_id  →  $_mv_new_id"
+        wt_step "[dry-run]   1/3 wtool uninstall $_mv_old_id"
+        wt_step "[dry-run]   2/3 mv $_mv_old_abs  →  $_mv_new_abs"
+        wt_step "[dry-run]   3/3 wtool install $_mv_new_abs"
+        wt_info "[dry-run] 目录、state、\$HOME 软链都没碰（--dry-run）"
+        return 0
+    fi
+
+    _mv_extra=""
+    [ "${WTOOL_FORCE:-0}" = 1 ] && _mv_extra="$_mv_extra --force"
+    [ "${WTOOL_NO_SCRIPT:-0}" = 1 ] && _mv_extra="$_mv_extra --no-script"
+
+    wt_info "改名：$_mv_old_id  →  $_mv_new_id"
+
+    wt_step "1/3 卸载 $_mv_old_id"
+    # 给**绝对路径**：这样 cmd_uninstall 走"目录还在"那条直路，不用去查表。
+    # shellcheck disable=SC2086
+    cmd_uninstall "$_mv_old_abs" $_mv_extra || wt_die "卸载旧路径失败 —— 改名中止，目录没动"
+
+    wt_step "2/3 mv → $_mv_new_abs"
+    mkdir -p -- "$_mv_new_dir" || wt_die "建不了新路径的父目录: $_mv_new_dir"
+    if ! mv -- "$_mv_old_abs" "$_mv_new_abs"; then
+        wt_die "mv 失败：$_mv_old_abs → $_mv_new_abs
+旧路径**已经卸掉了**（软链和账都撤了），但目录还在原地。两条路：
+  mv $_mv_old_abs $_mv_new_abs && wtool install $_mv_new_id
+  wtool install $_mv_old_id        # 或者干脆别改名了，装回旧路径"
+    fi
+
+    # repo 客户端的工作区：`.git` 是指向 .repo/projects/<路径>.git 的**软链**，
+    # 同深度改名它照样解析得到；深度变了就会悬空。不替用户修（那是 repo 的事），
+    # 但必须**现在**说出来 —— 否则下一步 git 报的错完全看不出跟改名有关。
+    if [ -L "$_mv_new_abs/.git" ] && [ ! -e "$_mv_new_abs/.git" ]; then
+        wt_warn "  ⚠️ .git 是软链，搬完悬空了：$(readlink -- "$_mv_new_abs/.git")"
+        wt_warn "     这是 repo 客户端管理的仓库，路径钉在 .repo/projects/ 下 ——"
+        wt_warn "     同深度改名没事，跨深度建议改用 repo 的方式搬。"
+    fi
+
+    wt_step "3/3 安装 $_mv_new_id"
+    # shellcheck disable=SC2086
+    cmd_install "$_mv_new_abs" $_mv_extra || wt_die "装新路径失败（目录已经搬过去了，不是丢数据）：
+  wtool install $_mv_new_id     # 重跑一次就行，install 是幂等的"
+
+    wt_info "改名完成：$_mv_old_id  →  $_mv_new_id"
+    wt_info "（旧的 state / 软链 / env 块已经在第 1 步撤干净；wtool check 可以复查）"
+}
+
+# --------------------------------------------------------------------------
 # sudo-install：系统层 —— /etc 下的文件 + 要跑的脚本/playbook + apt 包
 #
 # 和 install 完全分离（§0 那条铁律）：
@@ -1784,6 +1922,7 @@ wt_sudo_install_one() {   # <项目目录> <项目 id> [--dry-run] [--force]
     wt_info "── $_si_pid  系统层"
     python3 "$PY" plan-provision "$_si_dir" \
         --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
+        --root "$WTOOL_ROOT" \
         --os-id "$WTOOL_OS_ID" --os-version "$WTOOL_OS_VERSION" \
         --os-codename "$WTOOL_OS_CODENAME" --arch "$WTOOL_ARCH" \
         --jobs "$WTOOL_JOBS" --prefix "$WTOOL_PREFIX" --src-root "$WTOOL_SRC" \
@@ -1862,7 +2001,13 @@ cmd_sudo_uninstall() {
         case $1 in
             --dry-run) WTOOL_DRY_RUN=1 ;;
             --force)   WTOOL_FORCE=1 ;;
-            --id)      shift; _ids="$_ids ${1:-}" ;;
+            --id|--id=*)
+                # 老写法（ADR-0037）。回显用户实际敲的路径。
+                _old=${1#--id=}
+                [ "$1" = "--id" ] && _old=${2:-}
+                [ -n "$_old" ] || _old="<项目路径>"
+                wt_die "--id 已经删掉：项目身份就是它的路径，直接写路径就行
+  wtool sudo-uninstall $_old   （原来是 wtool sudo-uninstall --id $_old）" ;;
             -*)        wt_die "未知参数: $1" ;;
             *)         _targets="$_targets $1" ;;
         esac
@@ -2315,9 +2460,14 @@ cmd_check() {
     done
     _project_id=""
     if [ -n "$_project" ]; then
-        _row=$(wt_resolve_project "$_project") || exit $?
-        _project_id=$(printf '%s\n' "$_row" | cut -f2)
-        _project=$(printf '%s\n' "$_row" | cut -f3)
+        # 项目表里没有**不一定是拼错了** —— 可能是"改掉的旧路径"，而查它正是
+        # check 的活（ADR-0037 的残渣）。所以这里不 die：原样交给 planner，
+        # 让它在残渣那一节里认；认不出就一条也不报（不会假称"一切对得上"）。
+        _row=$(wt_resolve_project "$_project" 2>/dev/null) || _row=""
+        if [ -n "$_row" ]; then
+            _project_id=$(printf '%s\n' "$_row" | cut -f2)
+            _project=$(printf '%s\n' "$_row" | cut -f3)
+        fi
     fi
     _out=$(python3 "$PY" check --root "$WTOOL_ROOT" --home "$WTOOL_HOME" \
         --state "$WTOOL_STATE" ${_project:+"$_project"}) || _rc=$?
@@ -2333,7 +2483,13 @@ cmd_check() {
             fi
         done
         printf '\n'
-        wt_warn "上面这些对不上（声明 / 日志 / 磁盘）。修：wtool repair"
+        # ⚠️ 别只说"修：repair" —— repair 只重建、不删除，也**不认改掉的旧路径**。
+        #    残渣（旧 env 块 / 悬空链 / registry 旧行）得靠 uninstall 撤账收干净。
+        wt_warn "上面这些对不上（声明 / 日志 / 磁盘）。修法分两种："
+        wt_warn "  · 项目还在、只是软链/块缺了 → wtool repair <项目>（只重建，不删）"
+        wt_warn "  · 改过名留下的旧账（state 里有、磁盘上没这个项目了）→"
+        wt_warn "      wtool uninstall <旧路径> --no-script     # 撤掉旧账"
+        wt_warn "      下次改名用 wtool move <旧路径> <新路径>   # 一条命令收干净"
         return 1
     fi
     wt_info "一切对得上（声明 / 日志 / 磁盘）"
@@ -2369,6 +2525,7 @@ cmd_repair() {
         _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-repair.XXXXXX")
         python3 "$PY" plan-install "$_path" \
             --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
+            --root "$WTOOL_ROOT" \
             --head "-" --at "$(wt_now)" --force || {
             rm -rf -- "$_scratch"; wt_warn "$_pid 的清单有问题，跳过"; continue; }
         wt_load_project "$_scratch"
@@ -2517,15 +2674,15 @@ cmd_status_registry() {
 #      （它只是 refresh-downloads 的别名，两种敲法都走 wt_refresh_downloads）。
 #      `refresh-downloads` 虽然 --help 里也没有，但用户拍板要列 —— 它是真命令。
 # ==========================================================================
-WTOOL_SUBCOMMANDS="build install uninstall bootstrap
+WTOOL_SUBCOMMANDS="build install uninstall move bootstrap
 status check repair doctor
 validate init version kill-self-forever refresh-downloads
 pack-release unpack-release publish-release download-release
 sudo-install sudo-uninstall sudo-bootstrap
 unpack-layer push-layer pull-layer"
 
-# 第一个位置参数是"项目"的命令（补全时列项目 id，再加 all）
-WTOOL_PROJECT_CMDS="status install uninstall build pack-release publish-release
+# 第一个位置参数是"项目"的命令（补全时列项目路径，再加 all）
+WTOOL_PROJECT_CMDS="status install uninstall move build pack-release publish-release
 download-release unpack-release sudo-install sudo-uninstall
 unpack-layer push-layer pull-layer"
 
@@ -2564,12 +2721,13 @@ wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列
     #    tests/contract_test.sh 会把这里打出来的候选**原样**喂给对应命令试一遍
     #    （假 HOME / 假 state / 空 root、不给位置参数、不探 sudo-*），谁报
     #    "未知参数"就红 —— 所以改了参数解析就要同步改这里。
-    #    ⚠️ 值只认**空格形式**的开关（`--id foo`）不能写成 `--id=`：带 = 的那种
-    #    在这几条命令里是"未知参数"（2026-10-04 实测 `wtool uninstall --id=foo`
-    #    → `未知参数: --id=foo`）。带 = 的那些（`--tag=` 等）才是解析器认的形式。
+    #    ⚠️ 值只认**空格形式**的开关（`--tag foo`）不能写成 `--tag=`：带 = 的那种
+    #    在有的命令里是"未知参数"。带 = 的那些（`--tag=` 等）才是解析器认的形式。
+    #    ⚠️ `--id` 已经删掉（ADR-0037）—— 这张表里不该再有它，别加回来。
     case $1 in
         install)            printf '%s\n' --dry-run --force --prune --no-script ;;
-        uninstall)          printf '%s\n' --dry-run --force --no-script --id ;;
+        uninstall)          printf '%s\n' --dry-run --force --no-script ;;
+        move)               printf '%s\n' --dry-run --force --no-script ;;
         bootstrap)          printf '%s\n' --dry-run --force --prune ;;
         build)              printf '%s\n' --dry-run --force --jobs= --target= ;;
         pack-release)       printf '%s\n' --dry-run --force --tag= --volume-size= --repo= ;;
@@ -2577,7 +2735,7 @@ wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列
         download-release)   printf '%s\n' --dry-run ;;
         unpack-release)     printf '%s\n' --dry-run --from= ;;
         sudo-install)       printf '%s\n' --dry-run --force ;;
-        sudo-uninstall)     printf '%s\n' --dry-run --force --id ;;
+        sudo-uninstall)     printf '%s\n' --dry-run --force ;;
         sudo-bootstrap)     printf '%s\n' --dry-run --force ;;
         unpack-layer)       printf '%s\n' --dry-run --target= --layer= --output= ;;
         push-layer)         printf '%s\n' --dry-run --registry= --target= --layer= ;;
@@ -2586,7 +2744,7 @@ wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列
         repair)             printf '%s\n' --dry-run ;;
         doctor)             printf '%s\n' --quiet --json ;;
         status)             printf '%s\n' --color= ;;
-        init)               printf '%s\n' --id --priority --all --with-install --with-build ;;
+        init)               printf '%s\n' --priority --all --with-install --with-build ;;
         validate)           printf '%s\n' --force ;;
     esac
 }
@@ -2817,11 +2975,14 @@ _q() {
 # 是靠脚本存在与否点亮的，放一个空壳进去等于撒谎。
 # --------------------------------------------------------------------------
 cmd_init() {
-    _dir=""; _id=""; _prio=""
+    _dir=""; _prio=""
     _with_build=0; _with_install=0
     while [ $# -gt 0 ]; do
         case $1 in
-            --id)           shift; _id=${1:-} ;;
+            --id|--id=*)
+                # 老写法。init 以前用它写进 wtool.xml 的 id= 属性，那个属性已经取消。
+                wt_die "--id 已经删掉：项目身份就是它相对工作区根的路径，不用也不能自己取
+  wtool init <目录> --priority 55      （把 --id … 整段去掉就行）" ;;
             --priority)     shift; _prio=${1:-} ;;
             --with-build)   _with_build=1 ;;
             --with-install) _with_install=1 ;;
@@ -2834,7 +2995,7 @@ cmd_init() {
         esac
         shift
     done
-    [ -n "$_dir" ] || wt_die "用法: wtool.sh init <目录> [--id ID] [--priority N] [--all]
+    [ -n "$_dir" ] || wt_die "用法: wtool.sh init <目录> [--priority N] [--all]
 
   --with-build    生成 scripts/build.sh（能编译 / 要产出的项目）
   --with-install  生成 scripts/install.sh（wtool.xml 表达不了的安装步骤）
@@ -2843,21 +3004,17 @@ cmd_init() {
   （发布和下载**不用写脚本**：pack-release / publish-release / download-release /
     unpack-release 全是引擎命令，见 harness/docs/adr/0023。）
 
-  纯声明式的项目（只靠 wtool.xml 的 link/env 就能装好）不需要任何脚本。"
+  纯声明式的项目（只靠 wtool.xml 的 link/env 就能装好）不需要任何脚本。
+  **没有 --id**：项目身份就是它相对工作区根的路径（见 ADR-0037）。"
     [ -n "$_prio" ] || _prio=100
 
-    # id 默认取相对工作区的路径，这样嵌套项目也对
+    # 项目身份 = 相对工作区的路径。目录**外面**（`wtool init /tmp/foo`）取不到合法身份，
+    # 那种情况直接拒绝 —— 身份是引擎算的，没有第二个来源。
     _abs=$(cd -- "$(dirname -- "$_dir")" 2>/dev/null && pwd)/$(basename -- "$_dir") 2>/dev/null || _abs=$_dir
-    if [ -z "$_id" ]; then
-        _id=$(python3 -c '
-import os, sys
-p, root = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
-rel = os.path.relpath(p, root)
-print(os.path.basename(p) if rel.startswith("..") else rel)
-' "$_abs" "$WTOOL_ROOT")
-    fi
+    _id=$(python3 "$PY" project-id "$_abs" --root "$WTOOL_ROOT" 2>/dev/null) || _id=""
     case $_id in
-        /*|*..*) wt_die "项目 id 非法: $_id" ;;
+        ""|/*|*..*) wt_die "项目得在工作区里：$_dir
+（项目身份就是它相对工作区根的路径，工作区是 $WTOOL_ROOT）" ;;
     esac
 
     mkdir -p -- "$_dir"
@@ -2873,7 +3030,7 @@ print(os.path.basename(p) if rel.startswith("..") else rel)
   写清楚这个项目是干什么的，以及装完之后用户能用到什么。
   wtool 只认下面这些元素，别的不认识的会直接报错（x- 前缀也不例外 —— 没有自定义元素这回事）。
 -->
-<wtool schema="1" id="$_id" priority="$_prio">
+<wtool schema="1" priority="$_prio">
 
   <!-- shell 集成：两个 shell 各一份，内容要等价（公司机器上没有 zsh 的多得很） -->
   <zshrc  src="env.zsh"/>
@@ -2997,23 +3154,24 @@ wt_proj_tbl_load() {
     fi
 }
 
-# 项目 id → "id<TAB>项目根"（给 uninstall 用）。找不到返回 1 —— **不 die**，
+# 项目**路径** → "路径<TAB>项目根"（给 uninstall 用）。找不到返回 1 —— **不 die**，
 # 由调用方决定怎么说（uninstall 要按 `--no-script` 分两种说法）。
 #
-# 为什么要这一步（BL-47，2026-10-04 实测）：`wtool uninstall <id>` 那条路以前
+# 为什么要这一步（BL-47，2026-10-04 实测）：`wtool uninstall <路径>` 那条路以前
 # 拿不到 project_root（meta 里写 `-`），于是"跑项目自己的 install.sh --uninstall"
 # 被**静默跳过** —— 不报错、不警告，只有目录形式才跑。
 #
-# 只认**完整 id**（`--id` 给的就是项目 id；state 目录也是按完整 id 建的）：
-# 认末段 id（`tmux`）会有个危险的岔子 —— state 里那条账叫 `foo/bar`，
-# 而表里只有 `x/foo/bar` 时会把**另一个项目**卸掉。找不到时把末段同名的
-# 候选打到 stderr 提示用户写完整 id，但不替他选。
+# 项目身份 = 路径（2026-10-04 用户拍板干掉 id），所以匹配的就是**完整路径**：
+# 表里第 2 列、state 目录名、`~/.wtool/wtool-work-dir/links/<路径>` 三处全是它。
+# 只认完整路径（`tmux` 不替你猜 `terminal/tmux`）有个安全的理由：state 里那条账
+# 叫 `foo/bar`，而表里只有 `x/foo/bar` 时会把**另一个项目**卸掉。找不到时把末段
+# 同名的候选打到 stderr 提示用户写全，但不替他选。
 #
 # 两条来源，按顺序：
 #   ① 工作区项目表（publish-list —— 看板 / 发布 / 状态用的是同一张表，没有第二套扫描）
 #   ② state 里 install 当时记下的 project_root（工作区**外面**装的项目只能靠这条），
 #      只在那个目录还在时才算数 —— 目录没了就没有脚本可跑
-wt_resolve_uninstall_id() {
+wt_resolve_uninstall_path() {
     _ru_id=$1
     wt_proj_tbl_load
     _ru_tbl=$_wt_proj_tbl
@@ -3031,7 +3189,7 @@ wt_resolve_uninstall_id() {
     # 什么也没找到：表里有"末段同名"的就说一句，免得用户以为项目不存在
     printf '%s\n' "$_ru_tbl" | awk -F'\t' -v w="$_ru_id" '
         length(w) < length($2) && substr($2, length($2) - length(w)) == "/" w {
-            if (!hit) { print "（工作区里有末段同名的项目，id 要写完整：）"; hit=1 }
+            if (!hit) { print "（工作区里有末段同名的项目，路径要写完整：）"; hit=1 }
             print "  " $2
         }' >&2
     return 1
@@ -4065,6 +4223,7 @@ case $_cmd in
     # 汇总），两个终端同时跑就会互相抹掉对方的条目 —— 见 BL-17
     install)   wt_run_locked cmd_install "$@" ;;
     uninstall) wt_run_locked cmd_uninstall "$@" ;;
+    move)      wt_run_locked cmd_move "$@" ;;
     sudo-install)   wt_run_locked cmd_sudo_install "$@" ;;
     sudo-uninstall) wt_run_locked cmd_sudo_uninstall "$@" ;;
     sudo-bootstrap) wt_run_locked cmd_sudo_bootstrap "$@" ;;

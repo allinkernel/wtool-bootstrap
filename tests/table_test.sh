@@ -79,7 +79,7 @@ mkbuildable() {   # <项目目录>
 # 纯声明式：没有脚本，靠 wtool.xml 的 link/env 装。没有 build.sh → 不用等产出
 cat > "$WS/declarative/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="declarative" priority="10">
+<wtool schema="1" priority="10">
   <env src="env.zsh" shells="zsh"/>
   <link src="a.conf" dest=".a.conf"/>
 </wtool>
@@ -89,7 +89,7 @@ EOF
 mkbuildable "$WS/scripted"
 cat > "$WS/scripted/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="scripted" priority="20"/>
+<wtool schema="1" priority="20"/>
 EOF
 git -C "$WS/scripted" init -q 2>/dev/null || true
 
@@ -97,7 +97,7 @@ git -C "$WS/scripted" init -q 2>/dev/null || true
 mkbuildable "$WS/pending"
 cat > "$WS/pending/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="pending" priority="25"/>
+<wtool schema="1" priority="25"/>
 EOF
 
 # 和 pending 一模一样，只多了 __output/x → install 该是"可执行"
@@ -105,13 +105,13 @@ mkbuildable "$WS/ready"
 printf 'built\n' > "$WS/ready/__output/x"
 cat > "$WS/ready/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="ready" priority="28"/>
+<wtool schema="1" priority="28"/>
 EOF
 
 # 声明了系统层的项目：sudo 那格该是"可执行"，第 3/5 段该列出它
 cat > "$WS/needsudo/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="needsudo" priority="35">
+<wtool schema="1" priority="35">
   <sudo-install kind="apt-mirror" mirror="ustc" dest="auto" desc="换源"/>
   <sudo-install src="provision/packages.yaml" marker="apt-base" desc="基础软件包"/>
 </wtool>
@@ -121,7 +121,7 @@ printf -- '- hosts: localhost\n' > "$WS/needsudo/provision/packages.yaml"
 # 什么都没有：两列都该是"不支持"（红）
 cat > "$WS/nowhere/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="nowhere" priority="30">
+<wtool schema="1" priority="30">
   <publish kind="none"/>
 </wtool>
 EOF
@@ -129,7 +129,7 @@ EOF
 # 老位置：build.sh 就放在项目根（不在 scripts/ 下）—— 引擎仍然认，表格也该认
 cat > "$WS/legacy/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="legacy" priority="40">
+<wtool schema="1" priority="40">
   <publish kind="none"/>
 </wtool>
 EOF
@@ -138,13 +138,13 @@ printf '#!/bin/sh\n' > "$WS/legacy/build.sh"
 # 嵌套项目：id 必须相对工作区根算
 cat > "$WS/outer/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="outer" priority="50">
+<wtool schema="1" priority="50">
   <env src="env.zsh" shells="zsh"/>
 </wtool>
 EOF
 cat > "$WS/outer/inner/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="outer/inner" priority="60">
+<wtool schema="1" priority="60">
   <env src="env.zsh" shells="zsh"/>
 </wtool>
 EOF
@@ -457,14 +457,14 @@ WS4="$T/ws-onlymanifest"
 mkdir -p "$WS4/real" "$WS4/.wtool-dist" "$WS4/umbrella/assets"
 cat > "$WS4/real/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="real" priority="10">
+<wtool schema="1" priority="10">
   <env src="env.zsh" shells="zsh"/>
 </wtool>
 EOF
 # 伞项目：自己管着一个没有 wtool.xml 的子仓库（<sub> 替它表态）
 cat > "$WS4/umbrella/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="umbrella" priority="20">
+<wtool schema="1" priority="20">
   <publish>
     <sub path="assets" kind="source"/>
   </publish>

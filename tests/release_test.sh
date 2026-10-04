@@ -44,6 +44,7 @@ zsha()  { sha256sum -- "$1" | cut -d' ' -f1; }
 # --------------------------------------------------------------------------
 printf '\n== 场景 1：pack-release 打包一个"要构建"的项目 ==\n'
 WS="$T/ws1"
+export WTOOL_ROOT="$T/ws1"   # 身份 = 相对工作区根的路径（ADR-0037）
 P="$WS/terminal/tmux"
 mkdir -p "$P/scripts" "$P/__output/ubuntu_24.04/bin" "$P/__release" "$P/junk"
 printf 'set -g mouse on\n'      > "$P/tmux.conf"
@@ -56,7 +57,7 @@ printf 'bin\n'                  > "$P/__output/ubuntu_24.04/bin/tmux"
 chmod +x "$P/__output/ubuntu_24.04/bin/tmux"
 cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/tmux" priority="50">
+<wtool schema="1" priority="50">
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
   <link home="~/.tmux.conf" wtool="~/.wtool/.tmux.conf" subproject="tmux.conf"/>
@@ -169,6 +170,7 @@ print(",".join(sorted(v["name"] for v in d["volumes"] if v["of"]=="release.zip")
 
 # 模拟"另一台只有浏览器的机器"：把 dist.json + 所有分卷放进一个新项目目录
 P2="$T/ws2/terminal/tmux"
+export WTOOL_ROOT="$T/ws2"
 mkdir -p "$P2/__release"
 cp "$P/__release/dist.json" "$P2/__release/"
 cp "$P/__release"/*-vol* "$P2/__release/"
@@ -187,10 +189,12 @@ check "payload 逐字节一致" "$(cat "$P/__output/ubuntu_24.04/bin/tmux")" \
 #   unpack-release 这层不"改路径"（包里有啥解啥），但**必须提示一句** ——
 #   不然下一步 `wtool install` 只会说"__output/ 是空的"，人会去重下几百兆。
 P2b="$T/ws2b/terminal/tmux"
+export WTOOL_ROOT="$T/ws2b"
 mkdir -p "$P2b/__release" "$T/oldpkg"
 # 在**项目的一份拷贝**里打包：直接再 pack 一次 $P 会把场景 2 切好的分卷清掉
 # （pack-release 会删掉它这次要重新生成的那些文件），场景 3 就没得用了。
 P2b_SUB="$T/pj2b/terminal/tmux"
+export WTOOL_ROOT="$T/pj2b"
 mkdir -p "$(dirname -- "$P2b_SUB")"
 cp -a "$P" "$P2b_SUB"
 rm -rf -- "$P2b_SUB/__release"
@@ -238,6 +242,7 @@ printf '\n== 2c：源码包必须排除**新旧六个**产物目录（ADR-0033�
 #   而"没有 git 时"走的是引擎自己的 walk —— 那张忽略表少一个名字，
 #   就能把一个 1GB 的产物目录打进源码包。
 P2c="$T/ws2c/packdemo"; mkdir -p "$P2c"
+export WTOOL_ROOT="$T/ws2c"
 cd "$P2c" || exit 1
 git init -q .; git -C "$P2c" remote add origin https://github.com/fake/packdemo.git
 printf 'keep\n' > keep.txt
@@ -249,7 +254,7 @@ mkdir -p "$P2c/scripts"
 printf '#!/bin/sh\ntrue\n' > "$P2c/scripts/build.sh"
 cat > "$P2c/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/packdemo" priority="50">
+<wtool schema="1" priority="50">
 </wtool>
 XML
 git -C "$P2c" add -A; git -C "$P2c" -c user.name=t -c user.email=t@t commit -qm init
@@ -275,6 +280,7 @@ cd "$here" || exit 1
 # --------------------------------------------------------------------------
 printf '\n== 场景 3：卷坏了 / 缺卷 → 拒绝解开 ==\n'
 P3="$T/ws3/terminal/tmux"
+export WTOOL_ROOT="$T/ws3"
 mkdir -p "$P3/__release"
 cp "$P/__release/dist.json" "$P3/__release/"
 cp "$P/__release"/*-vol* "$P3/__release/"
@@ -288,6 +294,7 @@ grep -q '校验失败' "$T/unpack3.log" && ok "说清了是校验失败" \
 [ ! -e "$P3/__output" ] && ok "拒绝之后没有留下半个 __output/" || bad "留下了半个 __output/"
 
 P4="$T/ws4/terminal/tmux"
+export WTOOL_ROOT="$T/ws4"
 mkdir -p "$P4/__release"
 cp "$P/__release/dist.json" "$P4/__release/"               # 一卷都不放
 _rc=0
@@ -299,12 +306,13 @@ grep -q '缺分卷' "$T/unpack4.log" && ok "说清了缺哪个卷" \
 # --------------------------------------------------------------------------
 printf '\n== 场景 4：纯声明式项目（没有产物）只发源码包 ==\n'
 P5="$T/ws5/shell/zsh"
+export WTOOL_ROOT="$T/ws5"
 mkdir -p "$P5"
 printf 'alias ll="ls -alF"\n' > "$P5/env.zsh"
 printf 'alias ll="ls -alF"\n' > "$P5/env.bash"
 cat > "$P5/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="shell/zsh" priority="45">
+<wtool schema="1" priority="45">
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
 </wtool>
@@ -321,6 +329,7 @@ zhave "$P5/__release/release.zip" "wtool.xml" && ok "release.zip 里有 wtool.xm
 
 # 只下 release.zip 的机器：解出来就能 wtool install
 P6="$T/ws6/shell/zsh"
+export WTOOL_ROOT="$T/ws6"
 mkdir -p "$P6/__release"
 cp "$P5/__release/dist.json" "$P6/__release/"
 cp "$P5/__release/release.zip" "$P6/__release/"
@@ -331,12 +340,13 @@ cp "$P5/__release/release.zip" "$P6/__release/"
 # --------------------------------------------------------------------------
 printf '\n== 场景 5：dry-run 不产文件 ==\n'
 P7="$T/ws7/p"
+export WTOOL_ROOT="$T/ws7"
 mkdir -p "$P7/scripts" "$P7/__output"
 printf 'x\n' > "$P7/__output/x.bin"
 printf 'true\n' > "$P7/scripts/build.sh"
 cat > "$P7/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="p" priority="50"/>
+<wtool schema="1" priority="50"/>
 EOF
 git -C "$P7" init -q && git -C "$P7" add -A \
     && git -C "$P7" -c user.name=t -c user.email=t@t commit -qm init
@@ -353,6 +363,7 @@ printf '\n== 场景 6：download-release 读**提交的** release.json 把包下
 #   __release/ 和 __output/ 都还没有。把 base_url 指到本地目录，用 file:// 假装发布页
 #   —— 全程不联网，但走的是同一段"下载 + sha256 校验"的代码。
 P8="$T/ws8/terminal/tmux"
+export WTOOL_ROOT="$T/ws8"
 mkdir -p "$P8/scripts" "$P8/__output/ubuntu_24.04/bin" "$T/pub8"
 printf 'bin\n' > "$P8/__output/ubuntu_24.04/bin/tmux"
 chmod +x "$P8/__output/ubuntu_24.04/bin/tmux"
@@ -361,7 +372,7 @@ printf 'export DEMO=1\n' > "$P8/env.zsh"
 printf 'export DEMO=1\n' > "$P8/env.bash"
 cat > "$P8/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/tmux" priority="50"/>
+<wtool schema="1" priority="50"/>
 EOF
 printf '__output/\nrelease/\n' > "$P8/.gitignore"
 printf '#!/bin/sh\ntrue\n' > "$P8/scripts/build.sh"

@@ -27,12 +27,20 @@ newhome() {
     h=$(mktemp -d "${TMPDIR:-/tmp}/wtool-home.XXXXXX")
     mkdir -p "$h/home"
     printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\n' > "$h/home/.zshrc"
+    # 项目都建在工作区里：**项目身份 = 它相对工作区根的路径**（ADR-0037），
+    # 所以"项目放在哪个路径"就决定了它的身份，下面断言里那些 `wtool:<路径>`
+    # 和 `links/<路径>` 都是这么来的。
+    #
+    # ‼️ 这里**不能** export WTOOL_ROOT：newhome 是在 `$(...)` 子 shell 里跑的，
+    #    子 shell 里的 export 传不回父 shell（踩过：身份退化成目录名，
+    #    `links/terminal/tmux` 变成 `links/tmux`）。由调用方导出。
+    mkdir -p "$h/ws"
     echo "$h"
 }
 
 snap() { find "$1" -mindepth 1 -printf '%y %p -> %l\n' | sort; }
 
-mkrepo() { # mkrepo <目录> <id> <优先级>
+mkrepo() { # mkrepo <目录> <相对路径（就是身份）> <优先级>
     d=$1
     mkdir -p "$d"
     if [ -d "$demo" ]; then
@@ -44,7 +52,7 @@ mkrepo() { # mkrepo <目录> <id> <优先级>
     fi
     cat > "$d/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="$2" priority="$3">
+<wtool schema="1" priority="$3">
   <env src="env.zsh" shells="zsh"/>
   <link src="tmux.conf" dest=".wtool-test-$2.conf"/>
 </wtool>
@@ -58,8 +66,8 @@ EOF
 # --------------------------------------------------------------------------
 printf '\n== 场景 1：install / uninstall 完全配对 ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
-proj="$h/proj"; mkrepo "$proj" "terminal/tmux" 50
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 
 before=$(snap "$h/home")
 "$boot/wtool.sh" install "$proj" > "$h/install.log" 2>&1 || {
@@ -94,8 +102,8 @@ rm -rf "$h"
 # --------------------------------------------------------------------------
 printf '\n== 场景 2：install 幂等 ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
-proj="$h/proj"; mkrepo "$proj" "terminal/tmux" 50
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 
 "$boot/wtool.sh" install "$proj" > "$h/i1.log" 2>&1
 s1=$(snap "$h/home"); rc1=$(cat "$h/home/.zshrc")
@@ -111,8 +119,8 @@ rm -rf "$h"
 # --------------------------------------------------------------------------
 printf '\n== 场景 3：安装顺序无关 ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
-pa="$h/a"; pb="$h/b"
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
+pa="$h/ws/zz/late"; pb="$h/ws/aa/early"
 mkrepo "$pa" "zz/late" 50
 mkrepo "$pb" "aa/early" 10
 "$boot/wtool.sh" install "$pa" > /dev/null 2>&1
@@ -120,8 +128,8 @@ mkrepo "$pb" "aa/early" 10
 order1=$(grep -o '^# >>> wtool:[a-z/]*' "$h/home/.wtool/.zshrc" | sed 's/^# >>> //' | tr '\n' ' ')
 
 h2=$(newhome)
-export WTOOL_HOME="$h2/home" WTOOL_STATE="$h2/state"
-pa2="$h2/a"; pb2="$h2/b"
+export WTOOL_HOME="$h2/home" WTOOL_STATE="$h2/state" WTOOL_ROOT="$h2/ws"
+pa2="$h2/ws/zz/late"; pb2="$h2/ws/aa/early"
 mkrepo "$pa2" "zz/late" 50
 mkrepo "$pb2" "aa/early" 10
 "$boot/wtool.sh" install "$pb2" > /dev/null 2>&1
@@ -135,8 +143,8 @@ rm -rf "$h" "$h2"
 # --------------------------------------------------------------------------
 printf '\n== 场景 4：仓库脏 / 非 git 时拒绝 ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
-proj="$h/proj"; mkrepo "$proj" "terminal/tmux" 50
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 printf 'dirty\n' >> "$proj/env.zsh"
 if "$boot/wtool.sh" install "$proj" > "$h/dirty.log" 2>&1; then
     bad "脏仓库被拒绝" "却成功了"
@@ -156,8 +164,8 @@ rm -rf "$h"
 # --------------------------------------------------------------------------
 printf '\n== 场景 5：软链被换成真实文件时，uninstall 不删它 ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
-proj="$h/proj"; mkrepo "$proj" "terminal/tmux" 50
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 "$boot/wtool.sh" install "$proj" > /dev/null 2>&1
 rm -f "$h/home/.wtool-test-terminal/tmux.conf"
 printf 'user data\n' > "$h/home/.wtool-test-terminal/tmux.conf"
@@ -173,8 +181,8 @@ rm -rf "$h"
 # --------------------------------------------------------------------------
 printf '\n== 场景 6：dry-run 零副作用 ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
-proj="$h/proj"; mkrepo "$proj" "terminal/tmux" 50
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 before=$(snap "$h/home")
 "$boot/wtool.sh" install "$proj" --dry-run > "$h/dry.log" 2>&1
 after=$(snap "$h/home")
@@ -186,8 +194,8 @@ rm -rf "$h"
 # --------------------------------------------------------------------------
 printf '\n== 场景 7：重复 install 之后 uninstall 仍能完全回退（回归） ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
-proj="$h/proj"; mkrepo "$proj" "terminal/tmux" 50
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 before=$(snap "$h/home")
 "$boot/wtool.sh" install "$proj" > /dev/null 2>&1
 "$boot/wtool.sh" install "$proj" > /dev/null 2>&1   # no-op，但绝不能清空 journal
@@ -200,8 +208,8 @@ rm -rf "$h"
 # --------------------------------------------------------------------------
 printf '\n== 场景 8：rc 块真的能把 env 加载起来 ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
-proj="$h/proj"; mkrepo "$proj" "terminal/tmux" 50
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 "$boot/wtool.sh" install "$proj" > /dev/null 2>&1
 
 if command -v zsh >/dev/null 2>&1; then
@@ -209,13 +217,16 @@ if command -v zsh >/dev/null 2>&1; then
         "$WTOOL_TEST_terminal_tmux" "$WTOOL_PROJECT_DIR" "$WTOOL_PROJECT_ROOT"')
     check "env 里的变量被导出" "1|$h/home/.wtool/wtool-work-dir/links/terminal/tmux|$proj" "$got"
 
-    # 仓库搬家：只重建中转链接，rc 块一个字都不用改
-    moved="$h/moved-proj"
-    mv "$proj" "$moved"
+    # 仓库**改名**：必须走 `wtool move`（= 卸旧的 + mv + 装新的，ADR-0037）。
+    # 项目身份就是路径，所以"光 mv 再 install"会撞 registry 里的旧路径 ——
+    # 那条路现在会报错（残渣由 wtool check 报出来），不再是一条可走的路。
+    # 用户 rc 里只有一个 loader 块 —— 那一块**一个字都不该变**。
+    moved="$h/ws/terminal/tmux2"
     before_rc=$(cat "$h/home/.zshrc")
-    "$boot/wtool.sh" install "$moved" > "$h/move.log" 2>&1
+    "$boot/wtool.sh" move terminal/tmux terminal/tmux2 > "$h/move.log" 2>&1 \
+        || bad "wtool move 执行成功" "$(cat "$h/move.log")"
     after_rc=$(cat "$h/home/.zshrc")
-    check "仓库搬家后 loader 块不变" "$before_rc" "$after_rc"
+    check "改名后 loader 块不变" "$before_rc" "$after_rc"
     got2=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1; printf "%s" \
         "$WTOOL_PROJECT_ROOT"')
     check "搬家后 WTOOL_PROJECT_ROOT 指向新位置" "$moved" "$got2"
@@ -227,9 +238,9 @@ rm -rf "$h"
 # --------------------------------------------------------------------------
 printf '\n== 场景 9：bootstrap 自举项目提供的长期变量 ==\n'
 h=$(newhome)
-export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state"
+export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
 # 引擎要求被安装的仓库是"干净的 git 仓"，所以拿一份 bootstrap 的副本测试
-bcopy="$h/bootstrap"
+bcopy="$h/ws/bootstrap"
 mkdir -p "$bcopy"
 cp -r "$boot"/. "$bcopy/" 2>/dev/null || true
 rm -rf "$bcopy/.git" "$bcopy/lib/__pycache__"

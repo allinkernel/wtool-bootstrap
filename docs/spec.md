@@ -13,7 +13,7 @@
 | **完全配对** | install 之后 uninstall，`$HOME` 必须字节级回到 install 之前 |
 | **幂等** | 连续多次 install，结果与一次 install 完全相同（包括 rc 文件内容） |
 | **顺序无关** | 多个项目以任意顺序安装，`~/.zshrc` 的最终内容一致 |
-| **可迁移** | 仓库搬到任意路径，rc 块一个字都不用改（靠 `~/.wtool/wtool-work-dir/links/<id>` 中转） |
+| **可迁移** | 仓库搬到任意路径，**用户 rc 里那个 loader 块**一个字都不用改（靠 `~/.wtool/wtool-work-dir/links/<路径>` 中转）。⚠️ 但项目身份就是路径，所以改名要 `wtool move` —— 见 ADR-0037 |
 | **可撤销且可审计** | 撤销依据是 journal（"我做过什么"），不是"重新推导" |
 | **两层不越权** | `install`/`uninstall` 永不 sudo、永不联网；`sudo-install`/`sudo-uninstall` 永不碰 `$HOME` 里的软链 |
 
@@ -36,8 +36,9 @@
 
 ```
 用户层（永不 sudo、永不联网）
-  wtool install   <项目目录>|--id <id>|all [--dry-run] [--force] [--no-script]
-  wtool uninstall <项目目录>|--id <id>|all [--dry-run] [--force] [--no-script]
+  wtool install   <项目路径>|all [--dry-run] [--force] [--no-script]
+  wtool uninstall <项目路径>|all [--dry-run] [--force] [--no-script]
+  wtool move      <旧路径> <新路径> [--dry-run] [--force] [--no-script]
   wtool bootstrap [--dry-run] [--force]            所有项目 install（= install all）
   wtool check|repair [<项目>|all]                  声明/日志/磁盘对比；只重建不删除
   wtool status [<项目>]                           无参 = 登记表 + 软链检查；给项目 = 逐列状态 + 依据
@@ -108,14 +109,14 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 | 角色 | 谁创建 | 在清单里声明吗 | 用途 | 例子 |
 |---|---|---|---|---|
 | **声明链接** | `<link>` | ✅ | "应用去这个位置找配置" | `~/.tmux.conf` |
-| **稳定地址** | 引擎 install 时自动 | ❌ | "整个项目的稳定、防搬家路径"，供**配置内部互相引用** | `~/.wtool/wtool-work-dir/links/<id>`（指向项目根） |
+| **稳定地址** | 引擎 install 时自动 | ❌ | "整个项目的稳定、防搬家路径"，供**配置内部互相引用** | `~/.wtool/wtool-work-dir/links/<路径>`（指向项目根） |
 
 **规则**：
 - 清单只声明"应用去找的"链接；
-- 配置文件**内部**要引用本项目其它文件时，写 `$HOME/.wtool/wtool-work-dir/links/<id>/...`（稳定地址），不要写仓库真实路径，也不要用 `$HOME` 之外的 env 变量（见下）。
-- 为什么不能只靠 env 变量（如 `WTOOL_TMUX_DIR`）：tmux 的 `#()` 命令在**渲染时**用 `sh -c` 执行，`$HOME` 必然存在；而自定义 env 变量只有"启动 tmux server 的那个 shell 里 source 过它"才在。**`$HOME/.wtool/wtool-work-dir/links/<id>` 是唯一两者兼得的选择**（实测 tmux 3.4 验证）。
+- 配置文件**内部**要引用本项目其它文件时，写 `$HOME/.wtool/wtool-work-dir/links/<路径>/...`（稳定地址），不要写仓库真实路径，也不要用 `$HOME` 之外的 env 变量（见下）。
+- 为什么不能只靠 env 变量（如 `WTOOL_TMUX_DIR`）：tmux 的 `#()` 命令在**渲染时**用 `sh -c` 执行，`$HOME` 必然存在；而自定义 env 变量只有"启动 tmux server 的那个 shell 里 source 过它"才在。**`$HOME/.wtool/wtool-work-dir/links/<路径>` 是唯一两者兼得的选择**（实测 tmux 3.4 验证）。
 
-> 代价：`id` 因此成了**对外契约**，会同时出现在 `~/.wtool/wtool-work-dir/links/<id>`、rc 块、和配置文件的引用里。改 id = 改三处 + 重装。已写进本规范与 `terminal/tmux/wtool.xml` 的注释。
+> 代价：**路径**因此成了**对外契约**，会同时出现在 `~/.wtool/wtool-work-dir/links/<路径>`、rc 块、和配置文件的引用里。所以**改目录 = 换身份**，要走 `wtool move`（卸旧的 + mv + 装新的）；只 `mv` 会留下一整套对不上的旧账（`wtool check` 会报）。见 ADR-0037。
 
 ---
 
@@ -224,7 +225,7 @@ install <项目>
    - `dest` 是软链但指向别处 → 拒绝（同上）
 3. **执行顺序（§4.2，别改回去）**：
    ```
-   ① 引擎基建：中转链接 ~/.wtool/wtool-work-dir/links/<id> + 项目的 env 块
+   ① 引擎基建：中转链接 ~/.wtool/wtool-work-dir/links/<路径> + 项目的 env 块
    ① 项目自己的 scripts/install.sh：__output/ → ~/.wtool
    ② wtool.xml 的 link：~/.wtool/<wtool> → $HOME/<home>
    ③ wt_env_sync：env 汇总 + ~/usr 这条全局软链
@@ -301,28 +302,30 @@ wtool:              WTOOL_ARTIFACTS=… WTOOL_STATE_DIR=…
    （`system.tsv` / `system/` / `apt.tsv` / `provisioned/`）**留着** ——
    删了，`sudo-uninstall` 就再也没依据还原了。
 
-#### `<项目目录>` 和 `--id <id>` 两条路**等价**（BL-47）
+#### 项目只能按**路径**给（ADR-0037）
 
-**都跑项目脚本**（第 5 步），**都是"完全配对"** —— 区别只在"项目根从哪来"：
+`--id` 已经**删掉**（2026-10-04 用户拍板：项目身份就是它的路径）。
+老写法会给一句指路的报错，而不是"未知参数"：
 
-| 形式 | 项目根怎么来的 |
+```
+$ wtool uninstall --id terminal/tmux
+wtool: error: --id 已经删掉：项目身份就是它的路径，直接写路径就行
+  wtool uninstall terminal/tmux        （原来是 wtool uninstall --id terminal/tmux）
+```
+
+| 形式 | 解析 |
 |---|---|
-| `uninstall <项目目录>` | 就是这个目录（`cd` 进去取绝对路径） |
-| `uninstall <id>` / `uninstall --id <id>` | ① 在工作区项目表里按 id **精确**匹配（`publish-list`，和看板 / 发布 / 状态用的是同一张表）；② 表里没有就退回 state 里 install 当时记下的 `project_root`（**工作区外面**装的项目只能靠这条），只在那个目录还在时才算数 |
+| `uninstall <路径>` | 路径**就是**身份。目录还在就直接用；目录不在了（被删 / 改过名）就按这条相对路径去 state 的账里找 |
+| `uninstall <路径> --no-script` | 同上，但不跑项目脚本（"只撤 state 的账"） |
 
-> **只认完整 id**：`wtool uninstall tmux` **不**替你猜 `terminal/tmux`。
-> 理由是 state 里的账按完整 id 建目录 —— 表里只有 `x/foo/bar` 而 state 里是
-> `foo/bar` 时，"末段匹配"会把**另一个项目**卸掉。找不到时会把末段同名的
-> 候选列出来（"id 要写完整"），但不替你选。
+解析走 `wt_resolve_uninstall_path`（`wtool.sh`，原 `wt_resolve_uninstall_id`）：
+① 工作区项目表（`publish-list`，看板 / 发布 / 状态用的是同一张表；**只认完整路径**），
+② 表里没有就退回 `$WTOOL_STATE/<路径>/meta.tsv` 里 install 当时记的 `project_root`。
 
-解析不出来（表里没有、state 里也没记过、或者记的那个目录已经不在了）时：
-
-- **默认明确报错、退出码非 0**，并提示目录形式和 `--no-script` 两条退路。
-  **绝不静默跳过项目脚本** —— 那是 BL-47 的原始症状（`--id` 那条路拿不到
-  `project_root`，第 5 步一声不响地不跑，只有目录形式才跑）。
-- `--no-script`（明说"不跑项目脚本"）时不报错，只警告一句，按 state 的账撤。
-- `uninstall all` 里项目目录已经不在磁盘上的，自动降级成 `--no-script`
-  并警告一句（"仓库被删了也得卸得掉"，见 `tests/contract_test.sh` 场景 5b）。
+> **只认完整路径**：`wtool uninstall tmux` **不**替你猜 `terminal/tmux`。
+> 理由是 state 里的账按完整路径建目录 —— 表里只有 `x/foo/bar` 而 state 里是
+> `foo/bar` 时会卸错项目。找不到时把末段同名的候选列出来
+> （"路径要写完整"），但不替你选。
 
 ### `~/usr` 这条全局软链
 
@@ -357,19 +360,19 @@ wtool:              WTOOL_ARTIFACTS=… WTOOL_STATE_DIR=…
 ## 5. 受管块格式
 
 ```sh
-# >>> wtool:<id> schema=1 engine=1.0.0 prio=50 head=<commit> manifest=<sha12> >>>
-WTOOL_PROJECT_ID='<id>'
-WTOOL_PROJECT_DIR="$HOME/.wtool/wtool-work-dir/links/<id>"
+# >>> wtool:<路径> schema=1 engine=1.0.0 prio=50 head=<commit> manifest=<sha12> >>>
+WTOOL_PROJECT_ID='<路径>'
+WTOOL_PROJECT_DIR="$HOME/.wtool/wtool-work-dir/links/<路径>"
 export WTOOL_PROJECT_ID WTOOL_PROJECT_DIR
 WTOOL_PROJECT_ROOT=$(readlink -f -- "$WTOOL_PROJECT_DIR" 2>/dev/null || printf '%s' "$WTOOL_PROJECT_DIR")
 export WTOOL_PROJECT_ROOT
 [ -r "$WTOOL_PROJECT_DIR/<env-file>" ] && . "$WTOOL_PROJECT_DIR/<env-file>"
-# <<< wtool:<id> <<<
+# <<< wtool:<路径> <<<
 ```
 
 | 字段 | 用途 | 变化频率 |
 |---|---|---|
-| `<id>` | 项目身份，也是块边界标记 | 几乎不变（改了要重装） |
+| `<路径>` | 项目身份，也是块边界标记 | 几乎不变（改了要重装） |
 | `schema` | 清单格式版本，引擎据此判断能否解析 | 极少 |
 | `engine` | 引擎版本，用于诊断/未来兼容判断 | 每次发版 |
 | `prio` | 排序键，决定块之间的先后 | 项目自己定 |
@@ -387,7 +390,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 1. **`[ -r ... ] &&` 守卫**：仓库被删/搬走后，shell 不报错。
 2. **只走中转链接**：块里不出现仓库真实路径，所以仓库可以随便搬。
 3. **排序插入而非盲目 append**：插入点是"最后一个排序小于我的块之后"，因此与安装顺序无关。
-4. **块内容只依赖 `<id>`**：搬仓库后 rc 文件字节不变（测试场景 8 验证）。
+4. **块内容只依赖 `<路径>`**：搬仓库后 rc 文件字节不变（测试场景 8 验证）。
 
 ---
 
@@ -442,12 +445,12 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | table | `tests/table_test.sh` | 94 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 63 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 221 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同）、**`--id` / 裸 id 的 uninstall 也跑项目脚本**（标记文件 + 参数；解析不出来时明确报错、退出码非 0，`--no-script` 只警告 —— BL-47） |
+| contract | `tests/contract_test.sh` | 250 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同）、**uninstall 按路径指项目、且真跑项目脚本**（标记文件 + 参数；解析不出来时明确报错、退出码非 0，`--no-script` 只警告 —— BL-47/BL-48）、**`--id` 老写法给指路**、**`wtool move` 收干净改名残留 + `--dry-run` 零副作用**、**手工 mv 的残渣 `wtool check` 必须报出来**（旧 env 块 / 悬空链 / registry 旧行 —— ADR-0037，场景 17） |
 | docker-build | `tests/docker_build_test.sh` | 58 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错、**产物账本**（格式/来源/截断重写幂等/dry-run 不写/看板「下gz包」四种来源值/按项目分开，ADR-0036） |
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 46 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **765** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
+共 **794** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
 `run_all.sh` **文件头**注释里那几行逐组条数也同步成了这一版，但**以它跑出来的 PASS 行为准**）：
 
 ```sh
@@ -572,7 +575,7 @@ wtool.sh bootstrap      [--dry-run] [--force]        # 所有项目的 install�
 |---|---|---|
 | 1 | 原文件旁边：`/etc/…/x.conf.wtool-orig` | 目标可写就能写 |
 | 2 | `/var/backups/wtool/<原始路径>` | **要 root**（非 root 时跳过并在输出里说明） |
-| 3 | `$WTOOL_STATE/<id>/system/<slug>/original` | 永远写得了 |
+| 3 | `$WTOOL_STATE/<路径>/system/<slug>/original` | 永远写得了 |
 
 还原时按 `1 → 2 → 3` 取第一份**校验通过**的；三份都对不上记录就报错拒绝（`--force` 才强行用），
 **不许默默挑一份用**。`sudo-uninstall` 还原之后三份全删（价值已兑现，以后审计靠 journal 的文本记录）。
@@ -601,7 +604,7 @@ wtool.sh bootstrap      [--dry-run] [--force]        # 所有项目的 install�
 |---|---|
 | `src` | 脚本/playbook；解析顺序：源码树（overlay 铺入后）> 项目根 |
 | `runner` | `ansible`（`.yaml/.yml` 默认）或 `shell` |
-| `marker` | 幂等标记，成功后写 `$WTOOL_STATE/<id>/provisioned/<marker>`；重复执行会跳过。`runner=` 已删（`.yaml/.yml` → ansible，其余 → shell） |
+| `marker` | 幂等标记，成功后写 `$WTOOL_STATE/<路径>/provisioned/<marker>`；重复执行会跳过。`runner=` 已删（`.yaml/.yml` → ansible，其余 → shell） |
 | `when` | 逗号分隔的 AND 条件：`os:ubuntu`、`!os:debian`、`arch:x86_64` |
 | `desc` | 人类可读说明 |
 
@@ -804,7 +807,7 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 | 文件 | 内容 |
 |---|---|
-| `源码.zip` | 项目目录。**真读 `.gitignore`**（git 可用就让 `git ls-files -co --exclude-standard` 算，否则自带解析器），并永远排除 `__output/`、`__release/`。包内第一层是 `wtool/<项目路径>/`，所以解压到工作区上一层得到的路径和 `repo sync` 一致；另带 `wtool/.wtool-dist/<id>.json` 发布副本标记（解压副本免 `--force`，`head=` 有出处） |
+| `源码.zip` | 项目目录。**真读 `.gitignore`**（git 可用就让 `git ls-files -co --exclude-standard` 算，否则自带解析器），并永远排除 `__output/`、`__release/`。包内第一层是 `wtool/<项目路径>/`，所以解压到工作区上一层得到的路径和 `repo sync` 一致；另带 `wtool/.wtool-dist/<路径（斜杠换成连字符）>.json` 发布副本标记（解压副本免 `--force`，`head=` 有出处） |
 | `release.zip` | `__output/` 里的东西 + **声明面**（`wtool.xml` / `env.zsh` / `env.bash`）。包内结构就是项目根的镜像，解压即到位 |
 | `源码-hash.txt` / `release-hash.txt` | 各自的 sha256 |
 | `dist.json` | 每卷的名字 / sha256 / 大小，**按顺序逐个声明** |
@@ -895,7 +898,7 @@ wtool publish-release tmux --out=/tmp/pkg      # 发布完把 __release/ 里的�
 - `--out=DIR` 把这次发出去的产物**另拷一份**到 DIR（`__release/` 本来就留着，这只是方便你把
   产物拿走 —— 拷贝发生在发布之后，不是"先看再传"）
 - 一个项目都没发出去 → **不改**下载文档（不拿"什么都没发生"覆盖现状）；本地发布历史
-  记在 `$WTOOL_STATE/<id>/publish.tsv`，记不上只警告（发布本身已经完成）
+  记在 `$WTOOL_STATE/<路径>/publish.tsv`，记不上只警告（发布本身已经完成）
 - 需要 `gh`（GitHub CLI）；没有就报错（退出码 1）
 - 单个项目失败（脏仓库 / 没权限 / 上传断线）**退出码仍是 0**：看输出里的 `warning`
 

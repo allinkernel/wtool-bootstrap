@@ -365,10 +365,10 @@ _greet_check "$_scripts/container-raw.sh" \
     "./install.sh" "exec \$SHELL" "wtool sudo-bootstrap" "wtool bootstrap"
 _greet_check "$_scripts/container-shell.sh" \
     "wtool sudo-bootstrap" "wtool bootstrap"
-# 打印的**用法**必须真的能跑：`sudo-uninstall` 收的是项目/`all`，没有 `--id`
-# （`--id` 只是 `uninstall` 的开关）—— 差点在这份提示里印错，用户照着敲会报错。
-if grep -qF "sudo-uninstall --id" "$_scripts/install.sh"; then
-    bad "提示里的 sudo-uninstall --id 是错的（它没有 --id 这个开关）"
+# 打印的**用法**必须真的能跑，而且**不许出现 `--id`**：ADR-0037 把它整个删掉了
+# （项目身份就是路径）。提示里印一个已经不存在的开关，用户照着敲就会报错。
+if grep -qF -- "--id" "$_scripts/install.sh"; then
+    bad "提示里出现了已经删掉的 --id（项目身份就是路径，见 ADR-0037）"
 else
     ok "提示里的 sudo-uninstall 用法对（<项目>|all）"
 fi

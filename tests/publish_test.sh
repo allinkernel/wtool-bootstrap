@@ -101,7 +101,7 @@ WS1="$T/ws1"; ST1="$T/state1"; P1="$WS1/terminal/tmux"
 mkdir -p "$P1/__output/bin"
 cat > "$P1/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/tmux" priority="50">
+<wtool schema="1" priority="50">
   <env src="env.zsh" shells="zsh"/>
   <link src="tmux.conf" dest=".tmux.conf"/>
 </wtool>
@@ -379,7 +379,7 @@ WS7="$T/ws7"; ST7="$T/state7"; P7="$WS7/nodist"
 mkdir -p "$P7/__release"
 cat > "$P7/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="nodist" priority="10">
+<wtool schema="1" priority="10">
   <publish to="fakeowner/nodist"/>
 </wtool>
 EOF
@@ -399,7 +399,7 @@ WS8="$T/ws8"; ST8="$T/state8"; P8="$WS8/dl"
 mkdir -p "$P8/__release"
 cat > "$P8/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="dl" priority="10">
+<wtool schema="1" priority="10">
   <publish to="fakeowner/dl"/>
 </wtool>
 EOF
@@ -424,7 +424,7 @@ WS9="$T/ws9"; ST9="$T/state9"; P9="$WS9/racy"
 mkdir -p "$P9"
 cat > "$P9/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="racy" priority="10">
+<wtool schema="1" priority="10">
   <publish to="fakeowner/racy"/>
 </wtool>
 EOF
@@ -493,7 +493,7 @@ WS10="$T/ws10"; ST10="$T/state10"; P10="$WS10/third"
 mkdir -p "$P10"
 cat > "$P10/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="third" priority="10">
+<wtool schema="1" priority="10">
   <publish to="neovim/neovim"/>
 </wtool>
 EOF
@@ -537,7 +537,7 @@ mkdir -p "$WS11/aaa-none" "$WS11/zzz-after" "$WS11/editor/astronvim_v5/nvim"
 # 声明为不发布
 cat > "$WS11/aaa-none/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="aaa-none" priority="10">
+<wtool schema="1" priority="10">
   <publish kind="none"/>
 </wtool>
 EOF
@@ -545,7 +545,7 @@ git_init "$WS11/aaa-none"
 # 排在后面的正常项目：验"前一条不会把后一条吞掉"
 cat > "$WS11/zzz-after/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="zzz-after" priority="20">
+<wtool schema="1" priority="20">
   <publish to="fakeowner/zzz"/>
 </wtool>
 EOF
@@ -555,7 +555,7 @@ git_init "$WS11/zzz-after"
 # 伞项目用 <sub kind="none"> 替它表态。
 cat > "$WS11/editor/astronvim_v5/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="editor/astronvim_v5" priority="90">
+<wtool schema="1" priority="90">
   <publish kind="source">
     <sub path="nvim" kind="none"/>
   </publish>
@@ -611,13 +611,13 @@ WS13="$T/ws13"; ST13="$T/state13"
 mkdir -p "$WS13/k1" "$WS13/k2" "$WS13/legacy/scripts"
 cat > "$WS13/k1/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="k1" priority="10">
+<wtool schema="1" priority="10">
   <publish kind="script" script="publish.sh"/>
 </wtool>
 EOF
 cat > "$WS13/k2/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="k2" priority="10">
+<wtool schema="1" priority="10">
   <publish kind="source" script="publish.sh"/>
 </wtool>
 EOF
@@ -634,7 +634,7 @@ grep -q '已经取消' "$T/log13b" && ok "报出 script= 已经取消" \
 # 项目里就算留着 scripts/publish.sh，也没人再调它（文件存在不再等于能力声明）
 cat > "$WS13/legacy/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="legacy" priority="10">
+<wtool schema="1" priority="10">
   <publish to="fakeowner/legacy"/>
 </wtool>
 EOF
@@ -664,7 +664,7 @@ WS14="$T/ws14"; ST14="$T/state14"; P14="$WS14/dirty"
 mkdir -p "$P14"
 cat > "$P14/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="dirty" priority="10">
+<wtool schema="1" priority="10">
   <publish to="fakeowner/dirty"/>
 </wtool>
 EOF
@@ -710,7 +710,7 @@ ln -sf real.zsh "$P15/plugins/pp/alias.plugin.zsh"
 ln -sf /etc/hostname "$P15/abs-link"
 cat > "$P15/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="lnk" priority="10">
+<wtool schema="1" priority="10">
   <publish kind="source" to="fakeowner/lnk"/>
 </wtool>
 EOF

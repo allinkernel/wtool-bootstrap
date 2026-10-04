@@ -60,6 +60,42 @@ def links_dir_shell(project_id):
     return '"$HOME/.wtool/%s/links/%s"' % (WORK_DIR_NAME, project_id)
 
 
+def project_id_of(project_root, root=None):
+    """项目身份 = 它**相对工作区根的路径**（用户 2026-10-04 拍板：干掉项目 id）。
+
+    以前 `wtool.xml` 可以用 `id="..."` 覆盖身份，于是"改了目录忘了改 id"
+    就会让状态目录 / 中转软链 / env 块名三处和路径对不上（看板会说"没装"，
+    而其实装了）。现在身份**只有一个来源** —— 路径。
+
+    工作区**外面**的项目（`wtool install /abs/path`，测试里很常见）相对路径
+    会以 `..` 开头，那不是合法身份，退回目录名 —— 和以前 `WTOOL_ROOT` 没导出
+    时的兜底行为一致。
+    """
+    p = os.path.abspath(project_root)
+    ws = os.path.abspath(root or os.environ.get("WTOOL_ROOT") or os.path.dirname(p))
+    pid = os.path.relpath(p, ws)
+    if pid in (".", "/") or pid == ".." or pid.startswith(".." + os.sep):
+        return os.path.basename(p)
+    return pid
+
+
+def cmd_project_id(project, root=None):
+    """打印项目身份（= 它相对工作区根的路径）。工作区外面 → 退出码 1。
+
+    和 `project_id_of` 的差别：那个是"引擎内部算身份"（工作区外面退回目录名，
+    因为 `install /abs/path` 这条路一直支持）；这个是**给人看的**（`init` 用它），
+    所以工作区外面**直接失败**，不悄悄给一个目录名当身份。
+    """
+    p = os.path.abspath(project)
+    ws = os.path.abspath(root or os.environ.get("WTOOL_ROOT") or os.path.dirname(p))
+    rel = os.path.relpath(p, ws)
+    if rel in (".", "/") or rel == ".." or rel.startswith(".." + os.sep):
+        sys.stderr.write("项目不在工作区里: %s（工作区 %s）\n" % (p, ws))
+        return 1
+    print(rel)
+    return 0
+
+
 # 影子 HOME 的根（~/.wtool）；$HOME 里的路径在它下面同名
 SHADOW_ROOT_NAME = ".wtool"
 # release.zip 里带的"声明面"：只下 release.zip 的机器也要能 wtool install
@@ -169,10 +205,23 @@ def parse_manifest(path, project_root, errors, warnings=None):
                       % (schema, ",".join(str(s) for s in SCHEMA_SUPPORTED)))
         return None, []
 
+    # 项目身份 = 它相对工作区根的路径（用户 2026-10-04 拍板）。
+    #
+    # `id=` 属性已经取消，而且这里**硬报错**、不留兼容窗口：它和路径重复，
+    # 一旦写得不等于路径，"改了目录忘了改 id"就会让状态目录 / 中转软链 /
+    # env 块名三处对不上 —— 表现是"装完了但看板说没装"，这种半装状态最难查。
+    # 与其给一个每次都要判断"信 id 还是信路径"的过渡期，不如现在就说清楚。
+    raw_id = root.get("id")
+    if raw_id is not None:
+        errors.append(
+            "wtool.xml 里的 id=%r 已经取消：项目身份就是它相对工作区根的路径。"
+            "删掉这个属性即可（%s）" % (raw_id, path))
+        return None, []
+
     default_prio = _int_attr(root, "priority", DEFAULT_PRIORITY, errors, "wtool")
     meta = {
         "schema": schema,
-        "id": root.get("id") or None,
+        # 身份不在这里 —— 它由 project_id_of(路径) 现算，见那个函数。
         "priority": default_prio,
         "manifest_path": path,
         "manifest_sha": sha256_text(text),
@@ -1048,11 +1097,9 @@ def plan_install(args, scratch):
     if meta is None:
         raise PlanError("\n".join(errors))
 
-    project_id = meta["id"] or os.path.relpath(project_root, os.environ.get("WTOOL_ROOT", project_root))
-    if project_id in (".", "/"):
-        project_id = os.path.basename(project_root)
+    project_id = project_id_of(project_root, args.root or None)
     if not is_safe_rel(project_id):
-        errors.append("项目 id 非法: %r" % project_id)
+        errors.append("项目身份非法: %r（项目得在工作区里，身份就是它的相对路径）" % project_id)
 
     registry = validate_entries(entries, project_root, home, state_dir, errors, warnings)
     conflicts = []
@@ -1174,26 +1221,33 @@ def plan_install(args, scratch):
 
 
 def plan_uninstall(args, scratch):
+    """规划 uninstall。项目身份 = 路径（没有 id 了）。
+
+    两条输入，都由 `wtool.sh` 解析好传进来：
+      * `args.project`      —— 用户敲的那个路径（相对工作区根，或绝对路径）
+      * `args.project_root` —— 真实目录（引擎解析出来的；目录已经不在了就是 ""）
+
+    目录还在 → 身份由**真实路径**算（和 plan_install 用同一个 `project_id_of`，
+    这样两边永远一致）；目录没了 → 用户给的那条相对路径**就是**身份
+    （state 目录当初就是按它建的，所以账还找得到）。
+    """
     home = os.path.abspath(args.home)
-    project_root = os.path.abspath(args.project) if args.project else None
+    root = args.root or os.environ.get("WTOOL_ROOT") or ""
     errors, warnings = [], []
 
-    project_id = args.id
-    if project_id is None:
-        if not project_root:
-            raise PlanError("uninstall 需要 <project-dir> 或 --id")
-        manifest_path = os.path.join(project_root, "wtool.xml")
-        meta, _ = parse_manifest(manifest_path, project_root, errors)
-        if meta is None:
-            raise PlanError("\n".join(errors))
-        project_id = meta["id"] or os.path.basename(project_root)
-    elif args.project_root:
-        # `--id` 那条路：项目根由引擎解析好传进来（BL-47）。写进 meta.tsv 是
-        # 为了让引擎第 3 步（跑 install.sh --uninstall）拿得到目录 ——
-        # 以前这里是空的，那一步就被静默跳过了。
+    if args.project_root:
         project_root = os.path.abspath(args.project_root)
+        project_id = project_id_of(project_root, root or None)
+    else:
+        project_root = None
+        want = (args.project or "").strip()
+        if not want:
+            raise PlanError("uninstall 需要项目路径（相对工作区根，或绝对路径）")
+        # 绝对路径但目录已经不在：退回它相对工作区根的写法；工作区外面就取目录名。
+        project_id = project_id_of(want, root or None) if os.path.isabs(want) \
+            else want.rstrip("/")
     if not is_safe_rel(project_id):
-        raise PlanError("项目 id 非法: %r" % project_id)
+        raise PlanError("项目身份非法: %r（给相对工作区根的路径）" % project_id)
 
     rows = []
     # 删掉这个项目的 env 块文件。汇总文件由 shell 侧的 wt_env_sync 重新生成，
@@ -1329,9 +1383,9 @@ def plan_provision(args, scratch):
     if meta is None:
         raise PlanError("\n".join(errors))
 
-    project_id = meta["id"] or os.path.basename(project_root)
+    project_id = project_id_of(project_root, args.root or None)
     if not is_safe_rel(project_id):
-        errors.append("项目 id 非法: %r" % project_id)
+        errors.append("项目身份非法: %r（项目得在工作区里，身份就是它的相对路径）" % project_id)
 
     sysfile_rows = []
     source_rows = []
@@ -2826,12 +2880,12 @@ def scan_projects(root, manifests_only=False):
                                         dirpath, errors)
         if meta is None:
             continue
-        found.append((meta["priority"], meta["id"] or os.path.basename(dirpath),
+        found.append((meta["priority"], project_id_of(dirpath, root),
                       dirpath, effective_publish(dirpath, meta["publish"])))
         known.add(os.path.abspath(dirpath))
         for sub in meta["publish"]["subs"]:
             sub_abs = os.path.normpath(os.path.join(dirpath, sub["path"]))
-            declared[sub_abs] = dict(sub, _by=meta["id"] or os.path.basename(dirpath))
+            declared[sub_abs] = dict(sub, _by=project_id_of(dirpath, root))
         # 这里**不能**剪枝。项目是可以嵌套的（repo manifest 里
         # editor/astronvim_v5 和 editor/astronvim_v5/astronvim_v5_config
         # 就是父子关系），剪掉就再也扫不到子项目了。
@@ -2930,18 +2984,15 @@ def publish_info(project_dir, ws_root=None):
         meta, _entries = parse_manifest(os.path.join(root, "wtool.xml"), root, errors)
     if meta is None:
         # 没有 wtool.xml 就是默认源码发布（这不是错误）
-        meta = {"id": None, "priority": DEFAULT_PRIORITY,
+        meta = {"priority": DEFAULT_PRIORITY,
                 "publish": {"kind": "source", "script": "", "tag": DEFAULT_PUBLISH_TAG,
                             "to": "", "asset": "", "subs": [], "targets": [],
                             "_declared": False},
                 "build": {"kind": "local", "min_cores": None, "min_mem_gb": None,
                           "min_disk_gb": None, "_declared": False}}
     pub = effective_publish(root, meta["publish"])
-    # 没有 wtool.xml 的项目用"相对工作区的路径"当 id，和 plan_install 的约定一致
-    _ws = ws_root or os.environ.get("WTOOL_ROOT") or root
-    _pid = meta["id"] or os.path.relpath(root, os.path.abspath(_ws))
-    if _pid in (".", "/"):
-        _pid = os.path.basename(root)
+    # 身份 = 相对工作区的路径（和 plan_install / 看板 / state 目录同一个来源）
+    _pid = project_id_of(root, ws_root or None)
     print("project_id\t%s" % _pid)
     print("project_root\t%s" % root)
     print("priority\t%s" % meta.get("priority", DEFAULT_PRIORITY))
@@ -3567,9 +3618,18 @@ def do_check(args):
         problems.append((pid, msg))
 
     projects = scan_projects(root, manifests_only=True)
+    want_id = ""
     if args.project:
-        want = os.path.abspath(args.project)
-        projects = [p for p in projects if os.path.abspath(p[2]) == want]
+        # 相对路径按**工作区根**解析，不按当前目录 —— 项目身份就是相对工作区根的
+        # 路径，两条口径必须一致。
+        want = args.project
+        want_abs = os.path.abspath(want if os.path.isabs(want)
+                                   else os.path.join(root, want))
+        projects = [p for p in projects if os.path.abspath(p[2]) == want_abs]
+        if not projects:
+            # 磁盘上没有这个项目：可能是"改掉的旧路径"（ADR-0037 的残渣），
+            # 也可能只是拼错了。留给下面残渣那一节去认，认不出就一条也不报。
+            want_id = project_id_of(want_abs, root)
 
     # ---- 全局：~/usr 这条引擎自己造的软链
     usr_dest = os.path.join(home, "usr")
@@ -3665,6 +3725,66 @@ def do_check(args):
                 if not os.path.isfile(blk):
                     bad(pid, "%s 的 env 块不见了: %s" % (shell, blk))
 
+    # ---- 改名 / 删目录留下的残渣（ADR-0037）---------------------------------
+    #
+    # 项目身份 = 路径，所以**改目录 = 换了一个项目**。旧路径那一套账
+    # （state 目录 / 中转软链 / env 块 / registry 行）不会自己消失 ——
+    # 它们全是按旧路径建的。这一节把"state 里还有账、但**磁盘上已经没有
+    # 这个项目**"的东西逐条报出来。
+    #
+    # 为什么值得专门查：这些残渣**大多不报错，只是静默失效** ——
+    #   * env 块还在  → 它照样被拼进 ~/.wtool/.zshrc，但块里的
+    #     `[ -r "$WTOOL_PROJECT_DIR/env.zsh" ]` 因为软链悬空而**静默**不生效
+    #   * registry 里还挂着旧路径的行 → 下一次 `install <新路径>` 直接报
+    #     "dest 已被项目 <旧路径> 占用"，要 --force 才过，过完还留一堆
+    #   * links/<旧路径> 变成悬空链 → 就躺在那儿，谁也不会去点它
+    #
+    # 自愈的路子：`wtool uninstall <旧路径> --no-script`（账还找得到就能撤），
+    # 或者一开始就用 `wtool move <旧路径> <新路径>` 改名。
+    on_disk = {}
+    for _prio, _pid, _path, _pub in scan_projects(root, manifests_only=True):
+        on_disk[_pid] = _path
+    if os.path.isdir(state):
+        seen_env = set()
+        for dirpath, _dirnames, filenames in os.walk(state):
+            pid = os.path.relpath(dirpath, state)
+            if pid == ".":
+                continue
+            if not any(n in filenames for n in ("meta.tsv", "journal.tsv",
+                                                "env.zsh", "env.bash")):
+                continue
+            if pid in on_disk or (want_id and pid != want_id):
+                continue
+            # ① 删不掉的旧 env 块（会继续进汇总文件）
+            for shell in RC_CAPABLE_SHELLS:
+                if "env.%s" % shell in filenames:
+                    bad(pid, "state 里还留着 %s 的 env 块，但磁盘上没有这个项目了 —— "
+                             "它照样被拼进 ~/.wtool/.%src，块里却 source 不到东西"
+                             "（静默失效）。撤掉：wtool uninstall %s --no-script"
+                        % (shell, shell, pid))
+                    seen_env.add(pid)
+                    break
+            # ② 悬空的中转软链 / $HOME 软链（journal 记着当初建了什么）
+            for row in _read_tsv(os.path.join(dirpath, "journal.tsv")):
+                if len(row) < 4 or row[0] != "link":
+                    continue
+                dest = row[2]
+                if os.path.islink(dest) and not os.path.exists(dest):
+                    bad(pid, "%s 是悬空软链（当初指向 %s，现在目标没了）"
+                        % (dest, row[3]))
+            # ③ registry 里还挂着旧路径的行 —— 下一次 install 会因此报冲突
+            for row in _read_tsv(os.path.join(state, "registry.tsv")):
+                if len(row) >= 2 and row[1] == pid:
+                    bad(pid, "registry 里还登记着 %s（下一次 install <新路径> 会报"
+                             "\"dest 已被项目 %s 占用\"）" % (row[0], pid))
+                    break
+
+    # 点了名却什么也没找到：别让"一切对得上"变成假安慰 —— 路径写错了也是
+    # 一种"对不上"。只有全局扫（没给项目）时沉默才是对的。
+    if want_id and not any(p == want_id for p, _m in problems):
+        bad(want_id, "没有这个项目的账：项目表里没有它，state 里也没有它的记录 —— "
+                     "路径写错了？（要么它压根没装过，要么已经被卸干净了）")
+
     for pid, msg in problems:
         print("%s\t%s" % (pid, msg))
     return 1 if problems else 0
@@ -3753,7 +3873,9 @@ def build_parser():
         sp.add_argument("--home", required=True)
         sp.add_argument("--state", required=True)
         sp.add_argument("--scratch", required=True)
-        sp.add_argument("--id")
+        # 工作区根。项目身份 = 项目相对它的路径，所以这个值必须是**显式**的，
+        # 不能靠猜（WTOOL_ROOT 是兜底，没传时才用）。
+        sp.add_argument("--root", default="")
         sp.add_argument("--head", default="")
         sp.add_argument("--at", default="")
         sp.add_argument("--force", action="store_true")
@@ -3794,6 +3916,12 @@ def build_parser():
     pi = sub.add_parser("publish-info")
     pi.add_argument("project")
     pi.add_argument("--root", default="")
+
+    # 项目身份 = 它相对工作区根的路径（ADR-0037）。就一行输出，给 shell 用
+    # （init / move 要算身份）。工作区外面 → 非 0 退出，让调用方自己决定怎么说。
+    pidp = sub.add_parser("project-id")
+    pidp.add_argument("project")
+    pidp.add_argument("--root", default="")
 
     pe = sub.add_parser("plan-env")
     pe.add_argument("--home", required=True)
@@ -3928,6 +4056,8 @@ def main(argv):
             publish_list(args.root)
         elif args.cmd == "publish-info":
             return publish_info(args.project, args.root or None)
+        elif args.cmd == "project-id":
+            return cmd_project_id(args.project, args.root or None)
         elif args.cmd == "plan-env":
             rows = plan_env(args, args.scratch)
             _write_plan(args.scratch, rows)

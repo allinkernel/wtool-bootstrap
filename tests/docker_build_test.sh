@@ -46,7 +46,7 @@ P="$WTOOL_ROOT/editor/demo"
 mkdir -p "$P/build" "$P/scripts"
 cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="editor/demo" priority="50"><build kind="docker"/></wtool>
+<wtool schema="1" priority="50"><build kind="docker"/></wtool>
 EOF
 cat > "$P/build/targets.tsv" <<'EOF'
 # 目标系统	基础镜像
@@ -400,7 +400,7 @@ P2="$WTOOL_ROOT/editor/plain"
 mkdir -p "$P2/scripts"
 cat > "$P2/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="editor/plain" priority="51"/>
+<wtool schema="1" priority="51"/>
 EOF
 cat > "$P2/scripts/build.sh" <<'EOF'
 #!/bin/sh

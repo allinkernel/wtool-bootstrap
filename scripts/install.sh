@@ -252,7 +252,8 @@ $([ -n "$_rc" ] && printf '      # 配置写在 %s 里的那一段 loader\n' "$_
       wtool download-release <项目>   从发布页下现成的包到 __release/（分钟级）
       wtool unpack-release   <项目>   照包自带的 dist.json 校验 + 拼卷 + 解到 __output/
       wtool install  <项目>    登记 + 软链 + shell 集成
-      wtool uninstall --id <项目>   撤掉（只撤用户层）
+      wtool uninstall <项目路径>   撤掉（只撤用户层）
+      wtool move     <旧路径> <新路径>   项目改名（卸旧的 + mv + 装新的）
       wtool sudo-uninstall <项目>|all   撤系统层（/etc 还原 + 卸掉这次装进来的 apt 包）
 
   自己发一版（都要先提交，发布只发 __release/ 里已有的东西）：

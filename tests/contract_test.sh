@@ -39,7 +39,7 @@ newhome() {
     export WTOOL_HOME="$H" WTOOL_STATE="$H.state"
     export WTOOL_ROOT="$T/ws"
 }
-mkproj() {   # <相对路径> <id>
+mkproj() {   # <相对路径>（这个路径**就是**项目身份，ADR-0037）
     d="$T/ws/$1"; mkdir -p "$d"
     git -C "$d" init -q
     echo "$d"
@@ -49,7 +49,7 @@ mkproj() {   # <相对路径> <id>
 printf '\n== 场景 1：新标签全用上（zshrc/bashrc + 三段 link + produced-by）==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
-P=$(mkproj "terminal/tmux" "terminal/tmux")
+P=$(mkproj "terminal/tmux")
 printf 'set -g mouse on\n' > "$P/tmux.conf"
 printf 'export TMUX_MARK=1\n' > "$P/env.zsh"
 printf 'export TMUX_MARK=1\n' > "$P/env.bash"
@@ -78,7 +78,7 @@ fi
 EOF
 cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/tmux" priority="50">
+<wtool schema="1" priority="50">
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
   <link home="~/.tmux.conf" wtool="~/.wtool/.tmux.conf" subproject="tmux.conf"/>
@@ -176,13 +176,13 @@ check "install.sh --uninstall 跑的时候 \$HOME 软链已经拆了" "links-gon
 printf '\n== 场景 3：有 build.sh 就必须先有 __output/ ==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
-P2=$(mkproj "editor/buildme" "editor/buildme")
+P2=$(mkproj "editor/buildme")
 mkdir -p "$P2/scripts"
 printf '#!/bin/sh\ntrue\n' > "$P2/scripts/build.sh"
 printf 'x\n' > "$P2/x.conf"
 cat > "$P2/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="editor/buildme" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.x.conf" wtool="~/.wtool/.x.conf" subproject="x.conf"/>
 </wtool>
 EOF
@@ -263,19 +263,19 @@ rm -rf "$P2/__release"
 printf '\n== 场景 4：uninstall 先问"还有别人要用吗" ==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
-A=$(mkproj "a/one" "a/one"); B=$(mkproj "b/two" "b/two")
+A=$(mkproj "a/one"); B=$(mkproj "b/two")
 printf 'a\n' > "$A/shared.conf"; printf 'a\n' > "$A/only-a.conf"
 printf 'b\n' > "$B/shared.conf"
 cat > "$A/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="a/one" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.shared.conf" wtool="~/.wtool/.shared.conf" subproject="shared.conf"/>
   <link home="~/.only-a.conf" wtool="~/.wtool/.only-a.conf" subproject="only-a.conf"/>
 </wtool>
 EOF
 cat > "$B/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="b/two" priority="60">
+<wtool schema="1" priority="60">
   <link home="~/.shared.conf" wtool="~/.wtool/.shared.conf" subproject="shared.conf"/>
 </wtool>
 EOF
@@ -302,13 +302,13 @@ fi
 printf '\n== 场景 5：~/usr 的生命周期（最后一个项目走了才收）==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
-C=$(mkproj "c/one" "c/one"); D=$(mkproj "d/two" "d/two")
+C=$(mkproj "c/one"); D=$(mkproj "d/two")
 printf 'x\n' > "$C/C.conf"; printf 'y\n' > "$D/D.conf"
 for spec in "c/one C" "d/two D"; do
     set -- $spec
     cat > "$T/ws/$1/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="$1" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.$2.conf" wtool="~/.wtool/.$2.conf" subproject="$2.conf"/>
 </wtool>
 EOF
@@ -330,17 +330,17 @@ mkdir -p "$WTOOL_HOME/.wtool/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/.wtool/usr/
 printf '\n== 场景 5b：uninstall all（按 state 的账，不按项目表）==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
-G=$(mkproj "g/one" "g/one"); Hh=$(mkproj "h/two" "h/two")
+G=$(mkproj "g/one"); Hh=$(mkproj "h/two")
 printf 'g\n' > "$G/G.conf"; printf 'h\n' > "$Hh/H.conf"
 cat > "$G/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="g/one" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.G.conf" wtool="~/.wtool/.G.conf" subproject="G.conf"/>
 </wtool>
 EOF
 cat > "$Hh/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="h/two" priority="60">
+<wtool schema="1" priority="60">
   <link home="~/.H.conf" wtool="~/.wtool/.H.conf" subproject="H.conf"/>
 </wtool>
 EOF
@@ -360,11 +360,11 @@ mv "$Hh" "$Hh.gone"
 printf '\n== 场景 6：kill-self-forever（要逐字确认；删 wtool 的、不删别人的）==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
-E=$(mkproj "e/one" "e/one")
+E=$(mkproj "e/one")
 printf 'e\n' > "$E/e.conf"
 cat > "$E/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="e/one" priority="50">
+<wtool schema="1" priority="50">
   <zshrc src="env.zsh"/>
   <link home="~/.e.conf" wtool="~/.wtool/.e.conf" subproject="e.conf"/>
 </wtool>
@@ -399,11 +399,11 @@ check "rc 回到用户原来的内容" \
 printf '\n== 场景 7：旧标签仍然认，但要警告（过渡期）==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
-F=$(mkproj "f/legacy" "f/legacy")
+F=$(mkproj "f/legacy")
 printf 'f\n' > "$F/f.conf"
 cat > "$F/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="f/legacy" priority="50">
+<wtool schema="1" priority="50">
   <env src="env.zsh" shells="zsh"/>
   <link src="f.conf" dest=".f.conf"/>
 </wtool>
@@ -455,8 +455,8 @@ printf '\n== 场景 9：<build kind="local|docker"/>（ADR-025）==\n'
 newhome
 mkdir -p "$WTOOL_ROOT"
 
-mkbuildproj() {   # <相对路径> <id> <build 标签行>
-    _d=$(mkproj "$1" "$2")
+mkbuildproj() {   # <相对路径> <build 标签行>
+    _d=$(mkproj "$1")
     mkdir -p "$_d/scripts"
     cat > "$_d/scripts/build.sh" <<'BEOF'
 #!/bin/sh
@@ -465,10 +465,10 @@ mkdir -p "$WTOOL_PROJECT_DIR/__output/$WTOOL_BUILD_LAYER"
 printf 'x\n' > "$WTOOL_PROJECT_DIR/__output/$WTOOL_BUILD_LAYER/out.bin"
 BEOF
     chmod +x "$_d/scripts/build.sh"
-    printf '%s\n' "$3" > "$_d/buildline"
+    printf '%s\n' "$2" > "$_d/buildline"
     {
         printf '<?xml version="1.0" encoding="UTF-8"?>\n'
-        printf '<wtool schema="1" id="%s" priority="50">\n' "$2"
+        printf '<wtool schema="1" priority="50">\n'
         cat "$_d/buildline"
         printf '</wtool>\n'
     } > "$_d/wtool.xml"
@@ -477,7 +477,7 @@ BEOF
 }
 
 # ① 非法 kind：validate 必须拒绝（顺带证明 <build> 不再是"未知元素" —— BL-22）
-PD=$(mkbuildproj "editor/dockerproj" "editor/dockerproj" '<build kind="podman"/>')
+PD=$(mkbuildproj "editor/dockerproj" '<build kind="podman"/>')
 _rc=0
 _out=$("$WT" validate "$PD" 2>&1) || _rc=$?
 [ "$_rc" != 0 ] && ok "<build kind=\"podman\"> 被 validate 拒绝" || bad "非法 kind 居然过了"
@@ -501,7 +501,7 @@ case $_out in
 esac
 
 # ② kind=docker + 没有 docker：拒绝、说原因、指路 download-release，**脚本不许跑**
-WTB=$(mkbuildproj "editor/dockerproj" "editor/dockerproj" '<build kind="docker"/>')
+WTB=$(mkbuildproj "editor/dockerproj" '<build kind="docker"/>')
 export WTOOL_BUILD_LAYER=main
 _rc=0
 _out=$(WTOOL_DOCKER=/nonexistent/wtool-docker "$WT" build "$WTB" 2>&1) || _rc=$?
@@ -517,7 +517,7 @@ esac
 [ -f "$WTB/build-ran.txt" ] && bad "build.sh 居然跑了（白等一场）" || ok "build.sh 没跑（动手之前就拦住）"
 
 # ③ 同一台机器上 kind=local（显式写）照跑
-PL=$(mkbuildproj "editor/localproj" "editor/localproj" '<build kind="local" min-cores="1" min-mem="1" min-disk="1"/>')
+PL=$(mkbuildproj "editor/localproj" '<build kind="local" min-cores="1" min-mem="1" min-disk="1"/>')
 _rc=0
 _out=$(WTOOL_DOCKER=/nonexistent/wtool-docker "$WT" build "$PL" 2>&1) || _rc=$?
 chk "kind=local：没有 docker 也编" "$_rc" "0"
@@ -526,7 +526,7 @@ chk "<build> 里的 min-* 是认识的（BL-22：不再报未知元素）" \
     "$("$WT" validate "$PL" >/dev/null 2>&1 && echo ok || echo bad)" "ok"
 
 # ④ 不写 <build> = local（默认），也不要求 docker
-PN=$(mkbuildproj "editor/nobuildtag" "editor/nobuildtag" '<!-- 没有 <build> -->')
+PN=$(mkbuildproj "editor/nobuildtag" '<!-- 没有 <build> -->')
 _rc=0
 WTOOL_DOCKER=/nonexistent/wtool-docker "$WT" build "$PN" >/dev/null 2>&1 || _rc=$?
 chk "不写 <build> 时默认 local，不要求 docker" "$_rc" "0"
@@ -548,12 +548,12 @@ printf '\n== 场景 9b：check 两个 shell 的汇总文件都查（BL-24）==\n
 #   而 bash 用户的环境变量就静默失效了（最难查的半装状态）。
 newhome
 mkdir -p "$WTOOL_ROOT"
-PB=$(mkproj "terminal/bashonly" "terminal/bashonly")
+PB=$(mkproj "terminal/bashonly")
 printf 'export BASH_ONLY=1\n' > "$PB/env.bash"
 printf 'export BASH_ONLY=1\n' > "$PB/env.zsh"
 cat > "$PB/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/bashonly" priority="50">
+<wtool schema="1" priority="50">
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
 </wtool>
@@ -590,7 +590,7 @@ printf 'hello\n' > "$PI/out.conf"
 printf 'built\n' > "$PI/__output/out.bin"
 cat > "$PI/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/instid" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.instid.conf" wtool="~/.wtool/.instid.conf" subproject="out.conf"/>
 </wtool>
 EOF
@@ -601,10 +601,10 @@ _rc=0
 _out=$("$WT" install terminal/instid 2>&1) || _rc=$?
 chk "install 认项目 id" "$_rc" "0"
 [ -L "$WTOOL_HOME/.instid.conf" ] && ok "按 id 真装上了" || bad "按 id 没装上" "$_out"
-"$WT" uninstall --id terminal/instid >/dev/null 2>&1 || true
-[ -L "$WTOOL_HOME/.instid.conf" ] && bad "uninstall --id 没撤掉" || ok "uninstall --id 撤掉了"
+"$WT" uninstall terminal/instid >/dev/null 2>&1 || true
+[ -L "$WTOOL_HOME/.instid.conf" ] && bad "uninstall <路径> 没撤掉" || ok "uninstall <路径> 撤掉了"
 
-# 不带 --id 的裸 id 也要认（install 认了，uninstall 不认就会死在 cd 上）
+# 不带任何开关的**裸路径**也要认（install 认了，uninstall 不认就会死在 cd 上）
 "$WT" install terminal/instid >/dev/null 2>&1 || true
 _rc=0
 _out=$("$WT" uninstall terminal/instid 2>&1) || _rc=$?
@@ -636,7 +636,7 @@ printf '\n== 场景 11：install --prune 清掉"清单里已经删掉"的软链�
 #   判据必须是 **journal**（"我做过什么"）而不是扫磁盘 —— 扫磁盘会删掉用户自己的东西。
 newhome
 mkdir -p "$WTOOL_ROOT"
-PP=$(mkproj "terminal/pruneproj" "terminal/pruneproj")
+PP=$(mkproj "terminal/pruneproj")
 mkdir -p "$PP/scripts"
 printf 'a\n' > "$PP/a.conf"
 printf 'b\n' > "$PP/b.conf"
@@ -644,7 +644,7 @@ printf 'x\n' > "$PP/x.conf"
 prune_manifest() {   # <要写进去的 link 行…>：没给就写"只有 a 那一行"
     {
         printf '<?xml version="1.0" encoding="UTF-8"?>\n'
-        printf '<wtool schema="1" id="terminal/pruneproj" priority="50">\n'
+        printf '<wtool schema="1" priority="50">\n'
         printf '%s\n' "$@"
         printf '</wtool>\n'
     } > "$PP/wtool.xml"
@@ -697,12 +697,12 @@ chk "重复 --prune 退出码 0" "$_rc" "0"
     && ok "重复 --prune 没伤到别人" || bad "重复 --prune 删多了"
 
 # ④ 刹车：落点已经归了**另一个项目**（链接搬了家）→ 不删，留给那个项目
-PQ=$(mkproj "terminal/pruneproj2" "terminal/pruneproj2")
+PQ=$(mkproj "terminal/pruneproj2")
 mkdir -p "$PQ/scripts"
 printf 'c\n' > "$PQ/c.conf"
 cat > "$PQ/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/pruneproj2" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.prune-a.conf" wtool="~/.wtool/.prune-a2.conf" subproject="c.conf"/>
 </wtool>
 EOF
@@ -717,7 +717,7 @@ prune_manifest '<link home="~/.stay.conf" wtool="~/.wtool/.stay.conf" subproject
 # ③ 找不到时给的是能看懂的错，并且提一句怎么列出全部
 _out=$("$WT" install nosuch-project 2>&1) || true
 case $_out in
-    *"项目目录不存在"*"wtool 裸跑看全部"*) ok "找不到项目时错误信息指了路" ;;
+    *"项目路径不存在"*"wtool 裸跑看全部"*) ok "找不到项目时错误信息指了路" ;;
     *) bad "错误信息不好懂" "$_out" ;;
 esac
 
@@ -728,12 +728,12 @@ printf '\n== 场景 12：全局写锁（BL-17）==\n'
 #   四条要守：跑完自动放锁 / 别人占着就不硬闯 / 占用者死了能接管 / 子进程不抢自己人的锁。
 newhome
 mkdir -p "$WTOOL_ROOT"
-PW=$(mkproj "terminal/lockproj" "terminal/lockproj")
+PW=$(mkproj "terminal/lockproj")
 mkdir -p "$PW/scripts"
 printf 'w\n' > "$PW/w.conf"
 cat > "$PW/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/lockproj" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.lockproj.conf" wtool="~/.wtool/.lockproj.conf" subproject="w.conf"/>
 </wtool>
 EOF
@@ -841,7 +841,9 @@ esac
 #   安全边界：假 HOME / 假 state / **空 root**、不给位置参数、stdin 接 /dev/null
 #   （kill-self-forever 会等人逐字确认，不接 /dev/null 会挂住）、不探 sudo-*
 #   （那几条可能真的去提权）。
-#   ⚠️ 只认空格形式的值开关（--id / --priority）要单独补一个 dummy，别拼成 --id=。
+#   ⚠️ 只认**空格形式**的值开关（现在只剩 `--priority`）要单独补一个 dummy；
+#      带 `=` 的（`--tag=` / `--color=` …）由 `*=` 那条兜住，别给它们补值 ——
+#      补了会多出一个位置参数，反而把命令带偏。
 _probe_home="$T/probe-home"; _probe_state="$T/probe-state"; _probe_ws="$T/probe-ws"
 mkdir -p "$_probe_home" "$_probe_ws"
 for _pc in install uninstall bootstrap build check repair doctor status \
@@ -851,7 +853,7 @@ for _pc in install uninstall bootstrap build check repair doctor status \
     _pf=""
     for _cand in $(WTOOL_SUDO=yes "$WT" _complete "-" "$_pc" 2>/dev/null); do
         case $_cand in
-            *=|--id|--priority) _pf="$_pf $_cand dummy" ;;
+            *=|--priority)      _pf="$_pf $_cand dummy" ;;
             *)                  _pf="$_pf $_cand" ;;
         esac
     done
@@ -943,7 +945,7 @@ printf '\n== 场景 15：--dry-run 不跑项目脚本（一个字节都不写）
 #   dry-run 前后文件清单必须逐行相同。
 newhome
 mkdir -p "$WTOOL_ROOT"
-P4=$(mkproj "dry/proj" "dry/proj")
+P4=$(mkproj "dry/proj")
 mkdir -p "$P4/__output" "$P4/scripts"
 printf 'payload\n' > "$P4/__output/out.bin"
 printf 'conf\n' > "$P4/dry.conf"
@@ -966,7 +968,7 @@ echo "build $*" >> "$WTOOL_PROJECT_DIR/build-called.txt"
 EOF
 cat > "$P4/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="dry/proj" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.dry.conf" wtool="~/.wtool/.dry.conf" subproject="dry.conf"/>
 </wtool>
 EOF
@@ -1023,9 +1025,10 @@ esac
 "$WT" install dry/proj > "$T/i15.log" 2>&1 || bad "（前置）真装一遍失败" "$(cat "$T/i15.log")"
 [ -L "$WTOOL_HOME/.dry.conf" ] && ok "（前置）真装之后 \$HOME 软链在" \
     || bad "（前置）真装没建成"
-#   这里给的是**目录**形式。id 形式（`--id` / 裸 id）以前拿不到 project_root，
-#   项目脚本那一步会被静默跳过；BL-47 修好之后两种形式等价 —— 见场景 16
-#   （那里用标记文件断言 id 形式真跑了脚本，本场景仍然只验 dry-run 的零副作用）。
+#   项目只能按**路径**给（ADR-0037 删掉了 --id）。以前 `--id` / 裸 id 那条路
+#   拿不到 project_root，项目脚本那一步会被静默跳过；BL-47/BL-48 修好之后
+#   两条路（目录 / 路径）等价 —— 见场景 16（那里用标记文件断言真跑了脚本，
+#   本场景仍然只验 dry-run 的零副作用）。
 _before=$(_snap)
 _rc=0
 _out=$("$WT" uninstall "$P4" --dry-run 2>&1) || _rc=$?
@@ -1044,26 +1047,27 @@ case $_out in
 esac
 
 # --------------------------------------------------------------------------
-printf '\n== 场景 16：uninstall 认 id 也要跑项目脚本（BL-47）==\n'
-#   改之前：`wtool uninstall --id <id>`（以及裸 id）那条路拿不到 project_root，
-#   第 3 步"跑项目自己的 install.sh --uninstall"被**静默跳过** —— 不报错、不警告，
-#   只有目录形式才跑。改前的复现（id 形式那行不会打印"项目脚本"、
-#   标记文件也不出现；目录形式两样都有）：
+printf '\n== 场景 16：uninstall 按路径指项目，且**必须**跑项目脚本（BL-47 / ADR-0037）==\n'
+#   历史：`--id` 那条路以前拿不到 project_root，第 3 步"跑项目自己的
+#   install.sh --uninstall"被**静默跳过** —— 不报错、不警告，用户以为卸干净了。
+#   BL-48 修好了解析；ADR-0037 又把 `--id` 整个删掉（身份就是路径），
+#   所以现在只剩**路径**一种给法，判据仍然是那个标记文件。
+#
+#   复现（改前 / 回归时都能照着敲）：
 #     T=$(mktemp -d); export WTOOL_ROOT=$T/ws WTOOL_HOME=$T/home WTOOL_STATE=$T/state
 #     mkdir -p $WTOOL_ROOT/foo/bar/scripts $WTOOL_HOME
 #     printf '#!/bin/sh\necho un >> "$WTOOL_PROJECT_ROOT/uninstall-called.txt"\n' \
 #       > $WTOOL_ROOT/foo/bar/scripts/install.sh
-#     printf '<?xml version="1.0"?>\n<wtool schema="1" id="foo/bar"/>\n' \
-#       > $WTOOL_ROOT/foo/bar/wtool.xml
+#     printf '<?xml version="1.0"?>\n<wtool schema="1"/>\n' > $WTOOL_ROOT/foo/bar/wtool.xml
 #     git -C $WTOOL_ROOT/foo/bar init -q && git -C $WTOOL_ROOT/foo/bar add -A \
 #       && git -C $WTOOL_ROOT/foo/bar -c user.name=t -c user.email=t@t commit -qm init
 #     sh bootstrap/wtool.sh install foo/bar
-#     sh bootstrap/wtool.sh uninstall --id foo/bar
-#     ls $WTOOL_ROOT/foo/bar/uninstall-called.txt    # ← 改前：不存在（目录形式才有）
-#   本场景的判据就是那个标记文件（写在**项目目录**里：state 卸完会被删掉）。
+#     sh bootstrap/wtool.sh uninstall foo/bar
+#     ls $WTOOL_ROOT/foo/bar/uninstall-called.txt
+#   标记文件写在**项目目录**里（state 卸完会被删掉，留在那儿就看不见了）。
 newhome
 mkdir -p "$WTOOL_ROOT"
-P5=$(mkproj "idrun/proj" "idrun/proj")
+P5=$(mkproj "idrun/proj")
 mkdir -p "$P5/__output" "$P5/scripts"
 printf 'payload\n' > "$P5/__output/out.bin"
 printf 'conf\n' > "$P5/idrun.conf"
@@ -1078,21 +1082,21 @@ ln -sfn -- "$WTOOL_PROJECT_ROOT/idrun.conf" "$WTOOL_PREFIX/bin/idrun.conf"
 EOF
 cat > "$P5/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="idrun/proj" priority="50">
+<wtool schema="1" priority="50">
   <link home="~/.idrun.conf" wtool="~/.wtool/.idrun.conf" subproject="idrun.conf"/>
 </wtool>
 EOF
 git -C "$P5" add -A && git -C "$P5" -c user.name=t -c user.email=t@t commit -qm init
 
-# ① `--id` 形式
+# ① 路径形式（相对工作区根）—— 得真跑项目脚本
 "$WT" install idrun/proj > "$T/i16.log" 2>&1 || bad "（前置）真装一遍失败" "$(cat "$T/i16.log")"
 _rc=0
-_out=$("$WT" uninstall --id idrun/proj 2>&1) || _rc=$?
-chk "uninstall --id 退出 0" "$_rc" "0"
+_out=$("$WT" uninstall idrun/proj 2>&1) || _rc=$?
+chk "uninstall <路径> 退出 0" "$_rc" "0"
 if [ -e "$P5/uninstall-called.txt" ]; then
-    ok "★uninstall --id 真跑了 install.sh --uninstall（BL-47 修好）"
+    ok "★uninstall <路径> 真跑了 install.sh --uninstall"
 else
-    bad "uninstall --id 又静默跳过项目脚本（标记文件没出现）" "$_out"
+    bad "uninstall 又静默跳过项目脚本（标记文件没出现）" "$_out"
 fi
 chk "脚本收到的参数是 --uninstall" "uninstall --uninstall" \
     "$(cat "$P5/uninstall-called.txt" 2>/dev/null)"
@@ -1101,46 +1105,192 @@ case $_out in
     *) bad "日志里没提项目脚本" "$_out" ;;
 esac
 
-# ② 裸 id 形式（不带 --id；install 认 id，uninstall 也得认，见场景 10）
-rm -f -- "$P5/uninstall-called.txt"
-"$WT" install idrun/proj >/dev/null 2>&1
+# ② `--id` 是**删掉的老写法**：必须**明确报错 + 指路**，不能当成"未知参数"，
+#    更不能装作没看见（老脚本 / 老文档里到处是它）。
 _rc=0
-_out=$("$WT" uninstall idrun/proj 2>&1) || _rc=$?
-chk "裸 id uninstall 退出 0" "$_rc" "0"
-[ -e "$P5/uninstall-called.txt" ] && ok "★裸 id 形式也跑了项目脚本" \
-    || bad "裸 id 形式静默跳过项目脚本（标记文件没出现）" "$_out"
+_out=$("$WT" uninstall --id idrun/proj 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "--id 老写法退出码非 0" || bad "--id 居然还能用" "$_out"
+case $_out in
+    *"--id 已经删掉"*) ok "★报错说清了 --id 已经删掉" ;;
+    *) bad "--id 没给出说明" "$_out" ;;
+esac
+case $_out in
+    *"wtool uninstall idrun/proj"*) ok "--id 的报错里给了等价的路径写法" ;;
+    *) bad "--id 的报错没指路" "$_out" ;;
+esac
+# init 的 --id 同理（它以前是写进 wtool.xml 的 id= 属性）
+_rc=0
+_out=$("$WT" init "$T/ws16new" --id foo 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "init --id 老写法退出码非 0" || bad "init --id 居然还能用" "$_out"
+case $_out in
+    *"--id 已经删掉"*) ok "init 的 --id 也给了说明" ;;
+    *) bad "init --id 没给出说明" "$_out" ;;
+esac
 
 # ③ 解析不出来 → **明确报错**、退出码非 0
 #    （改前这里是"uninstall 完成" + 什么都不做 —— 静默跳过就是这条路的病根）
 _rc=0
-_out=$("$WT" uninstall --id no/such-proj 2>&1) || _rc=$?
-[ "$_rc" != 0 ] && ok "id 解析不出来时退出码非 0" || bad "找不到项目却退 0" "$_out"
+_out=$("$WT" uninstall no/such-proj 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "路径解析不出来时退出码非 0" || bad "找不到项目却退 0" "$_out"
 case $_out in
     *"找不到项目"*) ok "报错里说清了找不到项目" ;;
     *) bad "没有明确报错" "$_out" ;;
 esac
 case $_out in
-    *"wtool uninstall <项目目录>"*) ok "报错里给了目录形式这条退路" ;;
+    *"--no-script"*) ok "报错里给了 --no-script 这条退路" ;;
     *) bad "报错没给退路" "$_out" ;;
 esac
 # `--no-script` 是**明说**不跑脚本，那种情况只要警告、不该报错
 _rc=0
-_out=$("$WT" uninstall --id no/such-proj --no-script 2>&1) || _rc=$?
+_out=$("$WT" uninstall no/such-proj --no-script 2>&1) || _rc=$?
 chk "解析不出来 + --no-script 只警告（退出 0）" "$_rc" "0"
 case $_out in
     *"warning"*) ok "解析不出来 + --no-script 打了警告（不是静默）" ;;
     *) bad "--no-script 那条路一句话都没说" "$_out" ;;
 esac
 
-# ④ 末段 id **不替用户猜**：state 的账是按完整 id 建目录的，
+# ④ 末段**不替用户猜**：state 的账是按完整路径建目录的，
 #    "唯一的末段匹配"会在"表里只剩 x/foo/bar、账上却是 foo/bar"时卸错项目。
 _rc=0
-_out=$("$WT" uninstall --id proj 2>&1) || _rc=$?
-[ "$_rc" != 0 ] && ok "末段 id 不认（要完整 id）" || bad "末段 id 被认了" "$_out"
+_out=$("$WT" uninstall proj 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "末段不认（要完整路径）" || bad "末段被认了" "$_out"
 case $_out in
-    *"idrun/proj"*) ok "把末段同名的候选列出来了（提示写完整 id）" ;;
+    *"idrun/proj"*) ok "把末段同名的候选列出来了（提示写完整路径）" ;;
     *) bad "没提示候选项目" "$_out" ;;
 esac
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 17：改名的正确姿势是 wtool move；改错了 check 必须报（ADR-0037）==\n'
+#   项目身份 = 路径。所以"把目录 mv 一下"**不再**是一次无害的操作：
+#   旧路径那套账（state 目录 / 中转软链 / env 块 / registry 行）全留在原地，
+#   而且大多**不报错、只是静默失效**。这一场守两件事：
+#     ① `wtool move` 能把旧账收干净（收不干净就是它的 bug）
+#     ② 手工 mv 留下的残渣，`wtool check` **必须报出来**（报不出来就是 check 的 bug）
+newhome
+mkdir -p "$WTOOL_ROOT"
+
+_s17_mk() {   # <相对路径>
+    _d="$WTOOL_ROOT/$1"; mkdir -p "$_d/__output" "$_d/scripts"
+    git -C "$_d" init -q
+    # 每个项目的落点必须**唯一**：两个项目声明同一个 home= 会被判成
+    # "dest 已被项目 X 占用"（引擎的跨项目冲突检测），那不是本场景要测的东西。
+    _s17_slug=$(printf '%s' "$1" | tr '/' '-')
+    printf 'p\n' > "$_d/payload.bin"
+    printf 'export S17=1\n' > "$_d/env.zsh"
+    printf 'export S17=1\n' > "$_d/env.bash"
+    # 带 install.sh：① 影子 HOME 的 usr/ 有实体（否则 ~/usr 这条全局软链悬空，
+    #   那是"项目没提供 usr 内容"的正常形态，不是 move 的问题）；
+    #   ② 顺带证明 move 真把**项目脚本**走了一遍（卸载一次、安装一次）。
+    cat > "$_d/scripts/install.sh" <<'EOF'
+#!/bin/sh
+_s17_self=$(basename -- "$WTOOL_PROJECT_ROOT")
+if [ "${1:-}" = "--uninstall" ]; then
+    rm -f -- "$WTOOL_PREFIX/bin/$_s17_self"
+    exit 0
+fi
+mkdir -p -- "$WTOOL_PREFIX/bin"
+ln -sfn -- "$WTOOL_PROJECT_ROOT/payload.bin" "$WTOOL_PREFIX/bin/$_s17_self"
+EOF
+    chmod +x "$_d/scripts/install.sh"
+    cat > "$_d/wtool.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="50">
+  <link home="~/.s17-$_s17_slug.conf" wtool="~/.wtool/.s17-$_s17_slug.conf" subproject="payload.bin"/>
+  <zshrc src="env.zsh"/><bashrc src="env.bash"/>
+</wtool>
+EOF
+    git -C "$_d" add -A && git -C "$_d" -c user.name=t -c user.email=t@t commit -qm init
+}
+# 三棵树：项目目录 / 影子 HOME / state
+_s17_snap() { { find "$WTOOL_ROOT" "$WTOOL_HOME" "$WTOOL_STATE" -mindepth 1 2>/dev/null || true; } | sort; }
+_s17_dangling() { find "$WTOOL_HOME" -xtype l 2>/dev/null | wc -l | tr -d ' '; }
+_s17_blocks() { grep -o '^# >>> wtool:[^ ]*' "$WTOOL_HOME/.wtool/.zshrc" 2>/dev/null | sed 's/^# >>> //' | tr '\n' ' '; }
+
+_s17_mk "moval/one"
+"$WT" install moval/one > "$T/s17i.log" 2>&1 || bad "（前置）装 moval/one 失败" "$(cat "$T/s17i.log")"
+
+# ---- ① --dry-run：只打印，一个字节都不动 ----
+_s17_before=$(_s17_snap)
+_rc=0
+_out=$("$WT" move moval/one moval/two --dry-run 2>&1) || _rc=$?
+chk "★move --dry-run 退出 0" "$_rc" "0"
+chk "★move --dry-run 前后文件清单逐行相同（零副作用）" "$_s17_before" "$(_s17_snap)"
+[ -d "$WTOOL_ROOT/moval/one" ] && ok "move --dry-run 没搬目录" || bad "move --dry-run 把目录搬了"
+[ -e "$WTOOL_ROOT/moval/two" ] && bad "move --dry-run 建了新目录" || ok "move --dry-run 没建新目录"
+case $_out in
+    *moval/two*) ok "move --dry-run 打印了计划（提到新路径）" ;;
+    *) bad "move --dry-run 没打印计划" "$_out" ;;
+esac
+
+# ---- ② 真改名：旧账必须**全**收干净 ----
+_rc=0
+_out=$("$WT" move moval/one moval/two 2>&1) || _rc=$?
+chk "★move 退出 0" "$_rc" "0"
+[ -d "$WTOOL_ROOT/moval/one" ] && bad "move 之后旧目录还在" || ok "move 之后旧目录没了"
+[ -d "$WTOOL_ROOT/moval/two" ] && ok "move 之后新目录在" || bad "move 之后新目录不在" "$_out"
+# state：只有新路径那一份
+[ -f "$WTOOL_STATE/moval/two/meta.tsv" ] && ok "state 建在新路径下" || bad "state 没建在新路径下"
+[ -e "$WTOOL_STATE/moval/one" ] && bad "★旧 state 目录没删掉（残渣）" || ok "旧 state 目录已收走"
+# 中转软链：只有新路径那条，且不悬空
+[ -d "$WTOOL_HOME/.wtool/wtool-work-dir/links/moval/two" ] && ok "中转软链指向新路径" \
+    || bad "中转软链没建在新路径"
+[ -e "$WTOOL_HOME/.wtool/wtool-work-dir/links/moval/one" ] && bad "★旧中转软链还在（悬空链）" \
+    || ok "旧中转软链已收走"
+chk "★影子 HOME 里没有悬空软链" "0" "$(_s17_dangling)"
+# 汇总文件里的块：只有新路径那个
+chk "★汇总文件里只剩新路径的块" "wtool:moval/two " "$(_s17_blocks)"
+# registry：每一行的主人都是新路径
+_s17_owners=$(cut -f2 "$WTOOL_STATE/registry.tsv" 2>/dev/null | sort -u | tr '\n' ' ')
+chk "★registry 里没有旧路径的行" "moval/two " "$_s17_owners"
+# 最后：check 必须说"一切对得上"
+_rc=0
+_out=$("$WT" check 2>&1) || _rc=$?
+chk "★move 之后 check 干净（退出 0）" "$_rc" "0"
+
+# ---- ③ 手工 mv（错误姿势）：check 必须把三类残渣都报出来 ----
+_s17_mk "moval/three"
+"$WT" install moval/three >/dev/null 2>&1
+mv "$WTOOL_ROOT/moval/three" "$WTOOL_ROOT/moval/four"      # ← 绕开 wtool
+_rc=0
+_out=$("$WT" check 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "★手工 mv 之后 check 退出码非 0" || bad "check 没发现残渣" "$_out"
+case $_out in
+    *moval/three*) ok "check 报的是**旧路径** moval/three" ;;
+    *) bad "check 没提旧路径" "$_out" ;;
+esac
+case $_out in
+    *"env 块"*) ok "★check 报了删不掉的旧 env 块（会继续进汇总文件）" ;;
+    *) bad "check 没报旧 env 块" "$_out" ;;
+esac
+case $_out in
+    *"悬空软链"*) ok "★check 报了悬空软链" ;;
+    *) bad "check 没报悬空软链" "$_out" ;;
+esac
+case $_out in
+    *registry*) ok "★check 报了 registry 里的旧路径（下次 install 会撞它）" ;;
+    *) bad "check 没报 registry 旧行" "$_out" ;;
+esac
+# 点着旧路径查也要报（用户手里只有那条已经改掉的路径）
+_rc=0
+_out=$("$WT" check moval/three 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "check <旧路径> 也报" || bad "check <旧路径> 说没事" "$_out"
+
+# ---- ④ 改名的护栏：不许覆盖、不许原地 ----
+_s17_mk "moval/five"
+"$WT" install moval/five >/dev/null 2>&1
+_rc=0
+_out=$("$WT" move moval/five moval/two 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "新路径已存在时 move 拒绝" || bad "move 把已有项目覆盖了" "$_out"
+case $_out in
+    *"已经存在"*) ok "拒绝的理由说清了（新路径已经存在）" ;;
+    *) bad "拒绝理由不清楚" "$_out" ;;
+esac
+_rc=0
+_out=$("$WT" move moval/five moval/five 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "新旧同一个目录时 move 拒绝" || bad "move 接受了原地改名" "$_out"
+# 拒绝之后不能留下半成品：five 还得是装着的
+[ -f "$WTOOL_STATE/moval/five/meta.tsv" ] && ok "被拒绝的 move 没动到旧项目" \
+    || bad "被拒绝的 move 把旧项目卸了"
 
 printf '\n----------------------------------------\n'
 printf 'contract_test: PASS %d  FAIL %d\n' "$pass" "$fail"

@@ -19,14 +19,17 @@ check() { [ "$2" = "$3" ] && ok "$1" || bad "$1" "期望 [$2]  实际 [$3]"; }
 newenv() {
     # 注意：必须在当前 shell 里调用（不能写成 newenv，子 shell 会丢掉 export）
     H=$(mktemp -d "${TMPDIR:-/tmp}/wtool-prov.XXXXXX")
-    mkdir -p "$H/home" "$H/prefix" "$H/src" "$H/upstream"
+    mkdir -p "$H/home" "$H/prefix" "$H/src" "$H/upstream" "$H/ws"
     export WTOOL_HOME="$H/home"
     export WTOOL_STATE="$H/state"
+    # 项目都建在工作区里：**项目身份 = 它相对工作区根的路径**（ADR-0037）。
+    # 下面断言里那些 `state/os/test/...` 就是这么来的。
+    export WTOOL_ROOT="$H/ws"
     export WTOOL_PREFIX="$H/prefix"
     export WTOOL_SRC="$H/src"
 }
 
-mkrepo() { # mkrepo <目录> <id> ；wtool.xml 由调用方随后写
+mkrepo() { # mkrepo <目录> ；wtool.xml 由调用方随后写（身份 = 目录相对工作区根的路径）
     d=$1
     mkdir -p "$d"
     ( cd "$d" && git init -q && git -c user.email=t@example.com -c user.name=t \
@@ -44,11 +47,11 @@ newenv
 sys="$H/system/etc/apt/sources.list.d"
 mkdir -p "$sys"
 printf '原来的源\n' > "$sys/test.sources"
-p="$H/proj1"; mkrepo "$p"
+p="$H/ws/os/test"; mkrepo "$p"
 printf 'Types: deb\nURIs: https://mirrors.ustc.edu.cn/ubuntu/\n' > "$p/mirror.sources"
 cat > "$p/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="os/test" priority="5">
+<wtool schema="1" priority="5">
   <system-file src="mirror.sources" dest="$sys/test.sources" mode="replace" backup="true"/>
 </wtool>
 EOF
@@ -77,11 +80,11 @@ printf '\n== 场景 2：system-file add（原来不存在）→ 卸载后删除 
 newenv
 sys="$H/system/etc/apt/sources.list.d"
 mkdir -p "$sys"
-p="$H/proj2"; mkrepo "$p"
+p="$H/ws/os/extra"; mkrepo "$p"
 printf '新增的源\n' > "$p/extra.sources"
 cat > "$p/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="os/extra" priority="5">
+<wtool schema="1" priority="5">
   <system-file src="extra.sources" dest="$sys/extra.sources" mode="add"/>
 </wtool>
 EOF
@@ -99,10 +102,10 @@ newenv
 sys="$H/system/etc/apt/sources.list.d"
 mkdir -p "$sys"
 printf '官方源\n' > "$sys/ubuntu.sources"
-p="$H/proj3"; mkrepo "$p"
+p="$H/ws/os/disable"; mkrepo "$p"
 cat > "$p/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="os/disable" priority="5">
+<wtool schema="1" priority="5">
   <system-file dest="$sys/ubuntu.sources" mode="disable"/>
 </wtool>
 EOF
@@ -119,10 +122,10 @@ printf '\n== 场景 4：kind=apt-mirror 自动生成 deb822 源 ==\n'
 newenv
 sys="$H/system/etc/apt/sources.list.d"
 mkdir -p "$sys"
-p="$H/proj4"; mkrepo "$p"
+p="$H/ws/os/auto"; mkrepo "$p"
 cat > "$p/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="os/auto" priority="5">
+<wtool schema="1" priority="5">
   <system-file kind="apt-mirror" mirror="ustc" dest="$sys/ubuntu.sources"
                mode="replace" backup="true"/>
 </wtool>
@@ -156,13 +159,13 @@ up="$H/upstream"; mkdir -p "$up"
 printf 'v2\n' > "$up/file.txt"
 ( cd "$up" && git add -A && git -c user.email=t@e -c user.name=t commit -qm v2 )
 
-p="$H/proj5"; mkrepo "$p"
+p="$H/ws/build/test"; mkrepo "$p"
 mkdir -p "$p/overlay"
 printf '#!/bin/sh\necho "built" > "$WTOOL_PREFIX/built.txt"\nprintf "%%s" "$WTOOL_SOURCE_REF" > "$WTOOL_PREFIX/ref.txt"\n' > "$p/overlay/wsw.sh"
 chmod +x "$p/overlay/wsw.sh"
 cat > "$p/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="build/test" priority="70">
+<wtool schema="1" priority="70">
   <source url="$up" ref="v1.0" dir="$H/src/test" branch="wsw" overlay="overlay"/>
   <provision src="wsw.sh" marker="test-{ref}" desc="测试编译"/>
 </wtool>
@@ -194,11 +197,11 @@ newenv
 sys="$H/system/etc"
 mkdir -p "$sys"
 printf '原始\n' > "$sys/x.conf"
-p="$H/proj6"; mkrepo "$p"
+p="$H/ws/dry/test"; mkrepo "$p"
 printf '新的\n' > "$p/x.conf"
 cat > "$p/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="dry/test" priority="5">
+<wtool schema="1" priority="5">
   <system-file src="x.conf" dest="$sys/x.conf" mode="replace" backup="true"/>
   <source url="$H/upstream" ref="v1.0" dir="$H/src/dry"/>
   <provision src="x.conf" marker="dry" desc="不该执行"/>
@@ -215,12 +218,12 @@ rm -rf "$H"
 # --------------------------------------------------------------------------
 printf '\n== 场景 7：list-projects 按 priority 排序 ==\n'
 newenv
-mkdir -p "$H/ws/a" "$H/ws/b" "$H/ws/c"
+mkdir -p "$H/ws/x/a" "$H/ws/x/b" "$H/ws/x/c"
 for spec in "a 50" "b 10" "c 30"; do
     set -- $spec
-    cat > "$H/ws/$1/wtool.xml" <<EOF
+    cat > "$H/ws/x/$1/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="x/$1" priority="$2"/>
+<wtool schema="1" priority="$2"/>
 EOF
 done
 got=$(python3 "$boot/lib/wtool_plan.py" list-projects --root "$H/ws" | cut -f2 | tr '\n' ' ')
@@ -230,11 +233,11 @@ rm -rf "$H"
 # --------------------------------------------------------------------------
 printf '\n== 场景 8：when 条件过滤（os:ubuntu）==\n'
 newenv
-p="$H/proj8"; mkrepo "$p"
+p="$H/ws/when/test"; mkrepo "$p"
 printf 'x\n' > "$p/x.conf"
 cat > "$p/wtool.xml" <<XML
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="when/test" priority="5">
+<wtool schema="1" priority="5">
   <system-file src="x.conf" dest="$H/system/x.conf" mode="replace"
                when="os:ubuntu" desc="只在 ubuntu 上做"/>
 </wtool>
@@ -257,10 +260,10 @@ printf '\n== 场景 9：换源只有一处逻辑（mirror="auto" 跟随 install.
 #   两处各写一份源文件，apt 会警告 "configured multiple times"，装包任务会失败。
 #   所以把 mirror 写成 "auto"：有记录就跳过（并清掉会重复的那份）。
 newenv
-p="$H/proj9"; mkrepo "$p"
+p="$H/ws/os/mirror"; mkrepo "$p"
 cat > "$p/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="os/mirror" priority="5">
+<wtool schema="1" priority="5">
   <sudo-install kind="apt-mirror" mirror="auto" dest="auto" mode="replace"
                 backup="true" when="os:ubuntu" desc="换源（跟随 install.sh）"/>
 </wtool>
@@ -303,7 +306,7 @@ esac
 # ④ 清单里写死镜像（不是 auto）→ 仍然照写（项目明确要求，这是有意的）
 cat > "$p/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="os/mirror" priority="5">
+<wtool schema="1" priority="5">
   <sudo-install kind="apt-mirror" mirror="tuna" dest="auto" mode="replace"
                 backup="true" when="os:ubuntu" desc="固定用 tuna"/>
 </wtool>
@@ -336,14 +339,14 @@ printf '\n== 场景 9b：任务里的 WTOOL_PROJECT_DIR 必须是"项目目录"�
 #   发现"任务没跑"的）。现在任务里 WTOOL_PROJECT_DIR = 项目目录，
 #   状态目录叫 WTOOL_PROJECT_STATE_DIR。
 newenv
-p="$H/proj9b"; mkrepo "$p"
+p="$H/ws/dirs/test"; mkrepo "$p"
 cat > "$p/whatdirs.sh" <<'EOF'
 printf 'DIR=%s\nROOT=%s\nSTATE=%s\n' "$WTOOL_PROJECT_DIR" "$WTOOL_PROJECT_ROOT" "$WTOOL_PROJECT_STATE_DIR" \
     > "$WTOOL_PROJECT_DIR/dirs.txt"
 EOF
 cat > "$p/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="dirs/test" priority="5">
+<wtool schema="1" priority="5">
   <sudo-install src="whatdirs.sh" marker="dirs" desc="把三个变量落盘"/>
 </wtool>
 XML

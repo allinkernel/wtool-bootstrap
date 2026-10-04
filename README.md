@@ -31,7 +31,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 10 组 / 765 条断言
+./tests/run_all.sh                    # 10 组 / 794 条断言
                                       # pairing 35 / sudo-install 40 / publish 124 / table 94
                                       # release-copy 17 / release 63 / contract 221 / layer 46 / install-env 67
                                       # （run_all.sh 文件头那几行逐组条数是手写的，会过期；
@@ -68,7 +68,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 |---|---|---|
 | `WTOOL_HOME` | `$HOME` | 被管理的家目录（测试用） |
 | `WTOOL_STATE` | `$XDG_STATE_HOME/wtool` 或 `~/.local/state/wtool` | 状态目录 |
-| `WTOOL_ROOT` | bootstrap 的上级目录 | 推断项目默认 id |
+| `WTOOL_ROOT` | bootstrap 的上级目录 | 工作区根 —— **项目身份就是项目相对它的路径**（ADR-0037） |
 | `WTOOL_BOOTSTRAP` | 存根自动查找 | 显式指定引擎位置 |
 
 bootstrap 项目（自举）提供的**长期变量**，重启 shell 后依然可用：

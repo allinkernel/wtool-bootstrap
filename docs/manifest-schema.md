@@ -6,7 +6,7 @@
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/tmux" priority="50">
+<wtool schema="1" priority="50">
 
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
@@ -84,10 +84,26 @@
 | 属性 | 必填 | 默认 | 说明 |
 |---|---|---|---|
 | `schema` | ✅ | — | 清单格式版本。当前只支持 `1`；未知值会被拒绝 |
-| `id` | 否 | 相对工作区的路径 | 项目身份。出现在 `~/.wtool/wtool-work-dir/links/<id>`、`$WTOOL_STATE/<id>/` 和 rc 块标记里，**改了必须重新 install** |
+| `id` | ❌ **已删除** | — | **不要写**。项目身份**就是它相对工作区根的路径**（ADR-0037）。还写着 `id` 的清单会**直接报错**，删掉这个属性即可 |
 | `priority` | 否 | `100` | 越小越早加载；`<zshrc>`/`<bashrc>` 不写 `priority` 时继承它 |
 
-`id` 允许带 `/`（例如 `terminal/tmux`），会形成嵌套目录，不要用 `..` 或绝对路径。
+### 项目身份 = 路径（没有 `id` 这回事了）
+
+用户 2026-10-04 拍板（ADR-0037）：**干掉项目 id，一律用项目路径指项目。**
+原话："项目 id 是个很烦人的东西，直接干掉吧。我们后续就根据项目路径来指定项目即可。
+否则改了路径，还要改 id，就很烦。"
+
+所以：
+
+- 身份**只有一个来源** —— 项目目录相对工作区根的路径（`terminal/tmux` 这样的）。
+  它出现在 `~/.wtool/wtool-work-dir/links/<路径>`、`$WTOOL_STATE/<路径>/` 和 rc 块标记里。
+- **改目录 = 换了一个项目**。想改名用 `wtool move <旧路径> <新路径>`
+  （= 卸旧的 → mv → 装新的），别自己 `mv`。只 `mv` 会把旧路径那一套账
+  （state 目录、中转软链、env 块、registry 行）留在原地，而且它们**大多不报错、
+  只是静默失效**；`wtool check` 会把这类残渣报出来。
+- 路径里**不要**用 `..`，也别写成绝对路径 —— 项目要待在工作区里。
+  工作区**外面**的目录也能 `wtool install /abs/path`，但那种项目拿不到合法的相对路径，
+  身份会退化成目录名（`basename`）：能用，但别指望它跨机器稳定。
 
 ---
 
@@ -324,7 +340,7 @@ error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元�
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="shell/zsh" priority="20">
+<wtool schema="1" priority="20">
 
   <!-- 先于其它项目被 source -->
   <zshrc  src="env.zsh"  priority="20"/>

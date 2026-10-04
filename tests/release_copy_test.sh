@@ -35,7 +35,7 @@ mkdir -p "$WS/.wtool-dist" "$WS/terminal/tmux" "$WS/harness" \
 
 cat > "$WS/terminal/tmux/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" id="terminal/tmux" priority="50">
+<wtool schema="1" priority="50">
   <env src="env.zsh" shells="zsh"/>
 </wtool>
 EOF
