@@ -239,12 +239,13 @@ case $_out in
     *"mv layer __layer"*) ok "上一版的 layer/ → 提示 mv layer __layer" ;;
     *) bad "layer/ 没提示" "$_out" ;;
 esac
-# 新名字已经在的时候**不再喊**（用户搬了一半，别再烦他）
+# 新名字里**真有东西**了就不再喊（用户搬完了，别再烦他）
 mkdir -p "$P2/__output" "$P2/__layer"
+printf 'moved\n' > "$P2/__output/.moved"; printf 'moved\n' > "$P2/__layer/.moved"
 _out=$("$WT" check "$P2" 2>&1) || true
 case $_out in
     *"mv output __output"*) bad "新名字已经在了还喊 mv output" "$_out" ;;
-    *) ok "新名字在了就不再提示（不烦人）" ;;
+    *) ok "新名字里有东西了就不再提示（不烦人）" ;;
 esac
 rm -rf "$P2/output" "$P2/layer" "$P2/__output" "$P2/__layer"
 

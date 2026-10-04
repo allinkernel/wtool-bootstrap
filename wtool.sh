@@ -2198,9 +2198,21 @@ wt_check_old_dir_names() {   # <项目 id> <项目目录>（都为空 = 工作�
         done
         # ③④：上一版的名字（output/ layer/），只在**新名字还没有**的时候提示 ——
         # 两边都在说明用户已经搬过一半，再喊只会烦人。
+        # "新名字在了"要看它**里面有没有东西**：`__output/` 空着而 `output/` 满满
+        # 的时候（实测 astronvim 就是这样：空的 __output/ubuntu_22.04 + 2.1G 的
+        # output/）正是最需要提示的时候，只看目录在不在会把这种情况漏掉。
         _od_old_out=0; _od_old_lay=0
-        [ -d "$_od_dir/output" ] && [ ! -e "$_od_dir/__output" ] && _od_old_out=1
-        [ -d "$_od_dir/layer" ]  && [ ! -e "$_od_dir/__layer" ]  && _od_old_lay=1
+        #   "有没有东西"要看**有没有文件**（递归），不是"目录里列出点什么" ——
+        #   astronvim 的实况：`__output/ubuntu_22.04/` 是一串空目录，而 `output/`
+        #   有 2.1G。用 `ls -A` 判会把空壳当"已经有了"，恰好漏掉最该提示的情况。
+        if [ -d "$_od_dir/output" ] \
+           && [ -z "$(find "$_od_dir/__output" -mindepth 1 -type f -print -quit 2>/dev/null)" ]; then
+            _od_old_out=1
+        fi
+        if [ -d "$_od_dir/layer" ] \
+           && [ -z "$(find "$_od_dir/__layer" -mindepth 1 -type f -print -quit 2>/dev/null)" ]; then
+            _od_old_lay=1
+        fi
 
         if [ "$_od_old_out" = 1 ] || [ "$_od_old_lay" = 1 ] \
            || [ "$_od_old_pub" = 1 ] || [ "$_od_old_rel" = 1 ]; then
