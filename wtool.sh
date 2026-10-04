@@ -1979,7 +1979,7 @@ cmd_bootstrap() {
     rm -f "$_pending"
 
     printf '\n'
-    cmd_table --verbose
+    cmd_table --brief
 }
 
 # --------------------------------------------------------------------------
@@ -2433,7 +2433,7 @@ cmd_doctor() {
     printf '\n'
     cmd_env
     printf '\n'
-    cmd_table --verbose --summary
+    cmd_table --brief
 }
 
 # --------------------------------------------------------------------------
@@ -2449,24 +2449,17 @@ cmd_table() {
     for _a in "$@"; do
         case $_a in
             --verbose|-v) _args="$_args --verbose" ;;
+            --brief|-b)   _args="$_args --brief" ;;
             --summary|-s) _args="$_args --summary" ;;
             --color=*)    _args="$_args --color=${_a#--color=}" ;;
-            -*) wt_die "未知参数: $_a（可用 --verbose --summary）" ;;
+            -*) wt_die "未知参数: $_a（可用 --verbose --brief --summary --color=auto|always|never）" ;;
             *)  wt_die "table 不接受位置参数: $_a" ;;
         esac
     done
+    # 看板的每一段都在 py 里排（宽度要算 CJK，sh 干不了）；
+    # sh 只负责把参数递过去 —— `--brief` 是 doctor / bootstrap 末尾那种"只要一张表"的场景。
     # shellcheck disable=SC2086
     python3 "$PY" table --root "$WTOOL_ROOT" --state "$WTOOL_STATE" $_args
-    echo
-    _c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
-    printf '  %s  这个项目没这项能力\n' "$(_c 31 不支持)"
-    printf '  %s  现在就能跑\n' "$(_c 33 可执行)"
-    printf '  %s  能力有，但要先把 output/ 产出来\n' "$(_c 34 待产出)"
-    printf '  %s  跑过了\n' "$(_c 32 已完成)"
-    printf '\n  流水线：产出 → install，前面的没做后面的跑不起来。\n'
-    printf '  产出有两条路：wtool build，或者 wtool download-release + wtool unpack-release。\n'
-    printf '  前置没做时 install 会直接报错告诉你去跑哪条，不会替你跑。\n'
-    printf '  （发布和下载不是"项目能力"，是引擎统一做的 —— 见 harness/docs/adr/0023。）\n'
 }
 
 # --------------------------------------------------------------------------
@@ -3820,8 +3813,8 @@ case $_cmd in
         awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"
         ;;
     "")
-        # 不带参数 = 看板：哪些项目装过、sudo 装过、发布过
-        cmd_table --verbose --summary
+        # 不带参数 = 看板：能力表 + install/sudo-install/bootstrap/sudo-bootstrap 四段计划 + 两张图
+        cmd_table --verbose
         ;;
     *) wt_die "未知命令: $_cmd（用 --help 查看用法）" ;;
 esac

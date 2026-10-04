@@ -142,14 +142,63 @@ env_install_first() {
     # 这种"看着像乱码"的输出，根源都是变量被别的函数偷了。
     for _cand in "$@"; do
         # shellcheck disable=SC2086
-        if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-               --no-install-recommends $_cand >/dev/null 2>&1; then
+        if DEBIAN_FRONTEND=noninteractive env_apt_try 3 \
+               apt-get install -y -qq --no-install-recommends $_cand >/dev/null 2>&1; then
             env_say "  $_desc ✓（包名 $_cand）"
             return 0
         fi
     done
     env_warn "  $_desc 装不上（试过: $*）"
     return 1
+}
+
+# apt 拿不到锁时**等一等再试**，并把话说清楚。
+#
+# 为什么不是"加个 apt 选项就完事"：`DPkg::Lock::Timeout` 只管 dpkg 的
+# frontend 锁，**不管** `/var/cache/apt/archives/lock`。2026-09-29 实测
+# （apt 2.4.14，ubuntu 22.04 容器）：
+#
+#     另一个进程拿住 archives 锁，apt-get install 报
+#       E: Could not get lock /var/cache/apt/archives/lock. It is held by process 9 (python3)
+#     不带选项：立刻失败；带 -o DPkg::Lock::Timeout=4：**照样 1.4 秒就失败**。
+#
+# 而这把锁最容易在**两个容器共用 `/var/cache/apt` 卷**时被抢 ——
+# 那时报错里的 pid 会变成 0（占用者在另一个 PID 命名空间里，apt 认不出是谁），
+# 正是用户 2026-10-04 在 Docker Desktop 上撞到的那个
+# `It is held by process 0`。所以这里只能自己重试，并把"去看谁在跑"教给用户。
+env_apt_lock_hint() {
+    env_warn "  apt 的锁被占着 —— 多半是**另一个容器**在共用 /var/cache/apt（或它在跑 apt）"
+    env_warn "    看谁在跑：docker ps        （同一个卷挂到两个容器时，两边不能同时 apt）"
+    env_warn "    确认没有活着的 apt 之后，才是清的（apt 自己那句『别删锁文件』是针对活锁说的）："
+    env_warn "      rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
+}
+
+# 跑一条 apt 命令，锁被占着就等一会儿重试（最多 <次数> 次）
+env_apt_try() {   # <次数> <命令...>
+    _at_n=$1; shift
+    _at_i=0
+    _at_out=$(mktemp 2>/dev/null || echo /tmp/wtool-apt.$$)
+    while :; do
+        _at_i=$((_at_i + 1))
+        if "$@" >"$_at_out" 2>&1; then
+            rm -f "$_at_out"
+            return 0
+        fi
+        if grep -q 'Could not get lock\|Unable to lock' "$_at_out" 2>/dev/null; then
+            if [ "$_at_i" -ge "$_at_n" ]; then
+                env_apt_lock_hint
+                sed 's/^/    /' "$_at_out" >&2
+                rm -f "$_at_out"
+                return 1
+            fi
+            env_warn "  apt 在等锁（第 $_at_i 次拿不到）—— 5 秒后再试"
+            sleep 5
+            continue
+        fi
+        sed 's/^/    /' "$_at_out" >&2
+        rm -f "$_at_out"
+        return 1
+    done
 }
 
 # ── 主流程 ──
@@ -189,8 +238,8 @@ env_prepare() {
     while [ "$_try" -lt 2 ]; do
         _try=$((_try + 1))
         # shellcheck disable=SC2086
-        if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-               --no-install-recommends \
+        if DEBIAN_FRONTEND=noninteractive env_apt_try 3 \
+               apt-get install -y -qq --no-install-recommends \
                ca-certificates git python3 curl ${ENV_EXTRA_PKGS:-} >/dev/null 2>&1; then
             env_say "  ca-certificates git python3 curl ✓"
             break

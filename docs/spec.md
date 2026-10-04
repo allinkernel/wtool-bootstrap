@@ -817,49 +817,68 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 - `layer/` 只对 `kind="docker"` 的项目存在（见 ADR-025）；`layer/` 是**项目资产**，
   docker 存储只是缓存 —— `docker system prune` 之后 `layer-load` 就装回来
 
-## 15. 能力表格
+## 15. 看板（裸跑 `wtool`）
 
-裸跑 `wtool`（不带参数）打印这张表；`wtool table` 这个名字**已经删掉**，
-敲它只会告诉你裸跑 `wtool`：
+裸跑 `wtool`（不带参数）打印**五段看板** + 两张图；`wtool table` 这个名字**已经删掉**，
+敲它只会告诉你裸跑 `wtool`。分段与理由见 **ADR-0031**（用户 2026-09-29 提的要求）：
+以前只有 `build` / `install` 两列，而引擎里逐项目的命令不止两条。
+
+| 段 | 内容 |
+|---|---|
+| 1 | **能力表**：`build` / `install` / `sudo` / `pack` / `publish` / `download` / `layer` 七列 |
+| 2 | `wtool install` 能装哪些项目、装过没、会做什么 |
+| 3 | `wtool sudo-install` 能装哪些项目、跑过没、会装什么 |
+| 4 | `wtool bootstrap` 这次会装哪些、什么顺序、谁被跳过 |
+| 5 | `wtool sudo-bootstrap` 这次会跑哪些 |
+| — | 然后才是流水线说明和两张 **纯 ASCII** 图（安装 / 发布） |
 
 ```
-┌──────────────────────┬──────┬────────┬─────────┐
-│ 项目                 │ prio │ build  │ install │
-├──────────────────────┼──────┼────────┼─────────┤
-│ bootstrap            │ 5    │ 不支持 │ 可执行  │
-│ os/ubuntu            │ 5    │ 不支持 │ 不支持  │
-│ terminal/tmux        │ 50   │ 不支持 │ 可执行  │
-│ editor/astronvim_v5  │ 70   │ 可执行 │ 待产出  │
-└──────────────────────┴──────┴────────┴─────────┘
+┌──────────────────────┬──────┬────────┬─────────┬────────┬────────┬─────────┬──────────┬────────┐
+│ 项目                 │ prio │ build  │ install │  sudo  │  pack  │ publish │ download │ layer  │
+├──────────────────────┼──────┼────────┼─────────┼────────┼────────┼─────────┼──────────┼────────┤
+│ bootstrap            │ 5    │ 不支持 │ 可执行  │ 不支持 │ 可执行 │ 已完成  │ 未发布   │ 不支持 │
+│ os/ubuntu            │ 5    │ 不支持 │ 不支持  │ 可执行 │ 可执行 │ 已完成  │ 未发布   │ 不支持 │
+│ editor/astronvim_v5  │ 70   │ 可执行 │ 可执行  │ 不支持 │ 可执行 │ 可执行  │ 未发布   │ 已完成 │
+└──────────────────────┴──────┴────────┴─────────┴────────┴────────┴─────────┴──────────┴────────┘
 ```
 
-**只有两列能力**（`build` / `install`）：**发布和下载不再是项目的能力** ——
-它们是全项目一样的引擎命令（`pack-release` / `publish-release` / `download-release` /
-`unpack-release`），所以 `download` / `publish` 两列已经删掉（ADR-023）。
-（本地发布历史仍在 `$WTOOL_STATE/<id>/publish.tsv` 里，`--verbose` 会打出来。）
+**列名 = 引擎命令**（表下面有一行图例）：`build`=`wtool build`、`install`=`wtool install`、
+`sudo`=`wtool sudo-install`、`pack`=`wtool pack-release`、`publish`=`wtool publish-release`、
+`download`=`wtool download-release`、`layer`=`wtool layer-save / layer-load /
+unpack-layer / push-layer / pull-layer`。
 
-**格子语义：四种状态，各带一个颜色。** 用的是方框字符而不是 ASCII ——
-表格由 `render_table()` 按 CJK 双宽对齐算列宽，终端里不会错位。
+> ⚠️ 这一条**不改 ADR-0023**：项目脚本仍然只有 `build.sh` / `install.sh`（那是"项目能力"）；
+> 看板多出来的列是**引擎的**命令，逐项目地摆出来是为了让人一眼看到"这个项目还能做什么"。
+
+**格子语义：五种状态，各带一个颜色。** 方框字符 + CJK 双宽对齐在 `render_dashboard()`
+里算（终端里不会错位）；颜色只是辅助，`--color=never` 或色盲用户看到的仍然可读。
 
 | 状态 | 颜色 | 含义 |
 |---|---|---|
 | `不支持` | 红 | 这个项目没有这项能力 |
 | `可执行` | 黄 | 有能力，现在就能跑 |
 | `待产出` | 蓝 | 能力有，但 **`output/` 还是空的**：先 `wtool build`，或者 `download-release` + `unpack-release` |
-| `已完成` | 绿 | 跑过了（`build` / `install` 各自的账） |
+| `已完成` | 绿 | 跑过了（各自的账：`actions.tsv` / `journal.tsv` / `publish.tsv` / `layer/`） |
+| `未发布` | 紫 | `download` 专有：仓库里**没有** `scripts/release.json`（还没发布过）—— 和"待产出"不是一回事 |
 
-> 这四种是**文字**不是符号，而且颜色只是辅助 —— 管道里（`--color=never`）
-> 或色盲用户看到的仍然是可读的。早先版本用的是 `+ - .` 三种 ASCII 符号，
-> 已经废弃：符号要靠图例才看得懂，而"不支持"和"还没做"这两件事
-> 用一个 `.` 表示会混。
+**三个开关**：`--brief`（只打第 1 段 + 图例 + 汇总行，`wtool doctor` 和 `bootstrap` 末尾用它）、
+`--verbose`（多一段"明细"：装过什么时候、产物从哪来、发布过没）、
+`--summary`（只打一行汇总，脚本用）、`--color=auto|always|never`。
 
 ### 判定依据（只读文件，不写）
 
-| 列 | 判定 |
-|---|---|
-| **能力有无** | 项目里有没有对应的东西：<br>`build` ← `scripts/build.sh` 存在<br>`install` ← 有 `<link>`/`<zshrc>`/`<bashrc>`，或 `scripts/install.sh` 存在 |
-| **做没做过** | `$WTOOL_STATE/<id>/actions.tsv`（时间线，记 build）<br>`journal.tsv` / `registry.tsv`（install 装过 = `已完成`）<br>（`sudo-install` 也不在表里：`system.tsv` + `provisioned/` + `apt.tsv`） |
-| **待产出** | **看磁盘，不看"做过没有"**：有能力而 `<项目>/output/` 是空的 → `待产出`。判据和 `wtool install` 的前置检查是同一件事（§4.1）——所以两处永远不会一个说能装、一个说没产出 |
+| 列 | 能力有无（静态：看项目文件） | 做没做过 / 别的状态（动态：看状态目录、看磁盘） |
+|---|---|---|
+| `build` | `scripts/build.sh` 或 `build/layers.tsv` | `actions.tsv` 里有 `build` → `已完成` |
+| `install` | 有 `<link>`/`<zshrc>`/`<bashrc>`，或 `scripts/install.sh` | `journal.tsv`/`registry.tsv` 记着 → `已完成`；有 `build` 能力而 `output/` 空 → `待产出` |
+| `sudo` | 清单里有 `sysfile`/`source`/`task` | `provisioned/` mark 或 `system/` 或 `apt.tsv` → `已完成` |
+| `pack` | 永远可以（源码包谁都能打） | `release/dist.json` 在 → `已完成`；有 `build` 能力而 `output/` 空 → `待产出` |
+| `publish` | `<publish kind="none"/>` → `不支持` | `publish.tsv` 有记录 → `已完成` |
+| `download` | 仓库里提交了 `scripts/release.json` | 产物来自下载（`artifacts.tsv`）→ `已完成`；没提交声明 → `未发布` |
+| `layer` | `build/layers.tsv` 在 | `layer/<target>/index.json` 在 → `已完成` |
+
+**`待产出` 永远是"看磁盘，不看做过没有"**：有能力而 `<项目>/output/` 是空的 → `待产出`。
+判据和 `wtool install` 的前置检查是同一件事（§4.1）——所以两处永远不会一个说能装、一个说没产出。
 
 **"文件存在即能力声明"**：新建一个空的 `scripts/build.sh` 会让那一列
 立刻从「不支持」变成「可执行」。这是有意的 —— 能力由项目自己声明，
@@ -870,7 +889,8 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 填格子时先看能力，没有能力就是「不支持」；有能力再看状态：
 装过 → `已完成`，否则 `output/` 空且有 `build.sh` → `待产出`，其余 → `可执行`。
 
-`--verbose` 加逐项目细节，`--summary` 只打汇总行。
+`--brief` 只要第 1 段 + 图例 + 汇总行（`wtool doctor` / `bootstrap` 末尾用）；
+`--verbose` 再加一段"明细"；`--summary` 只打汇总行（脚本用）；
 `--color=auto|always|never` 控制颜色，管道里自动关。
 
 ---

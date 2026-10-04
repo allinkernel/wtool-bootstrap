@@ -1460,14 +1460,19 @@ LBL_NONE = "不支持"
 LBL_TODO = "待产出"
 LBL_CAN = "可执行"
 LBL_DONE = "已完成"
+# 第 5 个标签：项目还没发布过（仓库里没有 scripts/release.json）——
+# 它和"待产出"不是一回事：产出是本机的事，发布是另一台机器上的事。
+LBL_UNPUB = "未发布"
 
 C_RED = "\033[31m"
 C_YELLOW = "\033[33m"
 C_GREEN = "\033[32m"
 C_BLUE = "\033[34m"
+C_MAGENTA = "\033[35m"
 C_OFF = "\033[0m"
 
-_LBL_COLOR = {LBL_NONE: C_RED, LBL_TODO: C_BLUE, LBL_CAN: C_YELLOW, LBL_DONE: C_GREEN}
+_LBL_COLOR = {LBL_NONE: C_RED, LBL_TODO: C_BLUE, LBL_CAN: C_YELLOW,
+              LBL_DONE: C_GREEN, LBL_UNPUB: C_MAGENTA}
 
 
 def _state_cell(state, color_on):
@@ -1549,10 +1554,333 @@ def project_caps(path, pub):
             for k, v in states.items()}
 
 
-def render_table(root, state_dir, verbose=False, color=None):
-    """画表格。返回 (文本行列表, 项目列表)。
+def _box(headers, rows, aligns=None):
+    """带表框的小表格。格子里的 ANSI 转义不占宽度，CJK 占两格，都得算对。"""
+    n = len(headers)
+    widths = [_width(_strip_ansi(h)) for h in headers]
+    for r in rows:
+        for i in range(n):
+            w = _width(_strip_ansi(r[i] if i < len(r) else ""))
+            if w > widths[i]:
+                widths[i] = w
 
-    带表框。CJK 是双宽字符，ANSI 转义不占宽度，两者都得算对，否则框会歪。
+    def _row(cells):
+        out = ["\u2502"]
+        for i, w in enumerate(widths):
+            c = cells[i] if i < len(cells) else ""
+            pad = " " * (w - _width(_strip_ansi(c)))
+            a = aligns[i] if aligns and i < len(aligns) else "l"
+            if a == "r":
+                body = pad + c
+            elif a == "c":
+                left = " " * ((w - _width(_strip_ansi(c))) // 2)
+                body = left + c + (" " * (w - _width(_strip_ansi(c)) - len(left)))
+            else:
+                body = c + pad
+            out.append(" " + body + " \u2502")
+        return "".join(out)
+
+    def _rule(l, m, r):
+        return l + m.join("\u2500" * (w + 2) for w in widths) + r
+
+    out = [_rule("\u250c", "\u252c", "\u2510"), _row(headers),
+           _rule("\u251c", "\u253c", "\u2524")]
+    for r in rows:
+        out.append(_row(r))
+    out.append(_rule("\u2514", "\u2534", "\u2518"))
+    return out
+
+
+def _clip(text, limit):
+    """按显示宽度截断（给"说明"列用）：超了加一个省略号。"""
+    text = text or ""
+    if _width(text) <= limit:
+        return text
+    out, w = "", 0
+    for ch in text:
+        cw = _width(ch)
+        if w + cw > limit - 1:
+            break
+        out += ch
+        w += cw
+    return out + "\u2026"
+
+
+def _manifest_entries(path):
+    """解析项目清单，返回 (meta, entries)；没有 wtool.xml 就 (None, [])。"""
+    wf = os.path.join(path, "wtool.xml")
+    if not os.path.isfile(wf):
+        return None, []
+    errors = []
+    meta, entries = parse_manifest(wf, path, errors)
+    return meta, entries
+
+
+def _layer_layouts(path):
+    """`layer/<target>/index.json` 有几个（>0 说明这台机器上已经有层了）。"""
+    root = os.path.join(path, "layer")
+    n = 0
+    try:
+        for name in os.listdir(root):
+            if os.path.isfile(os.path.join(root, name, "index.json")):
+                n += 1
+    except OSError:
+        return 0
+    return n
+
+
+def command_states(path, pub, st, state_dir):
+    """看板第 1 段：**每个项目能跑哪些引擎命令、现在到哪一步**。
+
+    列就是引擎里逐项目的那几条命令（不是项目脚本的能力 —— 那是 ADR-023 管的事）：
+
+      build            wtool build
+      install          wtool install
+      sudo             wtool sudo-install
+      pack             wtool pack-release
+      publish          wtool publish-release
+      download         wtool download-release
+      layer            wtool layer-save / layer-load / unpack-layer / push-layer / pull-layer
+
+    格子取值：不支持 / 可执行 / 待产出 / 已完成 / 未发布（都定义在 LBL_*）。
+    """
+    def _script(name):
+        return (os.path.isfile(os.path.join(path, "scripts", name))
+                or os.path.isfile(os.path.join(path, name)))
+
+    _meta, entries = _manifest_entries(path)
+    kinds = {e.kind for e in entries}
+    acts = st.get("actions") or {}
+    out = {}
+
+    has_build = _script("build.sh") or os.path.isfile(
+        os.path.join(path, "build", "layers.tsv"))
+
+    # build
+    if not has_build:
+        out["build"] = LBL_NONE
+    elif "build" in acts:
+        out["build"] = LBL_DONE
+    else:
+        out["build"] = LBL_CAN
+
+    # install：和 `wtool install` 的判据同一件事（声明面 + output/ 在不在）
+    if not (_script("install.sh") or bool(kinds & {"link", "env"})):
+        out["install"] = LBL_NONE
+    elif st.get("installed"):
+        out["install"] = LBL_DONE
+    elif has_build and not _has_output(path):
+        out["install"] = LBL_TODO
+    else:
+        out["install"] = LBL_CAN
+
+    # sudo-install：清单里得有系统层声明（sysfile / source / task）
+    if not (kinds & {"sysfile", "source", "task"}):
+        out["sudo"] = LBL_NONE
+    elif st.get("provisioned") or os.path.isfile(
+            os.path.join(state_dir, st["id"], "apt.tsv")):
+        out["sudo"] = LBL_DONE
+    else:
+        out["sudo"] = LBL_CAN
+
+    # pack-release：源码包谁都能打；有 build 能力的要等 output/
+    if os.path.isfile(os.path.join(path, "release", "dist.json")):
+        out["pack"] = LBL_DONE
+    elif has_build and not _has_output(path):
+        out["pack"] = LBL_TODO
+    else:
+        out["pack"] = LBL_CAN
+
+    # publish-release：<publish kind="none"/> 的项目不发布
+    if (pub or {}).get("kind") == "none":
+        out["publish"] = LBL_NONE
+    elif st.get("published"):
+        out["publish"] = LBL_DONE
+    else:
+        out["publish"] = LBL_CAN
+
+    # download-release：要仓库里**提交了** scripts/release.json 才有东西可下
+    if not os.path.isfile(os.path.join(path, "scripts", "release.json")):
+        out["download"] = (LBL_NONE if (pub or {}).get("kind") == "none"
+                           else LBL_UNPUB)
+    elif st.get("artifact_source") == "download":
+        out["download"] = LBL_DONE
+    else:
+        out["download"] = LBL_CAN
+
+    # layer-*：只有声明了 build/layers.tsv 的项目才有层
+    if not os.path.isfile(os.path.join(path, "build", "layers.tsv")):
+        out["layer"] = LBL_NONE
+    elif _layer_layouts(path):
+        out["layer"] = LBL_DONE
+    else:
+        out["layer"] = LBL_CAN
+
+    return out
+
+
+DASH_COLS = [("build", "build"), ("install", "install"), ("sudo", "sudo"),
+             ("pack", "pack"), ("publish", "publish"),
+             ("download", "download"), ("layer", "layer")]
+
+
+def _hdr(title):
+    """一段的标题行。长度固定，免得跟着表格宽度变来变去。"""
+    bar = "\u2500" * 72
+    return ["", bar, " " + title, bar]
+
+
+def _section_command_table(projects, color):
+    rows = []
+    for p in projects:
+        cells = [p["id"], str(p["prio"])]
+        for key, _h in DASH_COLS:
+            cells.append(p["cmds"][key])
+        rows.append(cells)
+    headers = ["项目", "prio"] + [h for _k, h in DASH_COLS]
+    plain = [[_strip_ansi(c) for c in r] for r in rows]
+    colored = [r[:2] + [_state_cell(v, color) for v in r[2:]] for r in rows]
+    widths = [_width(h) for h in headers]
+    for r in plain:
+        for i, c in enumerate(r):
+            widths[i] = max(widths[i], _width(c))
+    body = []
+    for pr, cl in zip(plain, colored):
+        body.append([cl[i] + " " * (widths[i] - _width(pr[i])) for i in range(len(cl))])
+    return _box(headers, body, aligns=["l", "r"] + ["c"] * len(DASH_COLS))
+
+
+def _section_install(projects, verbose):
+    rows = []
+    for p in projects:
+        if p["cmds"]["install"] == LBL_NONE:
+            continue
+        if p["installed"]:
+            state = LBL_DONE
+        elif p["cmds"]["install"] == LBL_TODO:
+            state = LBL_TODO
+        else:
+            state = LBL_CAN
+        if p["cmds"]["install"] == LBL_TODO:
+            what = "要先产出 output/：wtool build，或 wtool download-release + wtool unpack-release"
+        else:
+            bits = []
+            if p["n_link"]:
+                bits.append("%d 条软链" % p["n_link"])
+            if p["n_env"]:
+                bits.append("%d 个 shell 块" % p["n_env"])
+            if p["has_install_script"]:
+                bits.append("scripts/install.sh")
+            what = "、".join(bits) if bits else "（没声明要装什么）"
+            if p["installed"] and verbose and p["installed_at"]:
+                what += "；装过（%s）" % p["installed_at"]
+        rows.append([p["id"], state, _clip(what, 60)])
+    return rows
+
+
+def _section_sudo(projects, verbose):
+    rows = []
+    for p in projects:
+        if p["cmds"]["sudo"] == LBL_NONE:
+            continue
+        state = LBL_DONE if p["cmds"]["sudo"] == LBL_DONE else LBL_CAN
+        bits = []
+        if p["n_sysfile"]:
+            bits.append("%d 个系统文件" % p["n_sysfile"])
+        if p["n_task"]:
+            d = "、".join(_clip(x, 18) for x in p["task_descs"][:2])
+            bits.append("%d 个任务%s" % (p["n_task"], ("（%s）" % d) if d else ""))
+        if p["n_source"]:
+            bits.append("%d 个源码树" % p["n_source"])
+        what = "、".join(bits) if bits else "（没声明要装什么）"
+        if verbose and p["sudo_when"]:
+            what += "；跑过（%s）" % p["sudo_when"]
+        rows.append([p["id"], state, _clip(what, 60)])
+    return rows
+
+
+def _section_bootstrap(projects, verbose):
+    rows = []
+    i = 0
+    for p in projects:
+        if p["cmds"]["build"] == LBL_CAN and not _has_output(p["path"]):
+            state, what = "跳过", "要先产出 output/（wtool build 或 download-release + unpack-release）"
+        elif p["cmds"]["install"] == LBL_NONE:
+            i += 1
+            state, what = "会跑", "没声明要装什么 —— 只登记一条中转软链（install 对它是空操作）"
+        elif p["installed"]:
+            i += 1
+            state, what = "重装", "已装过；重装是幂等的（没变就不动）"
+        else:
+            i += 1
+            state, what = "会装", "本机用户层（不要 sudo、不联网）"
+        rows.append([str(i) if state != "跳过" else "-", p["id"], state, _clip(what, 58)])
+    return rows
+
+
+def _section_sudo_bootstrap(projects, verbose):
+    rows = []
+    i = 0
+    for p in projects:
+        if p["cmds"]["sudo"] == LBL_NONE:
+            continue
+        i += 1
+        state = "重跑" if p["cmds"]["sudo"] == LBL_DONE else "会跑"
+        what = "系统层：apt 包 / /etc 下的文件 / 任务（可能要 sudo、要联网）"
+        if state == "重跑":
+            what = "跑过；重跑靠 marker 幂等"
+        rows.append([str(i), p["id"], state, _clip(what, 58)])
+    return rows
+
+
+INSTALL_PIC = [
+    "  install",
+    "  -------",
+    "      route 1:  wtool build -----------------+",
+    "                                              +-->  output/  --+",
+    "      route 2:  wtool download-release ------+                 |",
+    "                  wtool unpack-release ------+                 |",
+    "                                                               v",
+    "                                                    wtool install     (never sudo / never network)",
+    "                                                               |",
+    "                                                               v",
+    "                                                    ~/.wtool/         (mirror of $HOME)",
+    "                                                               |",
+    "                                     read wtool.xml -----------+---->  symlinks in $HOME",
+    "                                                                       $HOME/x  -->  ~/.wtool/x",
+]
+
+RELEASE_PIC = [
+    "  release",
+    "  -------",
+    "      output/  --( wtool pack-release )-->  release/  --( wtool publish-release )-->  GitHub Release",
+    "                                                 ^                                          |",
+    "                                                 +--( wtool unpack-release )<--( wtool download-release )",
+]
+
+README_TEXT = [
+    "  流水线：产出 → install，前面的没做后面的跑不起来。",
+    "  产出有两条路：wtool build，或者 wtool download-release + wtool unpack-release。",
+    "  前置没做时 install 会直接报错告诉你去跑哪条，不会替你跑。",
+    "  （发布和下载不是「项目能力」，是引擎统一做的 —— 见 harness/docs/adr/0023。）",
+]
+
+
+def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
+    """看板：五段表格 + 一段说明 + 两张图。返回 (文本行列表, 项目列表)。
+
+    段（2026-09-29 用户要求：`wtool` 第一屏要把**所有逐项目的命令**摆出来，
+    而不是只有 build / install 两列）：
+
+      1. 能力表     每个项目能跑哪些命令、走到哪一步了
+      2. install    `wtool install` 能装哪些项目、装过没
+      3. sudo-install  `wtool sudo-install` 能装哪些项目、跑过没、会装什么
+      4. bootstrap  `wtool bootstrap` 这次会装哪些、按什么顺序、谁会被跳过
+      5. sudo-bootstrap  `wtool sudo-bootstrap` 这次会跑哪些
+      然后才是流水线说明和两张图（安装 / 发布）
+
+    brief=True 只打第 1 段 + 图例 + 汇总行（给 `wtool doctor` 和 bootstrap 末尾用，
+    那里不需要再看一遍计划）。
     """
     state_dir = os.path.abspath(state_dir)
     if color is None:
@@ -1561,84 +1889,106 @@ def render_table(root, state_dir, verbose=False, color=None):
     projects = []
     for prio, pid, path, pub in scan_projects(root, manifests_only=True):
         st = project_state(path, state_dir, root=root)
-        st["id"] = pid
         st["prio"] = prio
         st["path"] = path
         st["pub"] = pub
+        st["cmds"] = command_states(path, pub, st, state_dir)
         st["cells"] = pipeline_states(path, pub, st)
 
-        # provision 的适用性仍然看清单里有没有那几类条目
-        errors, entries = [], []
-        wf = os.path.join(path, "wtool.xml")
-        if os.path.isfile(wf):
-            _m, entries = parse_manifest(wf, path, errors)
-        st["cap_prov"] = bool({e.kind for e in entries} & {"sysfile", "source", "task"})
+        _meta, entries = _manifest_entries(path)
+        st["n_link"] = sum(1 for e in entries if e.kind == "link")
+        st["n_env"] = sum(1 for e in entries if e.kind == "env")
+        st["n_sysfile"] = sum(1 for e in entries if e.kind == "sysfile")
+        st["n_source"] = sum(1 for e in entries if e.kind == "source")
+        st["n_task"] = sum(1 for e in entries if e.kind == "task")
+        st["task_descs"] = [e.desc or e.src or "-" for e in entries if e.kind == "task"]
+        st["has_install_script"] = (
+            os.path.isfile(os.path.join(path, "scripts", "install.sh"))
+            or os.path.isfile(os.path.join(path, "install.sh")))
+
+        # 装过 / sudo 跑过的时间：查得到就写出来
+        st["installed_at"] = ""
+        for row in _read_tsv(os.path.join(state_dir, st["id"], "meta.tsv")):
+            if len(row) >= 2 and row[0] == "installed_at":
+                st["installed_at"] = row[1][:16]
+        st["sudo_when"] = st["actions"].get("provision", "")[:16]
         projects.append(st)
 
-    headers = ["项目", "prio", "build", "install"]
-    keys = [None, None, "build", "install"]
+    projects.sort(key=lambda p: (p["prio"], p["id"]))
 
-    # 列宽：表头和数据里最宽的那个（按显示宽度算）
-    widths = []
-    for i, h in enumerate(headers):
-        w = _width(h)
-        if keys[i]:
-            w = max(w, max([_width(v) for v in _LBL_COLOR] or [0]))
-        if i == 0:
-            w = max([w] + [_width(p["id"]) for p in projects])
-        widths.append(w)
+    out = []
+    out += _hdr("1. 每个项目能跑哪些命令（引擎里逐项目的那些）")
+    out += _section_command_table(projects, color)
+    out.append("")
+    out.append("  列名 = 引擎命令：build=wtool build   install=wtool install   sudo=wtool sudo-install")
+    out.append("                 pack=wtool pack-release   publish=wtool publish-release")
+    out.append("                 download=wtool download-release   layer=wtool layer-*")
+    out.append("  格子：%s 这个项目没这项能力   %s 现在就能跑   %s 要先产出 output/   %s 跑过了   %s 还没发布过"
+               % (LBL_NONE, LBL_CAN, LBL_TODO, LBL_DONE, LBL_UNPUB))
+    out.append("")
+    out.append(table_summary(projects))
 
-    def _row(cells_plain, cells_colored):
-        """一格一格拼，宽度按**去掉 ANSI 之后**的可见宽度算。"""
-        out = ["\u2502"]
-        for plain, colored, w in zip(cells_plain, cells_colored, widths):
-            out.append(" " + colored + " " * (w - _width(plain)) + " \u2502")
-        return "".join(out)
+    if brief:
+        return out, projects
 
-    top = "\u250c" + "\u252c".join("\u2500" * (w + 2) for w in widths) + "\u2510"
-    mid = "\u251c" + "\u253c".join("\u2500" * (w + 2) for w in widths) + "\u2524"
-    bot = "\u2514" + "\u2534".join("\u2500" * (w + 2) for w in widths) + "\u2518"
+    out += _hdr("2. wtool install —— 能装哪些项目、装过没")
+    rows = _section_install(projects, verbose)
+    if rows:
+        out += _box(["项目", "状态", "会做什么"], rows, aligns=["l", "c", "l"])
+    _none = [p["id"] for p in projects if p["cmds"]["install"] == LBL_NONE]
+    out.append("  没有列出来的项目 = 没声明要装什么（既没有 scripts/install.sh，也没有 <link>/<zshrc>）：%s"
+               % ("、".join(_none) if _none else "（无）"))
 
-    out = [top]
-    out.append(_row(headers, headers))
-    out.append(mid)
-    for p in projects:
-        plain = [p["id"], str(p["prio"])] + [p["cells"][k] for k in keys[2:]]
-        colored = [p["id"], str(p["prio"])] + [
-            _state_cell(p["cells"][k], color) for k in keys[2:]
-        ]
-        out.append(_row(plain, colored))
-    out.append(bot)
+    out += _hdr("3. wtool sudo-install —— 能装哪些项目、跑过没")
+    rows = _section_sudo(projects, verbose)
+    if rows:
+        out += _box(["项目", "状态", "会装什么"], rows, aligns=["l", "c", "l"])
+    else:
+        out.append("  （没有项目声明系统层）")
+    out.append("  提示：这一步可能要 sudo、要联网；和 wtool install 是两条独立的路")
+
+    out += _hdr("4. wtool bootstrap —— 这次会装哪些、什么顺序")
+    out += _box(["#", "项目", "这次", "说明"], _section_bootstrap(projects, verbose),
+                aligns=["r", "l", "c", "l"])
+    out.append("  bootstrap = 逐个 wtool install（不做系统层、不联网）；需要先产出的会跳过")
+
+    out += _hdr("5. wtool sudo-bootstrap —— 这次会跑哪些")
+    rows = _section_sudo_bootstrap(projects, verbose)
+    if rows:
+        out += _box(["#", "项目", "这次", "说明"], rows, aligns=["r", "l", "c", "l"])
+    else:
+        out.append("  （没有项目声明系统层）")
+    out.append("  sudo-bootstrap = 逐个 wtool sudo-install")
 
     if verbose:
-        out.append("")
+        out += _hdr("6. 明细（装过什么时候、产物从哪来、发布过没）")
         for p in projects:
-            detail = []
-            # 表格里只有状态标签，这里补"什么时候装的"这类查得到的细节
+            bits = []
             if p["installed"]:
-                _meta = os.path.join(state_dir, p["id"], "meta.tsv")
-                _when = ""
-                for row in _read_tsv(_meta):
-                    if len(row) >= 2 and row[0] == "installed_at":
-                        _when = "（%s）" % row[1][:16]
-                detail.append("装过%s" % _when)
+                bits.append("装过%s" % ("（%s）" % p["installed_at"] if p["installed_at"] else ""))
             if p["artifact_source"]:
-                detail.append("当前产物来自 %s" % p["artifact_source"])
-            if p["cap_prov"]:
+                bits.append("产物来自 %s" % p["artifact_source"])
+            if p["cmds"]["sudo"] == LBL_DONE:
                 d = []
                 if p["markers"]:
                     d.append("%d 个 marker" % p["markers"])
                 if p["sysfiles"]:
                     d.append("%d 个系统文件" % p["sysfiles"])
-                detail.append("sudo-install: " + ("、".join(d) if d else "没跑过"))
-            if p["pub"]["kind"] == "none":
-                detail.append("不发布")
+                bits.append("系统层跑过" + ("（%s）" % "、".join(d) if d else ""))
+            if (p["pub"] or {}).get("kind") == "none":
+                bits.append("不发布")
             elif p["published"]:
-                recs = _read_tsv(os.path.join(state_dir, p["id"], "publish.tsv"))
-                when = recs[-1][2] if recs and len(recs[-1]) > 2 else "?"
-                detail.append("发布过（%s）" % when)
-            out.append("  %-*s  %s" % (widths[0], p["id"], "；".join(detail)))
+                bits.append("发布过")
+            if os.path.isfile(os.path.join(p["path"], "scripts", "release.json")):
+                bits.append("有下载声明")
+            out.append("  %-22s %s" % (p["id"], "；".join(bits) if bits else "（还没有动作）"))
 
+    out += [""]
+    out += README_TEXT
+    out += [""]
+    out += INSTALL_PIC
+    out += [""]
+    out += RELEASE_PIC
     return out, projects
 
 
@@ -3138,6 +3488,8 @@ def build_parser():
     # "项目提供了脚本"和"引擎通用机制能办"的区别只在颜色上
     tb.add_argument("--color", choices=("auto", "always", "never"), default="auto")
     tb.add_argument("--summary", action="store_true")
+    # --brief：只打能力表 + 图例 + 汇总行（`wtool doctor` 和 bootstrap 末尾用）
+    tb.add_argument("--brief", action="store_true")
     return p
 
 
@@ -3251,13 +3603,26 @@ def main(argv):
                 _color = False
             else:
                 _color = None
-            lines, projects = render_table(args.root, args.state,
-                                           verbose=args.verbose, color=_color)
-            for line in lines:
-                print(line)
-            if args.summary:
-                print()
+            if args.brief:
+                # 只打能力表 + 图例 + 汇总行（doctor / bootstrap 末尾用）
+                lines, _projects = render_dashboard(
+                    args.root, args.state, verbose=False, color=_color, brief=True)
+                for line in lines:
+                    print(line)
+            elif args.summary and not args.verbose:
+                # `--summary` 单独用 = 只要那一行汇总（脚本用；doctor 走 --brief）
+                projects = []
+                for prio, pid, path, pub in scan_projects(args.root, manifests_only=True):
+                    st = project_state(path, args.state, root=args.root)
+                    st["prio"], st["path"], st["pub"] = prio, path, pub
+                    st["cells"] = pipeline_states(path, pub, st)
+                    projects.append(st)
                 print(table_summary(projects))
+            else:
+                lines, _projects = render_dashboard(
+                    args.root, args.state, verbose=args.verbose, color=_color)
+                for line in lines:
+                    print(line)
         elif args.cmd == "validate":
             errors, warnings = [], []
             root = os.path.abspath(args.project)

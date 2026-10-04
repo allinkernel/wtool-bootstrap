@@ -86,6 +86,12 @@ cat <<'TIP'
 
   第一条会自动认系统、认缺什么包、认要不要接代理 —— 不用你操心。
   想看它到底干了什么：./install.sh --dry-run
+
+  ⚠️ apt 的锁：**别同时开两个都用这个 apt 卷的容器**（`-v wtool-apt-cache:/var/cache/apt`），
+     一边在装、另一边 apt 就会报 "Could not get lock ... held by process 0"
+     （0 = 占用者在另一个容器里，看不出来是谁）。真撞上了：docker ps 看谁在跑，
+     等它跑完；确认没有活着的 apt 之后才清：
+       rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
   ────────────────────────────────────────────────────────────
 
 TIP

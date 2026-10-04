@@ -67,7 +67,7 @@ C_DONE=$(printf '\033[32m已完成\033[0m')
 # 两个项目之间只差磁盘上有没有东西，这就是新判据的全部。
 # --------------------------------------------------------------------------
 mkdir -p "$WS/declarative" "$WS/nowhere" "$WS/legacy" "$WS/outer/inner" \
-         "$WS/ready/output"
+         "$WS/ready/output" "$WS/needsudo/provision"
 
 # 有 build.sh + install.sh 的项目（脚本内容无所谓：表格只问"在不在"）
 mkbuildable() {   # <项目目录>
@@ -108,6 +108,16 @@ cat > "$WS/ready/wtool.xml" <<'EOF'
 <wtool schema="1" id="ready" priority="28"/>
 EOF
 
+# 声明了系统层的项目：sudo 那格该是"可执行"，第 3/5 段该列出它
+cat > "$WS/needsudo/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="needsudo" priority="35">
+  <sudo-install kind="apt-mirror" mirror="ustc" dest="auto" desc="换源"/>
+  <sudo-install src="provision/packages.yaml" marker="apt-base" desc="基础软件包"/>
+</wtool>
+EOF
+printf -- '- hosts: localhost\n' > "$WS/needsudo/provision/packages.yaml"
+
 # 什么都没有：两列都该是"不支持"（红）
 cat > "$WS/nowhere/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -140,16 +150,20 @@ cat > "$WS/outer/inner/wtool.xml" <<'EOF'
 EOF
 
 tbl() { env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S" "$@"; }
+# 看板有好几张表，取列的时候只能看**第 1 张**（能力表），
+# 否则后面几段里同名的项目行会把 awk 匹配走。
+tbl1() { tbl "$@" | awk 'BEGIN{n=0} /^┌/{n++} n==1{print}'; }
 # 取某一行的某一列。列都是带颜色的中文词，用 awk 字段切最省事。
 # 表格带边框，所以 awk 的字段是：
-#   $1=│ $2=id $3=│ $4=prio $5=│ $6=build $7=│ $8=install
+#   $1=│ $2=id $3=│ $4=prio $5=│ $6=build $7=│ $8=install $10=sudo $12=pack
+#   $14=publish $16=download $18=layer
 # 第 n 列 = $(2*n)
-cell() {   # <项目 id> <列号 3..4>
-    tbl --color=always | awk -v id="$1" -v c="$2" '$2 == id {print $(2 * c); exit}'
+cell() {   # <项目 id> <列号 3..9>
+    tbl1 --color=always | awk -v id="$1" -v c="$2" '$2 == id {print $(2 * c); exit}'
 }
 # 某一列等于某个标签的那些行，按 id 排好（用来一次比对一整组，比数个数更严）
 ids_where() {   # <列号> <带色标签>
-    tbl --color=always | awk -v c="$1" -v v="$2" '$(2 * c) == v {print $2}' \
+    tbl1 --color=always | awk -v c="$1" -v v="$2" '$(2 * c) == v {print $2}' \
         | LC_ALL=C sort
 }
 count_where() { ids_where "$@" | wc -l | tr -d ' '; }
@@ -226,8 +240,8 @@ echo "== 4. 嵌套项目的 id 相对工作区根算 =="
 # 那个变量没 export，读不到就退化成 basename，outer/inner 被当成 inner，
 # 跟状态目录对不上，已装过的项目在表里显示成没装过。
 chk "outer/inner 是自己一行" \
-    "$(tbl | awk '$2 == "outer/inner" {print $2}')" "outer/inner"
-chk "outer 也还在" "$(tbl | awk '$2 == "outer" {print $2}')" "outer"
+    "$(tbl1 | awk '$2 == "outer/inner" {print $2}')" "outer/inner"
+chk "outer 也还在" "$(tbl1 | awk '$2 == "outer" {print $2}')" "outer"
 
 echo "== 5. 状态只在 --verbose 里出现，不影响能力格子 =="
 mkdir -p "$S/declarative"
@@ -263,7 +277,7 @@ chk "publish-list 也一样（两边判据必须一致）" \
     "$(env -u WTOOL_ROOT python3 "$PY" publish-list --root "$WS2" | awk -F'\t' '$2 == "deep/bbb" {print $2}')" ""
 
 echo "== 8. 列对齐（CJK 双宽 + ANSI 转义不能算进宽度）=="
-if tbl | python3 -c '
+if tbl1 | python3 -c '
 import re, sys
 
 ANSI = re.compile("\033\\[[0-9;]*m")
@@ -293,14 +307,68 @@ else
     bad "有行前缀区没填满（列会错位）"
 fi
 
-echo "== 9. 表头就这四列：项目 / prio / build / install =="
-for col in 项目 prio build install; do
-    tbl | sed -n 2p | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
+echo "== 9. 表头：逐项目的引擎命令都要在（2026-09-29 用户要求）=="
+# 以前只有 build / install 两列 —— 用户看不到 sudo-install / pack-release 这些
+# 同样是"逐项目"的命令。现在七列：build install sudo pack publish download layer。
+for col in 项目 prio build install sudo pack publish download layer; do
+    tbl1 --color=never | sed -n 2p | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
 done
-# 旧的两列必须**不在**：download / publish 已经退休（发布归引擎，见 ADR-023）
-for col in download publish; do
-    tbl | sed -n 2p | grep -q "$col" && bad "表头多了 $col 列" || ok "没有 $col 列"
+# 列名是缩写，就得有"列名=命令"的对照，否则等于让人猜
+for pair in "build=wtool build" "install=wtool install" "sudo=wtool sudo-install" \
+            "pack=wtool pack-release" "publish=wtool publish-release" \
+            "download=wtool download-release" "layer=wtool layer-*"; do
+    tbl --color=never | grep -qF "$pair" && ok "图例里有 $pair" || bad "图例缺 $pair"
 done
+# 「未发布」是新加的第五种格子：项目和"待产出"不是一回事（本机 vs 别人那台机器）
+tbl --color=never | grep -q '未发布' && ok "有「未发布」这个格子" || bad "缺「未发布」格子"
+
+echo "== 9b. 看板的后四段（install / sudo-install / bootstrap / sudo-bootstrap）=="
+DASH=$(tbl --color=never)
+for seg in "2. wtool install" "3. wtool sudo-install" "4. wtool bootstrap" "5. wtool sudo-bootstrap"; do
+    printf '%s\n' "$DASH" | grep -qF "$seg" && ok "有第 $seg 段" || bad "缺第 $seg 段"
+done
+printf '%s\n' "$DASH" | grep -q 'wtool install' && ok "第 2 段打了 install 能装的项目" \
+    || bad "第 2 段没内容"
+printf '%s\n' "$DASH" | grep -q 'needsudo' && ok "sudo-install 段列出了声明系统层的项目" \
+    || bad "sudo-install 段是空的（needsudo 该在）"
+printf '%s\n' "$DASH" | grep -q 'sudo-bootstrap = 逐个' && ok "第 5 段说了 sudo-bootstrap 是什么" \
+    || bad "第 5 段没有说明"
+# 最后那两张图：**不许出现中文**（中文在等宽图里对不齐）
+if printf '%s\n' "$DASH" | sed -n '/^  install$/,$p' | LC_ALL=C grep -q '[^ -~]'; then
+    bad "安装/发布那两张图里出现了非 ASCII 字符"
+else
+    ok "两张图是纯 ASCII（等宽对得齐）"
+fi
+printf '%s\n' "$DASH" | grep -q 'wtool pack-release' && ok "发布了图里有 pack-release" \
+    || bad "发布图缺 pack-release"
+printf '%s\n' "$DASH" | grep -q 'read wtool.xml' && ok "安装图里有 read wtool.xml" \
+    || bad "安装图缺 wtool.xml 那一步"
+
+echo "== 9b2. sudo 那格：清单里有系统层声明才不是"不支持" =="
+chk "needsudo 声明了系统层 → sudo 可执行（黄）" "$(cell needsudo 5)" "$C_CAN"
+chk "declarative 没声明系统层 → sudo 不支持（红）" "$(cell declarative 5)" "$C_NONE"
+# 跑过一次（state 里有 marker）→ 已完成
+mkdir -p "$S/needsudo/provisioned"
+: > "$S/needsudo/provisioned/apt-base"
+chk "跑过之后 sudo 变已完成（绿）" "$(cell needsudo 5)" "$C_DONE"
+printf '2026-09-29T10:00:00+0800\tprovision\t\n' > "$S/needsudo/actions.tsv"
+DASH2=$(tbl --color=never)
+printf '%s\n' "$DASH2" | grep -q 'needsudo' && ok "第 3/5 段里有 needsudo" \
+    || bad "第 3/5 段没列出声明系统层的项目"
+printf '%s\n' "$DASH2" | grep -q '1 个系统文件' && ok "sudo 段写了会装几个系统文件" \
+    || bad "sudo 段没写系统文件数"
+printf '%s\n' "$DASH2" | grep -q '基础软件包' && ok "sudo 段带了任务说明（desc）" \
+    || bad "sudo 段没带 desc"
+printf '%s\n' "$DASH2" | grep -q '重跑' && ok "跑过的项目在第 5 段显示「重跑」（幂等）" \
+    || bad "第 5 段没体现出跑过"
+
+echo "== 9c. --brief：只给一张表（doctor / bootstrap 末尾用）=="
+BRIEF=$(tbl --brief --color=never)
+printf '%s\n' "$BRIEF" | grep -qF "1. 每个项目能跑哪些命令" && ok "--brief 有第 1 段" \
+    || bad "--brief 没有第 1 段"
+printf '%s\n' "$BRIEF" | grep -qF "2. wtool install" && bad "--brief 不该有第 2 段" \
+    || ok "--brief 只有第 1 段"
+printf '%s\n' "$BRIEF" | grep -q '共 [0-9]* 个项目' && ok "--brief 带汇总行" || bad "--brief 缺汇总行"
 
 echo "== 10. ★--summary 必须真的能跑，而且数字和表格对得上（回归）=="
 # 崩溃过一次：把 project_caps 换成 pipeline_states 时只改了 render_table，
@@ -357,14 +425,16 @@ printf '{"project":"ghost","repo":"x/y","commit":"a","view":"release","layout":"
 mkdir -p "$WS4/ghost"
 TAB11=$(env -u WTOOL_ROOT python3 "$PY" table --root "$WS4" --state "$T/state11" 2>&1)
 printf '%s\n' "$TAB11" | awk '{print "     " $0}'
+# 看板有好几张表 —— 这几条只看第 1 张（能力表）
+TAB11_1=$(printf '%s\n' "$TAB11" | awk 'BEGIN{n=0} /^┌/{n++} n==1{print}')
 chk "有 wtool.xml 的项目在表里" \
-    "$(printf '%s\n' "$TAB11" | awk '$2 == "real" {print $2}')" "real"
+    "$(printf '%s\n' "$TAB11_1" | awk '$2 == "real" {print $2}')" "real"
 chk "伞项目在表里" \
-    "$(printf '%s\n' "$TAB11" | awk '$2 == "umbrella" {print $2}')" "umbrella"
+    "$(printf '%s\n' "$TAB11_1" | awk '$2 == "umbrella" {print $2}')" "umbrella"
 chk "伞项目管的子仓库**不**单独成行" \
-    "$(printf '%s\n' "$TAB11" | awk '$2 == "umbrella/assets" {print $2}')" ""
+    "$(printf '%s\n' "$TAB11_1" | awk '$2 == "umbrella/assets" {print $2}')" ""
 chk "发布标记补全出来的项目也不成行" \
-    "$(printf '%s\n' "$TAB11" | awk '$2 == "ghost" {print $2}')" ""
+    "$(printf '%s\n' "$TAB11_1" | awk '$2 == "ghost" {print $2}')" ""
 
 echo
 printf 'table_test: PASS %d  FAIL %d\n' "$pass" "$fail"
