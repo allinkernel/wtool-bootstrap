@@ -46,10 +46,10 @@ wtool version
 wtool | head -20 || true
 
 say "3. 造一个本地项目，走完整条流水线（不联网）"
-W=$(mktemp -d); mkdir -p "$W/ws/terminal/demo/scripts" "$W/ws/terminal/demo/output/ubuntu_24.04/main/payload/usr/bin" "$W/h" "$W/st"
+W=$(mktemp -d); mkdir -p "$W/ws/terminal/demo/scripts" "$W/ws/terminal/demo/__output/ubuntu_24.04/main/payload/usr/bin" "$W/h" "$W/st"
 P="$W/ws/terminal/demo"
 printf '#!/bin/sh\ntrue\n' > "$P/scripts/build.sh"
-printf 'hello\n' > "$P/output/ubuntu_24.04/main/payload/usr/bin/demo"; chmod +x "$P/output/ubuntu_24.04/main/payload/usr/bin/demo"
+printf 'hello\n' > "$P/__output/ubuntu_24.04/main/payload/usr/bin/demo"; chmod +x "$P/__output/ubuntu_24.04/main/payload/usr/bin/demo"
 printf 'demo=1\n' > "$P/demo.conf"
 cat > "$P/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -57,18 +57,18 @@ cat > "$P/wtool.xml" <<'XML'
   <link home="~/.demo.conf" wtool="~/.wtool/.demo.conf" subproject="demo.conf"/>
 </wtool>
 XML
-printf 'output/\nrelease/\n' > "$P/.gitignore"
+printf '__output/\n__release/\n__layer/\nrelease/\n' > "$P/.gitignore"   # 旧名字也留着：源码包必须两个都忽略
 git -C "$P" init -q; git -C "$P" remote add origin https://github.com/fakeowner/demo.git
 git -C "$P" add -A; git -C "$P" -c user.name=t -c user.email=t@t commit -qm init
 export WTOOL_ROOT="$W/ws" WTOOL_HOME="$W/h" WTOOL_STATE="$W/st"
 
 echo "--- 3a. pack-release ---"
 wtool pack-release terminal/demo --tag=v1
-ls -A "$P/release"
+ls -A "$P/__release"
 
-echo "--- 3b. 假装新机器：删掉 release/ 和 output/，用 release.json + file:// 发布页走 download-release ---"
-cp -f "$P"/release/*.zip "$P"/release/dist.json "$P"/release/*-hash.txt "$W/pub/" 2>/dev/null || { mkdir -p "$W/pub"; cp -f "$P"/release/*.zip "$P"/release/dist.json "$P"/release/*-hash.txt "$W/pub/"; }
-python3 - "$P/release/dist.json" "$W/pub" "$P/scripts/release.json" <<'PY'
+echo "--- 3b. 假装新机器：删掉 __release/ 和 __output/，用 release.json + file:// 发布页走 download-release ---"
+cp -f "$P"/__release/*.zip "$P"/__release/dist.json "$P"/__release/*-hash.txt "$W/pub/" 2>/dev/null || { mkdir -p "$W/pub"; cp -f "$P"/__release/*.zip "$P"/__release/dist.json "$P"/__release/*-hash.txt "$W/pub/"; }
+python3 - "$P/__release/dist.json" "$W/pub" "$P/scripts/release.json" <<'PY'
 import json, sys, hashlib, os
 dist, pub, out = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(dist, encoding="utf-8"))
@@ -85,10 +85,10 @@ json.dump({"schema": 1, "project": "terminal/demo", "repo": "fakeowner/demo",
            "declare": d.get("declare", []), "targets": [{"target":"ubuntu_24.04"}],
            "assets": assets}, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PY
-rm -rf "$P/release" "$P/output"
+rm -rf "$P/__release" "$P/__output"
 wtool download-release terminal/demo
 wtool unpack-release terminal/demo
-ls -l "$P/output/ubuntu_24.04/main/payload/usr/bin/demo"
+ls -l "$P/__output/ubuntu_24.04/main/payload/usr/bin/demo"
 
 echo "--- 3c. 表格 + dry-run + 校验 ---"
 wtool | head -12
@@ -136,7 +136,9 @@ echo "--- 而它连现成的包都还没有（BL-030）时，download 那条路�
 WTOOL_ROOT=/wtool wtool download-release editor/astronvim_v5 --dry-run 2>&1 | head -8 || true
 
 say "3g. 层命令在没有 docker 的机器上的说法"
-wtool layer-save terminal/demo --image=whatever 2>&1 | head -2 || true
+wtool _layer-save terminal/demo --image=whatever 2>&1 | head -2 || true
+echo "--- 老名字仍然能敲，但要说明它是内部命令 ---"
+wtool layer-save terminal/demo --image=whatever 2>&1 | head -3 || true
 
 say "3h. 需求 2 的形状：install 认项目 id，也认 all"
 wtool install terminal/demo >/dev/null && echo "✅ install <项目 id> 能装" || { echo "❌ install <id> 不行"; exit 1; }

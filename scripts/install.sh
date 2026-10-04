@@ -249,15 +249,15 @@ $([ -n "$_rc" ] && printf '      # 配置写在 %s 里的那一段 loader\n' "$_
 
   wtool bootstrap 不会替你做这些决定，需要时才自己跑：
       wtool build    <项目>    自己编（小时级；声明要容器而本机没有 docker 时会直接拒绝）
-      wtool download-release <项目>   从发布页下现成的包到 release/（分钟级）
-      wtool unpack-release   <项目>   照包自带的 dist.json 校验 + 拼卷 + 解到 output/
+      wtool download-release <项目>   从发布页下现成的包到 __release/（分钟级）
+      wtool unpack-release   <项目>   照包自带的 dist.json 校验 + 拼卷 + 解到 __output/
       wtool install  <项目>    登记 + 软链 + shell 集成
       wtool uninstall --id <项目>   撤掉（只撤用户层）
       wtool sudo-uninstall <项目>|all   撤系统层（/etc 还原 + 卸掉这次装进来的 apt 包）
 
-  自己发一版（都要先提交，发布只发 release/ 里已有的东西）：
-      wtool pack-release    <项目>    output/ → release/（打包 + 分卷，不联网）
-      wtool publish-release <项目>    release/ → GitHub（只上传，成功后写 scripts/release.json）
+  自己发一版（都要先提交，发布只发 __release/ 里已有的东西）：
+      wtool pack-release    <项目>    __output/ → __release/（打包 + 分卷，不联网）
+      wtool publish-release <项目>    __release/ → GitHub（只上传，成功后写 scripts/release.json）
 
   想知道每个命令到底做什么，看 README 的第 4 节「这些脚本分别干什么」。
   ────────────────────────────────────────────────────────────

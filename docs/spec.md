@@ -48,26 +48,26 @@
   wtool sudo-bootstrap [--dry-run] [--force]
 
 产物与发布（release 四条边：本地一对 pack/unpack，远端一对 publish/download）
-  wtool build          [<项目>...|all] [--dry-run]       源码 → output/（跑 scripts/build.sh）
+  wtool build          [<项目>...|all] [--dry-run]       源码 → __output/（跑 scripts/build.sh）
   wtool pack-release   <项目>... [--tag=T] [--repo=owner/repo] [--volume-size=32M]
-                                                         output/ → release/（**不联网**）
+                                                         __output/ → __release/（**不联网**）
   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
-                        [--allow-foreign] [--out=DIR]     release/ → GitHub Release（**只上传**）
-  wtool download-release [<项目>...|all] [--dry-run]      GitHub Release → release/（**只下载**）
-  wtool unpack-release <项目>... [--from=目录]             release/ → output/（**不联网**）
+                        [--allow-foreign] [--out=DIR]     __release/ → GitHub Release（**只上传**）
+  wtool download-release [<项目>...|all] [--dry-run]      GitHub Release → __release/（**只下载**）
+  wtool unpack-release <项目>... [--from=目录]             __release/ → __output/（**不联网**）
 
 层（第二条发布通道：容器镜像仓库，详见 §14）
-  wtool layer-save   <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
-                      docker 镜像 → layer/<target>/（OCI 布局，blob 按 sha256 去重）
-  wtool layer-load   <项目> [--target=<os_ver>]
-                      layer/<target>/ → docker（接着构建 / 恢复容器）
+  wtool _layer-save   <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
+                      docker 镜像 → __layer/<target>/（OCI 布局，blob 按 sha256 去重）
+  wtool _layer-load   <项目> [--target=<os_ver>]
+                      __layer/<target>/ → docker（接着构建 / 恢复容器）
   wtool unpack-layer <项目> [--layer=<层名>] [--target=<os_ver>] [--output=<目录>]
-                      layer/<target>/ 的顶层 blob → output/<target>/<层>/。
+                      __layer/<target>/ 的顶层 blob → __output/<target>/<层>/。
                       **不联网、不要 docker**（直接读 blob）
   wtool push-layer   <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
-                      layer/<target>/ 的层镜像 → 镜像仓库（构建机上跑，用 `docker push`）
+                      __layer/<target>/ 的层镜像 → 镜像仓库（构建机上跑，用 `docker push`）
   wtool pull-layer   <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
-                      镜像仓库 → layer/<target>/。**目标机不需要 docker**，
+                      镜像仓库 → __layer/<target>/。**目标机不需要 docker**，
                       只要一个 skopeo（缺了直接报错，告诉你 `apt install skopeo`）
 
 不可逆
@@ -75,7 +75,7 @@
 ```
 
 五个层命令都认 `--dry-run`；`--registry=` 也可以由 `WTOOL_LAYER_REGISTRY` 提供。
-`layer-save` / `layer-load` / `unpack-layer` 全是本地动作（和 `pack-release`/`unpack-release`
+`_layer-save` / `_layer-load` / `unpack-layer` 全是本地动作（和 `pack-release`/`unpack-release`
 同级），**不碰网络**；只有 `pull-layer` / `push-layer` 要联网。
 两个方向用的工具**故意不一样**：push 走 `docker push`（`crane push` 推大 blob 会
 connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.json`，而且不需要 docker）。
@@ -95,8 +95,8 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 
 | 旧名字 | 现在怎么敲 | 语义变在哪 |
 |---|---|---|
-| `wtool download` | `wtool download-release` + `wtool unpack-release` | 以前一步到 `output/`；现在只把包下到 `release/`，解包是另一条命令 |
-| `wtool publish` | `wtool pack-release` + `wtool publish-release` | 以前打包 + 上传一条命令；现在只上传 `release/` 里已有的东西 |
+| `wtool download` | `wtool download-release` + `wtool unpack-release` | 以前一步到 `__output/`；现在只把包下到 `__release/`，解包是另一条命令 |
+| `wtool publish` | `wtool pack-release` + `wtool publish-release` | 以前打包 + 上传一条命令；现在只上传 `__release/` 里已有的东西 |
 
 `wtool init` 的 `--with-download` / `--with-publish` 同样取消（项目脚本只剩两种，见 §14）。
 
@@ -125,7 +125,7 @@ wtool-bootstrap/            引擎（全机器唯一一份）
 ├── wtool.sh                CLI：install / uninstall / sudo-install / sudo-uninstall /
 │                           bootstrap / sudo-bootstrap / build /
 │                           pack-release / publish-release / download-release / unpack-release /
-│                           layer-save / layer-load / unpack-layer / push-layer / pull-layer /
+│                           _layer-save / _layer-load / unpack-layer / push-layer / pull-layer /
 │                           check / repair / status / doctor / validate /
 │                           init / kill-self-forever（另有隐藏的 docs refresh）
 ├── lib/wtool_plan.py       规划器：解析清单、校验、算 rc 新内容（只写 scratch）
@@ -141,8 +141,8 @@ wtool-bootstrap/            引擎（全机器唯一一份）
 ├── scripts/                动作，**只有两种**：build.sh（怎么编）/ install.sh（怎么铺）
 │   └── release.json        下载声明（提交进仓库；publish-release 写，download-release 读）
 ├── docs/download.md        给人看的下载页（pack-release 写，进仓库）
-├── output/                 产物（.gitignore）—— **install 唯一读的目录**
-└── release/                包的中转站（.gitignore）：pack-release 的产出 + download-release 的落点
+├── __output/                 产物（.gitignore）—— **install 唯一读的目录**
+└── __release/                包的中转站（.gitignore）：pack-release 的产出 + download-release 的落点
 ```
 
 状态（不在仓库里，属于这台机器）：
@@ -166,14 +166,14 @@ $WTOOL_STATE/                       默认 ~/.local/state/wtool
 ```
 install <项目>
   │
-  ├─ sh: 前置检查（git 干净？拿到 HEAD；有 build.sh 就先要 output/）
+  ├─ sh: 前置检查（git 干净？拿到 HEAD；有 build.sh 就先要 __output/）
   │
   ├─ py plan-install ──► scratch/plan.tsv       引擎基建（中转链接 + env 块）
   │                     scratch/plan.home.tsv  声明面（$HOME 里的软链）
   │                     scratch/meta.tsv        project_id 等
   │
   └─ sh: ① 执行 plan.tsv       （中转链接 + env 块）
-         ① 跑项目 install.sh  （output/ → ~/.wtool）
+         ① 跑项目 install.sh  （__output/ → ~/.wtool）
          ② 执行 plan.home.tsv （影子 HOME → $HOME）
          ③ wt_env_sync        （汇总 + ~/usr 这条全局软链）
 ```
@@ -213,7 +213,7 @@ install <项目>
    - 在 git 工作区内且**已跟踪文件无未提交改动**（`git status --porcelain -uno`）
    - ⚠️ **不检查分支**：repo 工具默认 detached HEAD，查分支会直接卡死
    - 不在 git 工作区 → 拒绝（`--force` 可跳过，仅用于测试/临时目录）
-   - **产物检查**：项目有 `scripts/build.sh` ⟺ `output/` 必须存在且非空，
+   - **产物检查**：项目有 `scripts/build.sh` ⟺ `__output/` 必须存在且非空，
      否则拒绝，并给出两条产出路径 —— `wtool download-release` + `wtool unpack-release`（下现成的），
      或 `wtool build`（自己编）（`--force` 降级为警告）。
      理由：`install` 是断网也要能跑的，它不替你去编译或下载。
@@ -224,7 +224,7 @@ install <项目>
 3. **执行顺序（§4.2，别改回去）**：
    ```
    ① 引擎基建：中转链接 ~/.wtool/wtool-work-dir/links/<id> + 项目的 env 块
-   ① 项目自己的 scripts/install.sh：output/ → ~/.wtool
+   ① 项目自己的 scripts/install.sh：__output/ → ~/.wtool
    ② wtool.xml 的 link：~/.wtool/<wtool> → $HOME/<home>
    ③ wt_env_sync：env 汇总 + ~/usr 这条全局软链
    ```
@@ -279,7 +279,7 @@ install <项目>
 ### 全局写锁（BL-17）
 
 `registry.tsv` / `journal.tsv` / env 汇总都是"读—改—写"：两个终端同时改，
-最后落盘的那个会把前一个的条目抹掉（和 `layer/index.json` 那次是同一类问题，
+最后落盘的那个会把前一个的条目抹掉（和 `__layer/index.json` 那次是同一类问题，
 见 `harness/docs/hazards.md` H17）。所以**改状态目录的命令**统一走一把目录锁：
 
 | 谁拿锁 | `install` / `uninstall` / `bootstrap` / `sudo-install` / `sudo-uninstall` /
@@ -288,7 +288,7 @@ install <项目>
 | 锁在哪 | `$WTOOL_STATE/.lock`（目录当锁，里面写占用者的 pid） |
 | 等多久 | 默认 300 秒，`WTOOL_LOCK_TIMEOUT=<秒>` 可改；`=0` 表示立刻失败 |
 | 谁不拿锁 | `build` / `download-release` / `pack-release` 这类**长命令**（它们改的是
-`output/` 和 `layer/`，不是账本；锁一整轮构建会让人白等）和 `--dry-run`（一个字节都不写） |
+`__output/` 和 `__layer/`，不是账本；锁一整轮构建会让人白等）和 `--dry-run`（一个字节都不写） |
 | 占用者死了 | pid 检查兜底：`kill -0` 不通就把锁抢过来，**不会永久卡住** |
 | 可重入 | 拿锁的进程导出 `WTOOL_LOCK_OWNER=$$`；子进程（项目脚本里再调 `wtool`）
 看到它就既不抢锁、也不替父进程放锁 |
@@ -383,14 +383,14 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
 | sudo-install | `tests/provision_test.sh` | 40 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
 | publish | `tests/publish_test.sh` | 124 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行） |
-| table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
+| table | `tests/table_test.sh` | 89 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 62 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 124 | 新标签、两跳软链、执行顺序、output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁） |
-| docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
-| layer | `tests/layer_test.sh` | 46 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
+| contract | `tests/contract_test.sh` | 124 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁） |
+| docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
+| layer | `tests/layer_test.sh` | 46 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **612** 条断言：
+共 **627** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 10 组全跑
@@ -591,10 +591,10 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 `wtool build` 只做三件事：找 `scripts/build.sh`、**判断这台机器够不够**、把环境喂好跑它。
 
-| 声明 | `output/` 的形状 | `wtool build` 的前置判断 |
+| 声明 | `__output/` 的形状 | `wtool build` 的前置判断 |
 |---|---|---|
-| `<build kind="local"/>`（默认） | `output/<层>/…`（**没有** target 那一层） | 只查 `min-cores` / `min-mem` / `min-disk` |
-| `<build kind="docker"/>` | `output/<os>_<ver>/<层>/…` | 同上，**外加**：没有 docker 直接拒绝 |
+| `<build kind="local"/>`（默认） | `__output/<层>/…`（**没有** target 那一层） | 只查 `min-cores` / `min-mem` / `min-disk` |
+| `<build kind="docker"/>` | `__output/<os>_<ver>/<层>/…` | 同上，**外加**：没有 docker 直接拒绝 |
 
 - **拒绝发生在动手之前**：`build.sh` 一行都不会跑。理由见需求 4 —— 在一台编不了的机器上
   跑一小时再失败是最坏的体验，所以引擎读声明就知道，并给出可复制的出路
@@ -604,7 +604,7 @@ apt-get update && apt-get install -y --no-install-recommends \
 - 门槛不写就用引擎默认值（4 核 / 8G 内存 / 10G 磁盘）；`--force` 可以把门槛降级成警告，
   **但不能把"没有 docker"变成能编**
 - **形状由声明唯一确定，引擎不嗅探**：`release.json` 的 `targets[]` 就是按它算的
-  （`local` → 空；`docker` → `output/*/` 的目录名）。`local` 项目就算 `output/` 下有
+  （`local` → 空；`docker` → `__output/*/` 的目录名）。`local` 项目就算 `__output/` 下有
   `bin/`、`main/` 这样的目录，也不会被当成"发行版"
 - `WTOOL_DOCKER=<路径>` 可以指定 docker 二进制（和 `WTOOL_SKOPEO` 一个路子）
 
@@ -619,16 +619,16 @@ apt-get update && apt-get install -y --no-install-recommends \
 | `build/export.filter` | 可选。导出时丢什么，一行一个 `tar --exclude` 通配，`#` 注释 |
 | `build/system-paths` | 可选。**允许层里的软链指向包外面**的系统路径（ADR-0030）：按**路径分量**比（`/usr/bin/python` 不放行 `/usr/bin/python3`），放行了哪些记进产出事实的 `allowed_escaping`。不写 = 一条都不放行 |
 
-引擎对每一层：**没有镜像就起容器 commit → 存进 `layer/<target>/` → 从顶层 blob 导出
-`output/<target>/<层>/`**。三步的判据都是"磁盘上有没有"，所以重跑 `wtool build`
-**接着走、不重编**；`docker` 存储被 prune 掉也能从 `layer/` 装回来。
+引擎对每一层：**没有镜像就起容器 commit → 存进 `__layer/<target>/` → 从顶层 blob 导出
+`__output/<target>/<层>/`**。三步的判据都是"磁盘上有没有"，所以重跑 `wtool build`
+**接着走、不重编**；`docker` 存储被 prune 掉也能从 `__layer/` 装回来。
 
 契约文件分两半（ADR-026 §4）：
 
 | | 放哪 | 内容 |
 |---|---|---|
 | **输入指纹** | **镜像里** `/wtool-layer/layer.json`（跑命令之前写进这一层） | 基镜像 + **digest**（不只记 tag）、`build/fingerprints.tsv` 里项目声明的外部输入、源码 commit / dirty、引擎版本、时间 —— 从 registry 拉回来的层因此**能自述来历** |
-| **产出事实** | `layer/<target>/<层名>.json`（跟着层走，不提交） | `payload_files` / `payload_bytes` / `payload_sha256`（= `OWNED.tsv` 的 sha256，而它逐条记着每个文件的 sha256 / 软链目标）/ 导出时间 / 结构校验结果 |
+| **产出事实** | `__layer/<target>/<层名>.json`（跟着层走，不提交） | `payload_files` / `payload_bytes` / `payload_sha256`（= `OWNED.tsv` 的 sha256，而它逐条记着每个文件的 sha256 / 软链目标）/ 导出时间 / 结构校验结果 |
 
 事实文件就放在布局目录里 —— 实测 `docker load` **容忍**多出来的文件
 （`tar -c -C 布局 . | docker load` 照样装得上）。`build/fingerprints.tsv` 是可选的，
@@ -650,10 +650,10 @@ apt-get update && apt-get install -y --no-install-recommends \
 **release 有四条边、各一条命令**，名字就是**宾语（`release`）+ 方向**；再加上产出那条 `build`：
 
 ```
-  源码 ──wtool build──▶ output/*
+  源码 ──wtool build──▶ __output/*
                           │
               ┌── pack-release ──┐
-   output/*   │                  │   release/*  ──wtool publish-release──▶ GitHub Release
+   __output/*   │                  │   __release/*  ──wtool publish-release──▶ GitHub Release
               └── unpack-release ┘               ◀──wtool download-release──
        │
        └──wtool install──▶ ~/.wtool/* ──(按 wtool.xml)──▶ ~/*
@@ -661,24 +661,24 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 | 命令 | 从哪 | 到哪 | 要什么 |
 |---|---|---|---|
-| `wtool build` | 源码 | `output/` | 项目的 `scripts/build.sh` |
-| `wtool download-release` | GitHub Release | **`release/`** | `curl` + 项目里**提交的** `scripts/release.json` |
-| `wtool unpack-release` | `release/` | **`output/`** | 只读 `release/dist.json`，**不联网** |
-| `wtool pack-release` | `output/` | `release/` | 只读磁盘，**不联网** |
-| `wtool publish-release` | `release/` | GitHub Release | `gh` + 干净的工作区 |
+| `wtool build` | 源码 | `__output/` | 项目的 `scripts/build.sh` |
+| `wtool download-release` | GitHub Release | **`__release/`** | `curl` + 项目里**提交的** `scripts/release.json` |
+| `wtool unpack-release` | `__release/` | **`__output/`** | 只读 `__release/dist.json`，**不联网** |
+| `wtool pack-release` | `__output/` | `__release/` | 只读磁盘，**不联网** |
+| `wtool publish-release` | `__release/` | GitHub Release | `gh` + 干净的工作区 |
 
 两条铁律：
 
-- **`install` 只读 `output/`**，永远不读 `release/`；
-- **`pack-release` / `unpack-release` 是 `output/` 与 `release/` 之间唯一的搬运工。**
+- **`install` 只读 `__output/`**，永远不读 `__release/`；
+- **`pack-release` / `unpack-release` 是 `__output/` 与 `__release/` 之间唯一的搬运工。**
 
 ### 契约文件：声明进仓库，事实跟产物走
 
 | 文件 | 谁写 | 在哪 | 干什么 |
 |---|---|---|---|
 | `scripts/release.json` | `publish-release`（**上传成功之后**写） | **提交进仓库** | **下载声明**：`repo` / `tag` / `base_url` / `commit` / `dirty` / `targets` / 每个资产的 `name` + `sha256` + `bytes`（另记 `published_at` 与引擎版本）。`download-release` **唯一**要读的东西 |
-| `release/dist.json` | `pack-release` | 跟包走（**不提交**） | **这一份怎么拼**：分卷顺序、每卷 sha256、声明面清单。`unpack-release` 读它 |
-| `release/.source` | `pack-release` 写 `packed` / `download-release` 写 `downloaded` | 跟包走（**不提交**） | 内部来源标记。`publish-release` 靠它拒绝"把刚下下来的包又传回去" |
+| `__release/dist.json` | `pack-release` | 跟包走（**不提交**） | **这一份怎么拼**：分卷顺序、每卷 sha256、声明面清单。`unpack-release` 读它 |
+| `__release/.source` | `pack-release` 写 `packed` / `download-release` 写 `downloaded` | 跟包走（**不提交**） | 内部来源标记。`publish-release` 靠它拒绝"把刚下下来的包又传回去" |
 | `docs/download.md` | `pack-release` | **提交进仓库** | 给人看的下载页：这版发了什么、直链在哪 |
 
 `scripts/downloads.sh` **没有了**：那份"这次发了什么"的清单归 `scripts/release.json`。
@@ -701,8 +701,8 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 | 脚本 | 谁跑 | 契约 |
 |---|---|---|
-| `scripts/build.sh` | `wtool build` | 产物落到 `output/`（和下载解出来的位置完全一致），并写 `$WTOOL_ARTIFACTS` |
-| `scripts/install.sh` | `wtool install` | `output/` → `$WTOOL_PREFIX`（默认 `~/.wtool/usr`）；`--uninstall` 撤销它 |
+| `scripts/build.sh` | `wtool build` | 产物落到 `__output/`（和下载解出来的位置完全一致），并写 `$WTOOL_ARTIFACTS` |
+| `scripts/install.sh` | `wtool install` | `__output/` → `$WTOOL_PREFIX`（默认 `~/.wtool/usr`）；`--uninstall` 撤销它 |
 
 `scripts/download.sh` / `scripts/publish.sh` / `scripts/extract.sh` **全部退休**（ADR-023）：
 下载归 `download-release` + `unpack-release`，打包上传归 `pack-release` + `publish-release`，
@@ -726,27 +726,27 @@ apt-get update && apt-get install -y --no-install-recommends \
 `kind="script"` 报"只能是 `source` / `none`"，`script=` 报
 "发布不再调项目脚本，构建逻辑放 `scripts/build.sh`"。
 
-### pack-release：产出全部落在 `<项目>/release/`
+### pack-release：产出全部落在 `<项目>/__release/`
 
 | 文件 | 内容 |
 |---|---|
-| `源码.zip` | 项目目录。**真读 `.gitignore`**（git 可用就让 `git ls-files -co --exclude-standard` 算，否则自带解析器），并永远排除 `output/`、`release/`。包内第一层是 `wtool/<项目路径>/`，所以解压到工作区上一层得到的路径和 `repo sync` 一致；另带 `wtool/.wtool-dist/<id>.json` 发布副本标记（解压副本免 `--force`，`head=` 有出处） |
-| `release.zip` | `output/` 里的东西 + **声明面**（`wtool.xml` / `env.zsh` / `env.bash`）。包内结构就是项目根的镜像，解压即到位 |
+| `源码.zip` | 项目目录。**真读 `.gitignore`**（git 可用就让 `git ls-files -co --exclude-standard` 算，否则自带解析器），并永远排除 `__output/`、`__release/`。包内第一层是 `wtool/<项目路径>/`，所以解压到工作区上一层得到的路径和 `repo sync` 一致；另带 `wtool/.wtool-dist/<id>.json` 发布副本标记（解压副本免 `--force`，`head=` 有出处） |
+| `release.zip` | `__output/` 里的东西 + **声明面**（`wtool.xml` / `env.zsh` / `env.bash`）。包内结构就是项目根的镜像，解压即到位 |
 | `源码-hash.txt` / `release-hash.txt` | 各自的 sha256 |
 | `dist.json` | 每卷的名字 / sha256 / 大小，**按顺序逐个声明** |
 | `.source` | 内部来源标记：`packed` + repo / tag / commit / 时间（**不上传、不进清单**） |
 
 - 超过 `--volume-size`（默认 32M，或 `WTOOL_VOLUME_SIZE`）就切分卷 `<文件>-volNN`；
-  **切开的原始大文件不留在 release/**（它正是传不上去的那个）
-- 纯声明式项目（没有 `build.sh`、没有 `output/`）只有源码包 + 只带声明面的
+  **切开的原始大文件不留在 __release/**（它正是传不上去的那个）
+- 纯声明式项目（没有 `build.sh`、没有 `__output/`）只有源码包 + 只带声明面的
   `release.zip` —— 只下 `release.zip` 的机器照样能 `wtool install`
-- 项目有 `build.sh` 而 `output/` 是空的 → **报错**（那是"忘了 build"，装出来会是半成品）
+- 项目有 `build.sh` 而 `__output/` 是空的 → **报错**（那是"忘了 build"，装出来会是半成品）
 - 归档是 zip，由 `lib/wtool_zip.py` 打（系统的 Info-ZIP 在这台机器上**不设 UTF-8
   名字标志**，中文名到别的工具里就是乱码；python3 的 zipfile 会设）
 - **相对软链保留为软链**（不是拷成实体），指向不被改写
 
 另外往**项目目录里**写 `docs/download.md`（给人看的下载页，**要进 Git**）。
-`release/` 本身**不进 Git**：它是待上传目录，也是 `download-release` 的落点。
+`__release/` 本身**不进 Git**：它是待上传目录，也是 `download-release` 的落点。
 **链接在上传前就算得出来**（`https://github.com/<owner>/<repo>/releases/download/<tag>/<文件名>`），
 所以下载页可以先写；但 `scripts/release.json` 要等上传成功才写。
 `pack-release` **不替你 commit**：跑完把该提交的打出来提醒。
@@ -761,17 +761,17 @@ wtool download-release all              # 所有提交了 release.json 的项目
 
 1. 读 `<项目>/scripts/release.json` —— **唯一的输入**，而且它在仓库里（可信清单）。
    目录里没有它 → 警告并告诉你这个项目只能自己编（`wtool build`）
-2. 逐个资产下到 `<项目>/release/`（`base_url`，或按 `repo`/`tag` 拼出 GitHub 直链），
+2. 逐个资产下到 `<项目>/__release/`（`base_url`，或按 `repo`/`tag` 拼出 GitHub 直链），
    **逐个校验 sha256**
 3. **已经下好的跳过**（文件在、sha256 对得上）—— 重跑是幂等的，中断了重来不会坏
 4. 直链不通时自动改走**第二条路**：`api.github.com` 的资产端点
    （`Accept: application/octet-stream`，跳到 `release-assets.githubusercontent.com`）
-5. 下到东西就写 `release/.source` = `downloaded`（`publish-release` 靠它拒绝回传）
+5. 下到东西就写 `__release/.source` = `downloaded`（`publish-release` 靠它拒绝回传）
 
 约束与失败行为：
 
 - 需要 `curl`；没有就直接报错（退出码 1）
-- **不解包**：产出 `output/` 是下一条命令 `wtool unpack-release <项目>` 的事
+- **不解包**：产出 `__output/` 是下一条命令 `wtool unpack-release <项目>` 的事
 - 单个资产两条路都失败 → 警告"这个文件没下来"，**其余资产照下**；一个都没下来 → 警告
 - 上面两种**退出码仍是 0**（只有参数错 / 缺 curl / 认不出项目才非 0）：
   部分失败要看输出里的 `warning`，**不能只看退出码**
@@ -779,13 +779,13 @@ wtool download-release all              # 所有提交了 release.json 的项目
 ### unpack-release：只认 dist.json，不需要项目特定知识
 
 ```
-读 release/dist.json → 逐卷校验 sha256 → 按顺序拼接 → 校验整个文件的 sha256
-  → role=release 的解到项目根（里面有 output/ 和声明面）
+读 __release/dist.json → 逐卷校验 sha256 → 按顺序拼接 → 校验整个文件的 sha256
+  → role=release 的解到项目根（里面有 __output/ 和声明面）
   → role=source 的只校验、不铺开（install 只消费 release.zip）
 ```
 
-一份都不缺才算成功；卷坏了 / 缺卷 / 拼接后 sha 不对 → **拒绝解开**（不许留下半个 `output/`）。
-`--from=目录` 可以指到别处（下载目录），默认是 `<项目>/release/`。
+一份都不缺才算成功；卷坏了 / 缺卷 / 拼接后 sha 不对 → **拒绝解开**（不许留下半个 `__output/`）。
+`--from=目录` 可以指到别处（下载目录），默认是 `<项目>/__release/`。
 目标目录**允许还没有 `wtool.xml`** —— 声明面正是从这个包里解出来的。
 
 ### publish-release：只上传
@@ -794,18 +794,18 @@ wtool download-release all              # 所有提交了 release.json 的项目
 wtool publish-release                          # 所有可发布的项目
 wtool publish-release tmux                     # 支持 id 末段、完整 id、路径
 wtool publish-release astronvim_v5 --tag=v1 --dry-run
-wtool publish-release tmux --out=/tmp/pkg      # 发布完把 release/ 里的产物另拷一份到 DIR
+wtool publish-release tmux --out=/tmp/pkg      # 发布完把 __release/ 里的产物另拷一份到 DIR
 ```
 
-- **只上传 `<项目>/release/` 里已有的文件**（`find -maxdepth 1 -type f`，内部的 `.source`
+- **只上传 `<项目>/__release/` 里已有的文件**（`find -maxdepth 1 -type f`，内部的 `.source`
   标记排除在外）。它**不替你打包**（没有 `dist.json` 就警告并提示先 `pack-release`），
   也**不再调任何项目脚本**
-- `release/.source` 是 `downloaded` → **拒绝**："不能把别人打的包当自己的发出去"
+- `__release/.source` 是 `downloaded` → **拒绝**："不能把别人打的包当自己的发出去"
 - 项目不是 git 仓库、或工作区有**未提交改动** → 拒绝（`--force` 跳过；
   wtool 自己生成的文件 —— `release.json` / `download.md` —— 已豁免，否则一次发布会堵死下一次）
 - **第三方仓保护**：推送前查 `gh repo view <repo> --json viewerPermission`，没写权限就拒绝并
   说明怎么改（写 `<publish to="自己的仓"/>` 或 `kind="none"`；`--allow-foreign` 可以强行试）
-- 上传失败**不 die、不删产物**：警告、保住 `release/`、继续下一个项目，可直接补传
+- 上传失败**不 die、不删产物**：警告、保住 `__release/`、继续下一个项目，可直接补传
   （不必重新构建）
 - **同一个 commit 重发要问一句**（BL-03）：准备发布时拿 `scripts/release.json` 里记的
   `commit`（= 打包时那个 commit，来自 `dist.json`）和当前 HEAD 比 ——
@@ -818,39 +818,39 @@ wtool publish-release tmux --out=/tmp/pkg      # 发布完把 release/ 里的产
   那种情况发出去的还是老包，声明里也如实记着老 commit。
 - **上传成功之后**才写 `scripts/release.json`（下载声明），并提醒你提交：
   清单必须等于"真传上去的那些文件"，所以要等上传结果
-- `--out=DIR` 把这次发出去的产物**另拷一份**到 DIR（`release/` 本来就留着，这只是方便你把
+- `--out=DIR` 把这次发出去的产物**另拷一份**到 DIR（`__release/` 本来就留着，这只是方便你把
   产物拿走 —— 拷贝发生在发布之后，不是"先看再传"）
 - 一个项目都没发出去 → **不改**下载文档（不拿"什么都没发生"覆盖现状）；本地发布历史
   记在 `$WTOOL_STATE/<id>/publish.tsv`，记不上只警告（发布本身已经完成）
 - 需要 `gh`（GitHub CLI）；没有就报错（退出码 1）
 - 单个项目失败（脏仓库 / 没权限 / 上传断线）**退出码仍是 0**：看输出里的 `warning`
 
-### 第二条通道：层（`layer-save` / `layer-load` / `unpack-layer` / `push-layer` / `pull-layer`）
+### 第二条通道：层（`_layer-save` / `_layer-load` / `unpack-layer` / `push-layer` / `pull-layer`）
 
-发布包走 GitHub release 之外，还可以把**层镜像**放进镜像仓库。中心是 `<项目>/layer/<target>/`
+发布包走 GitHub release 之外，还可以把**层镜像**放进镜像仓库。中心是 `<项目>/__layer/<target>/`
 —— 一棵 **OCI 镜像布局**（ADR-024）：`oci-layout` + `index.json` + `blobs/sha256/…`，
 blob 按内容命名所以父链天然只存一份。五条命令分工：
 
 | 命令 | 方向 | 要什么 | 关键约束 |
 |---|---|---|---|
-| `layer-save` | `docker` → `layer/<target>/` | `docker` | `docker save <镜像> \| tar -x -C layer/<target>/`（**tar 只当管道，不落盘**）；`index.json` 要**合并**（直接解第二个 `save` 会覆盖第一个的条目）；annotation 记 `io.wtool.layer` / `io.wtool.target` / `io.wtool.image` |
-| `layer-load` | `layer/<target>/` → `docker` | `docker` | `tar -c -C layer/<target>/ . \| docker load`，装回来是**同一个 image ID** |
-| `unpack-layer` | `layer/<target>/` → `output/<target>/<层>/` | 什么都不用 | 顺着 `index.json → manifest → layers[-1]` 找到**顶层 blob**，直接解（`--strip-components=2` 剥掉 `root/.wtool`，丢掉 `.wh.` 白障），再扫一遍生成 `OWNED.tsv`。**不联网、不要 docker** |
-| `push-layer` | `layer/<target>/` → 镜像仓库 | **`docker`**（构建机上） | tag 是 `<层名（/ 换成 -）>-<target>`；先 `docker load` 整棵布局再 `docker push` —— **不是** `crane push`（它把整个 blob 塞进一个 PATCH，大层会被服务器 reset，且重试从 offset 0 重来） |
-| `pull-layer` | 镜像仓库 → `layer/<target>/` | **`skopeo`** | **目标机不需要 docker**；`skopeo copy --all docker://… oci:layer/<target>:<tag>` —— skopeo 写布局时会**合并** `index.json`、blob 去重；拉完由引擎补上 `io.wtool.layer` / `io.wtool.target` annotation。缺 skopeo 直接 die 并告诉你 `apt install skopeo` |
+| `_layer-save` | `docker` → `__layer/<target>/` | `docker` | `docker save <镜像> \| tar -x -C __layer/<target>/`（**tar 只当管道，不落盘**）；`index.json` 要**合并**（直接解第二个 `save` 会覆盖第一个的条目）；annotation 记 `io.wtool.layer` / `io.wtool.target` / `io.wtool.image` |
+| `_layer-load` | `__layer/<target>/` → `docker` | `docker` | `tar -c -C __layer/<target>/ . \| docker load`，装回来是**同一个 image ID** |
+| `unpack-layer` | `__layer/<target>/` → `__output/<target>/<层>/` | 什么都不用 | 顺着 `index.json → manifest → layers[-1]` 找到**顶层 blob**，直接解（`--strip-components=2` 剥掉 `root/.wtool`，丢掉 `.wh.` 白障），再扫一遍生成 `OWNED.tsv`。**不联网、不要 docker** |
+| `push-layer` | `__layer/<target>/` → 镜像仓库 | **`docker`**（构建机上） | tag 是 `<层名（/ 换成 -）>-<target>`；先 `docker load` 整棵布局再 `docker push` —— **不是** `crane push`（它把整个 blob 塞进一个 PATCH，大层会被服务器 reset，且重试从 offset 0 重来） |
+| `pull-layer` | 镜像仓库 → `__layer/<target>/` | **`skopeo`** | **目标机不需要 docker**；`skopeo copy --all docker://… oci:__layer/<target>:<tag>` —— skopeo 写布局时会**合并** `index.json`、blob 去重；拉完由引擎补上 `io.wtool.layer` / `io.wtool.target` annotation。缺 skopeo 直接 die 并告诉你 `apt install skopeo` |
 
 - 层名里的 `/` 在 tag 里写成 `-`（`lang/lua` → `lang-lua`）；拉回来时**先看本地布局里
   有没有同 tag 的层名**，没有才按 `-` → `/` 还原（层名里同时有 `a-b` 和 `a/b` 会有歧义，
   本项目的层名不会撞）
-- 落点：`unpack-layer` 解出来的是 `output/<target>/<层>/`，和 `build.sh` 的产物**完全相同的
+- 落点：`unpack-layer` 解出来的是 `__output/<target>/<层>/`，和 `build.sh` 的产物**完全相同的
   路径**，所以 `pull-layer` → `unpack-layer` → `wtool install` 接得上
 - `--registry=<前缀>` 或 `WTOOL_LAYER_REGISTRY`（形如
   `crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry`）；
   两个联网命令不给就报错，不猜
 - 层的 `OWNED.tsv` 由 `unpack-layer` **扫出来**（不是从包里读的）：它会拒收**指向 payload
   外面**的软链（换台机器必然是断的），值为 `sha256` 或 `L:<软链原值>`
-- `layer/` 只对 `kind="docker"` 的项目存在（见 ADR-025）；`layer/` 是**项目资产**，
-  docker 存储只是缓存 —— `docker system prune` 之后 `layer-load` 就装回来
+- `__layer/` 只对 `kind="docker"` 的项目存在（见 ADR-025）；`__layer/` 是**项目资产**，
+  docker 存储只是缓存 —— `docker system prune` 之后 `_layer-load` 就装回来
 
 ## 15. 看板（裸跑 `wtool`）
 
@@ -860,7 +860,7 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 
 | 段 | 内容 |
 |---|---|
-| 1 | **能力表**：`build` / `install` / `sudo` / `pack` / `publish` / `download` / `layer` 七列 |
+| 1 | **能力表**：`build` / `install` / `uninstall` / `sudo` / `sudo-un` / `pack` / `publish` / `download` / `layer` 九列（+ 项目、prio）—— `install` / `sudo` 各自跟一列 uninstall，装之前是「未安装」、装完变「可执行」（ADR-0034）|
 | 2 | `wtool install` 能装哪些项目、装过没、会做什么 |
 | 3 | `wtool sudo-install` 能装哪些项目、跑过没、会装什么 |
 | 4 | `wtool bootstrap` 这次会装哪些、什么顺序、谁被跳过 |
@@ -868,33 +868,36 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 | — | 然后才是流水线说明和两张 **纯 ASCII** 图（安装 / 发布） |
 
 ```
-┌──────────────────────┬──────┬────────┬─────────┬────────┬────────┬─────────┬──────────┬────────┐
-│ 项目                 │ prio │ build  │ install │  sudo  │  pack  │ publish │ download │ layer  │
-├──────────────────────┼──────┼────────┼─────────┼────────┼────────┼─────────┼──────────┼────────┤
-│ bootstrap            │ 5    │ 不支持 │ 可执行  │ 不支持 │ 可执行 │ 已完成  │ 未发布   │ 不支持 │
-│ os/ubuntu            │ 5    │ 不支持 │ 不支持  │ 可执行 │ 可执行 │ 已完成  │ 未发布   │ 不支持 │
-│ editor/astronvim_v5  │ 70   │ 可执行 │ 可执行  │ 不支持 │ 可执行 │ 可执行  │ 未发布   │ 已完成 │
-└──────────────────────┴──────┴────────┴─────────┴────────┴────────┴─────────┴──────────┴────────┘
+┌──────────────────────┬──────┬────────┬─────────┬───────────┬────────┬─────────┬────────┬─────────┬──────────┬────────┐
+│ 项目                 │ prio │ build  │ install │ uninstall │  sudo  │ sudo-un │  pack  │ publish │ download │ layer  │
+├──────────────────────┼──────┼────────┼─────────┼───────────┼────────┼─────────┼────────┼─────────┼──────────┼────────┤
+│ bootstrap            │ 5    │ 不支持 │ 已完成  │ 可执行    │ 不支持 │ 不支持  │ 可执行 │ 可执行  │ 未发布   │ 不支持 │
+│ os/ubuntu            │ 5    │ 不支持 │ 不支持  │ 不支持    │ 已完成 │ 可执行  │ 可执行 │ 可执行  │ 未发布   │ 不支持 │
+│ editor/astronvim_v5  │ 70   │ 可执行 │ 待产出  │ 未安装    │ 不支持 │ 不支持  │ 待产出 │ 可执行  │ 未发布   │ 可执行 │
+└──────────────────────┴──────┴────────┴─────────┴───────────┴────────┴─────────┴────────┴─────────┴──────────┴────────┘
 ```
 
-**列名 = 引擎命令**（表下面有一行图例）：`build`=`wtool build`、`install`=`wtool install`、
-`sudo`=`wtool sudo-install`、`pack`=`wtool pack-release`、`publish`=`wtool publish-release`、
-`download`=`wtool download-release`、`layer`=`wtool layer-save / layer-load /
-unpack-layer / push-layer / pull-layer`。
+**列名 = 引擎命令**（表下面有一行图例，**一条都不省略**）：`build`=`wtool build`、
+`install`=`wtool install`、`uninstall`=`wtool uninstall`、`sudo`=`wtool sudo-install`、
+`sudo-un`=`wtool sudo-uninstall`、`pack`=`wtool pack-release`、`publish`=`wtool publish-release`、
+`download`=`wtool download-release`、
+`layer`=`wtool unpack-layer / wtool push-layer / wtool pull-layer`。
+（`wtool _layer-save` / `wtool _layer-load` 是**内部命令**，不进图例 —— ADR-0034。）
 
 > ⚠️ 这一条**不改 ADR-0023**：项目脚本仍然只有 `build.sh` / `install.sh`（那是"项目能力"）；
 > 看板多出来的列是**引擎的**命令，逐项目地摆出来是为了让人一眼看到"这个项目还能做什么"。
 
-**格子语义：五种状态，各带一个颜色。** 方框字符 + CJK 双宽对齐在 `render_dashboard()`
+**格子语义：六种状态，各带一个颜色。** 方框字符 + CJK 双宽对齐在 `render_dashboard()`
 里算（终端里不会错位）；颜色只是辅助，`--color=never` 或色盲用户看到的仍然可读。
 
 | 状态 | 颜色 | 含义 |
 |---|---|---|
 | `不支持` | 红 | 这个项目没有这项能力 |
 | `可执行` | 黄 | 有能力，现在就能跑 |
-| `待产出` | 蓝 | 能力有，但 **`output/` 还是空的**：先 `wtool build`，或者 `download-release` + `unpack-release` |
-| `已完成` | 绿 | 跑过了（各自的账：`actions.tsv` / `journal.tsv` / `publish.tsv` / `layer/`） |
+| `待产出` | 蓝 | 能力有，但 **`__output/` 还是空的**：先 `wtool build`，或者 `download-release` + `unpack-release` |
+| `已完成` | 绿 | 跑过了（各自的账：`actions.tsv` / `journal.tsv` / `publish.tsv` / `__layer/`） |
 | `未发布` | 紫 | `download` 专有：仓库里**没有** `scripts/release.json`（还没发布过）—— 和"待产出"不是一回事 |
+| `未安装` | 青 | `uninstall` / `sudo-un` 专有：**现在没什么可撤的**（还没装过）—— 和"不支持"不是一回事（ADR-0034）|
 
 **三个开关**：`--brief`（只打第 1 段 + 图例 + 汇总行，`wtool doctor` 和 `bootstrap` 末尾用它）、
 `--verbose`（多一段"明细"：装过什么时候、产物从哪来、发布过没）、
@@ -905,14 +908,14 @@ unpack-layer / push-layer / pull-layer`。
 | 列 | 能力有无（静态：看项目文件） | 做没做过 / 别的状态（动态：看状态目录、看磁盘） |
 |---|---|---|
 | `build` | `scripts/build.sh` 或 `build/layers.tsv` | `actions.tsv` 里有 `build` → `已完成` |
-| `install` | 有 `<link>`/`<zshrc>`/`<bashrc>`，或 `scripts/install.sh` | `journal.tsv`/`registry.tsv` 记着 → `已完成`；有 `build` 能力而 `output/` 空 → `待产出` |
+| `install` | 有 `<link>`/`<zshrc>`/`<bashrc>`，或 `scripts/install.sh` | `journal.tsv`/`registry.tsv` 记着 → `已完成`；有 `build` 能力而 `__output/` 空 → `待产出` |
 | `sudo` | 清单里有 `sysfile`/`source`/`task` | `provisioned/` mark 或 `system/` 或 `apt.tsv` → `已完成` |
-| `pack` | 永远可以（源码包谁都能打） | `release/dist.json` 在 → `已完成`；有 `build` 能力而 `output/` 空 → `待产出` |
+| `pack` | 永远可以（源码包谁都能打） | `__release/dist.json` 在 → `已完成`；有 `build` 能力而 `__output/` 空 → `待产出` |
 | `publish` | `<publish kind="none"/>` → `不支持` | `publish.tsv` 有记录 → `已完成` |
 | `download` | 仓库里提交了 `scripts/release.json` | 产物来自下载（`artifacts.tsv`）→ `已完成`；没提交声明 → `未发布` |
-| `layer` | `build/layers.tsv` 在 | `layer/<target>/index.json` 在 → `已完成` |
+| `layer` | `build/layers.tsv` 在 | `__layer/<target>/index.json` 在 → `已完成` |
 
-**`待产出` 永远是"看磁盘，不看做过没有"**：有能力而 `<项目>/output/` 是空的 → `待产出`。
+**`待产出` 永远是"看磁盘，不看做过没有"**：有能力而 `<项目>/__output/` 是空的 → `待产出`。
 判据和 `wtool install` 的前置检查是同一件事（§4.1）——所以两处永远不会一个说能装、一个说没产出。
 
 **"文件存在即能力声明"**：新建一个空的 `scripts/build.sh` 会让那一列
@@ -920,9 +923,9 @@ unpack-layer / push-layer / pull-layer`。
 引擎不去猜。**但只有 `build.sh` / `install.sh` 这两种算数**（§15）。
 
 **这几者要分开记：** 能力有无是**静态的**（看项目文件，不随运行变化），
-`已完成` 是**动态的**（看状态目录），`待产出` 看**磁盘**（`output/`）。
+`已完成` 是**动态的**（看状态目录），`待产出` 看**磁盘**（`__output/`）。
 填格子时先看能力，没有能力就是「不支持」；有能力再看状态：
-装过 → `已完成`，否则 `output/` 空且有 `build.sh` → `待产出`，其余 → `可执行`。
+装过 → `已完成`，否则 `__output/` 空且有 `build.sh` → `待产出`，其余 → `可执行`。
 
 `--brief` 只要第 1 段 + 图例 + 汇总行（`wtool doctor` / `bootstrap` 末尾用）；
 `--verbose` 再加一段"明细"；`--summary` 只打汇总行（脚本用）；

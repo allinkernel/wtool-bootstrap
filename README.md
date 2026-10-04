@@ -5,7 +5,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ```sh
 # 日常三条（一条铁律：要 sudo 的都叫 sudo-*）
 ./wtool.sh sudo-install <项目>    # 系统层：/etc 下的文件、apt 包、要跑的脚本（可能要 sudo）
-./wtool.sh install      <项目>    # 用户层：output/ → ~/.wtool，再铺 $HOME 软链（永不 sudo）
+./wtool.sh install      <项目>    # 用户层：__output/ → ~/.wtool，再铺 $HOME 软链（永不 sudo）
                                   # --prune：顺手清掉"清单里已经删掉"的旧软链（BL-15）
 ./wtool.sh uninstall    <项目>    # 撤销 install（不还原 /etc —— 那是 sudo-uninstall 的事）
 
@@ -14,25 +14,25 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh sudo-bootstrap              # 所有项目的 sudo-install
 
 # 产物与发布（release 四条边：pack/unpack 本地一对，publish/download 远端一对）
-./wtool.sh build          <项目>|all   # 跑项目自己的 scripts/build.sh → output/
-./wtool.sh pack-release   <项目>       # output/ → release/（源码.zip / release.zip / 分卷 / dist.json）
-./wtool.sh publish-release [<项目>]    # release/ → GitHub（**只上传**），成功后写 scripts/release.json
-./wtool.sh download-release <项目>|all # 读提交在项目里的 scripts/release.json → release/（**只下载**）
-./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 output/
+./wtool.sh build          <项目>|all   # 跑项目自己的 scripts/build.sh → __output/
+./wtool.sh pack-release   <项目>       # __output/ → __release/（源码.zip / release.zip / 分卷 / dist.json）
+./wtool.sh publish-release [<项目>]    # __release/ → GitHub（**只上传**），成功后写 scripts/release.json
+./wtool.sh download-release <项目>|all # 读提交在项目里的 scripts/release.json → __release/（**只下载**）
+./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 __output/
 
-# 层（第二条通道：容器镜像仓库；layer/ 是一棵 OCI 镜像布局，ADR-024）
-./wtool.sh layer-save   <项目> --image=<镜像>   # docker 镜像 → layer/<target>/
-./wtool.sh layer-load   <项目>                  # layer/<target>/ → docker
-./wtool.sh unpack-layer <项目> [--layer=<层>]   # layer/ 顶层 blob → output/（不联网、不要 docker）
-./wtool.sh push-layer   <项目>                  # layer/ → 镜像仓库（docker push，构建机上跑）
-./wtool.sh pull-layer   <项目>                  # 镜像仓库 → layer/（目标机只要 skopeo，不要 docker）
+# 层（第二条通道：容器镜像仓库；__layer/ 是一棵 OCI 镜像布局，ADR-024）
+./wtool.sh _layer-save   <项目> --image=<镜像>   # docker 镜像 → __layer/<target>/
+./wtool.sh _layer-load   <项目>                  # __layer/<target>/ → docker
+./wtool.sh unpack-layer <项目> [--layer=<层>]   # __layer/ 顶层 blob → __output/（不联网、不要 docker）
+./wtool.sh push-layer   <项目>                  # __layer/ → 镜像仓库（docker push，构建机上跑）
+./wtool.sh pull-layer   <项目>                  # 镜像仓库 → __layer/（目标机只要 skopeo，不要 docker）
 
 # 一次装好 / 出问题
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 10 组 / 612 条断言
-                                      # pairing 35 / sudo-install 40 / publish 124 / table 74
+./tests/run_all.sh                    # 10 组 / 627 条断言
+                                      # pairing 35 / sudo-install 40 / publish 124 / table 89
                                       # release-copy 17 / release 62 / contract 124 / layer 46 / install-env 46
                                       # docker-build 44（kind=docker 的引擎驱动构建）
 ```
@@ -108,14 +108,14 @@ wtool doctor
 
 **构建方式写在清单里**（`<build kind="local|docker"/>`，ADR-025）：引擎因此能在动手之前
 判断这台机器行不行 —— `kind="docker"` 而没有 docker 时 `wtool build` 直接拒绝并指路
-`download-release`（退出码非 0），kind 还决定 `output/` 有没有 `<os>_<ver>/` 那一层。
+`download-release`（退出码非 0），kind 还决定 `__output/` 有没有 `<os>_<ver>/` 那一层。
 `WTOOL_DOCKER=<路径>` 可以指定 docker 二进制。
 
 **`kind="docker"` 的容器生命周期归引擎**（ADR-0029）：项目给
 `build/targets.tsv`（目标系统 → 基础镜像）、`build/layers.tsv`（层名/父层/镜像名/
 容器里跑的命令）、`build/export.filter`（导出丢什么），引擎负责起容器、`commit`、
-落 `layer/<target>/`、导出 `output/<target>/<层>/` —— **一层镜像对一层 output**，
-每步都能跳过（重跑接着走，`docker` 存储被清也能从 `layer/` 装回来）。
+落 `__layer/<target>/`、导出 `__output/<target>/<层>/` —— **一层镜像对一层 output**，
+每步都能跳过（重跑接着走，`docker` 存储被清也能从 `__layer/` 装回来）。
 
 ## 当前状态
 
@@ -123,7 +123,7 @@ wtool doctor
 
 **已实现**：`install` / `uninstall` / `sudo-install` / `sudo-uninstall` / `sudo-bootstrap` /
 `bootstrap` / `build` / `pack-release` / `publish-release` / `download-release` / `unpack-release` /
-`layer-save` / `layer-load` / `unpack-layer` / `push-layer` / `pull-layer` /
+`_layer-save` / `_layer-load` / `unpack-layer` / `push-layer` / `pull-layer` /
 `check` / `repair` / `status` / `doctor` / `validate` / `init` / `kill-self-forever` /
 `version`，加 `--dry-run` / `--force`。另外有三个**帮助里没写**的隐藏入口：
 `wtool docs` / `wtool docs refresh` / `wtool refresh-downloads`
@@ -133,21 +133,21 @@ wtool doctor
 
 | 删掉的 | 现在用什么 |
 |---|---|
-| `download` | `download-release` + `unpack-release`（**语义变了**：只下到 `release/`，不解包） |
+| `download` | `download-release` + `unpack-release`（**语义变了**：只下到 `__release/`，不解包） |
 | `publish` | `pack-release` + `publish-release`（**语义变了**：只上传，不打包） |
 | `provision` | `sudo-install`（`--with-system` 一并删掉） |
 | `table` | 裸跑 `wtool` |
 | `list` | `wtool status`（登记表并进去了） |
 | `env` | `wtool doctor`（`doctor --quiet` 只输出 export 行） |
 | `scaffold` | `wtool init <目录>`（**整个删掉**，不是改名） |
-| `pack-layer` | 删了（**方向反了**，ADR-024）：层是源、`output/` 是层的导出物。现在 `layer-save`（镜像 → `layer/`）+ `unpack-layer`（`layer/` → `output/`） |
-| `push-layers` / `pull-layers` | `push-layer` / `pull-layer`：推拉的是 `layer/<target>/` 里的**真镜像**，`pull-layer` 也不再直接落 `output/`（要多一步 `unpack-layer`） |
+| `pack-layer` | 删了（**方向反了**，ADR-024）：层是源、`__output/` 是层的导出物。现在 `_layer-save`（镜像 → `__layer/`）+ `unpack-layer`（`__layer/` → `__output/`） |
+| `push-layers` / `pull-layers` | `push-layer` / `pull-layer`：推拉的是 `__layer/<target>/` 里的**真镜像**，`pull-layer` 也不再直接落 `__output/`（要多一步 `unpack-layer`） |
 
 前两条**故意不留兼容窗口**（ADR-023）：名字一样、语义不一样，静默兼容会做出错误的事
-（让人以为东西在 `output/` 里，其实在 `release/`）。
+（让人以为东西在 `__output/` 里，其实在 `__release/`）。
 
-**项目脚本只剩两种**：`scripts/build.sh`（怎么编，产物进 `output/`）和
-`scripts/install.sh`（怎么铺，`output/` → `~/.wtool/usr`）。
+**项目脚本只剩两种**：`scripts/build.sh`（怎么编，产物进 `__output/`）和
+`scripts/install.sh`（怎么铺，`__output/` → `~/.wtool/usr`）。
 `download.sh` / `publish.sh` / `extract.sh` 全部退休 —— 下载和发布全项目走同一条引擎的路。
 `wtool init --with-download` / `--with-publish` 同理取消（只剩 `--with-build` / `--with-install`）。
 **"文件存在即能力声明"不变，但只有这两种**；项目表的能力列因此是 `build` / `install` 两列。

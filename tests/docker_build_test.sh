@@ -13,10 +13,10 @@
 # 卡点在于 exec 真的执行那一层的东西：所以"每层装了什么"是真写出来的，
 # 引擎随后的 import / export 也就有真东西可搬 —— 这不是"调用次数"式的空转测试。
 # 验证点：
-#   1. 引擎按 build/targets.tsv + build/layers.tsv 起容器、commit、落 layer/、导 output/
+#   1. 引擎按 build/targets.tsv + build/layers.tsv 起容器、commit、落 __layer/、导 __output/
 #   2. **一层镜像对一层 output**：每层 payload 里只有它自己那层的文件
 #   3. 续跑：镜像在 docker 里就不重起容器；layout/output 齐了就不重复 save/导出
-#   4. 父层不在 docker 里 → 从 layer/ 装回来（docker 存储只是缓存）
+#   4. 父层不在 docker 里 → 从 __layer/ 装回来（docker 存储只是缓存）
 #   5. 容器里失败 → 这一层不出、不 commit、退出码非 0、日志尾部贴出来
 #   6. 占位层（镜像名 -）留一个空的 output 层
 #   7. build/export.filter 真的过滤掉了东西
@@ -105,7 +105,7 @@ case "$1" in
     volume) exit 0 ;;
     load)
         # 引擎是 `tar -c -C 布局 . | docker load`：真 load 会把布局里的镜像装回来，
-        # 桩也得这么干 —— 否则"从 layer/ 恢复"那条路会退化成"重编一遍"（测不到真东西）
+        # 桩也得这么干 —— 否则"从 __layer/ 恢复"那条路会退化成"重编一遍"（测不到真东西）
         cat > "$DOCKER_TMP/loaded.tar"
         tar -xOf "$DOCKER_TMP/loaded.tar" ./index.json 2>/dev/null \
           | python3 -c '
@@ -203,27 +203,27 @@ chk "命令里的 {target} 被替换" \
 python3 "$PY" docker-plan "$P" --target=nope >/dev/null 2>&1 && bad "没声明的目标居然过了" \
     || ok "没声明的目标被拒"
 
-echo "== 2. build：起容器 → commit → layer/ → output/ =="
+echo "== 2. build：起容器 → commit → __layer/ → __output/ =="
 "$WT" build editor/demo > "$T/build1.log" 2>&1 || bad "build（引擎驱动 docker）" "$(cat "$T/build1.log")"
 chk "四层都 commit 了（占位层不起容器）" \
     "$(tr '\n' ' ' < "$DOCKER_IMAGES" | sed 's/ $//')" \
     "demo/one:ubuntu_24.04 demo/two:ubuntu_24.04 demo/three:ubuntu_24.04 demo/other:ubuntu_24.04"
 chk "★每层 payload 里只有自己那层的文件" \
     "$(for l in one two three other; do
-         [ -f "$P/output/ubuntu_24.04/$l/payload/usr/share/$l/file.txt" ] && printf '%s ' "$l"
+         [ -f "$P/__output/ubuntu_24.04/$l/payload/usr/share/$l/file.txt" ] && printf '%s ' "$l"
        done | sed 's/ $//')" "one two three other"
 chk "★两层不会叠在 one 的 payload 里（是增量）" \
-    "$(ls "$P/output/ubuntu_24.04/one/payload/usr/share/" 2>/dev/null | grep -v '^one$' || true)" ""
-chk "layer/<target>/ 里有 4 个条目" \
+    "$(ls "$P/__output/ubuntu_24.04/one/payload/usr/share/" 2>/dev/null | grep -v '^one$' || true)" ""
+chk "__layer/<target>/ 里有 4 个条目" \
     "$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["manifests"]))' \
-       "$P/layer/ubuntu_24.04/index.json")" "4"
+       "$P/__layer/ubuntu_24.04/index.json")" "4"
 chk "OWNED.tsv 记的层名是这一层自己" \
-    "$(awk -F'\t' 'END{print $3}' "$P/output/ubuntu_24.04/one/OWNED.tsv")" "one"
+    "$(awk -F'\t' 'END{print $3}' "$P/__output/ubuntu_24.04/one/OWNED.tsv")" "one"
 chk "★build/export.filter 生效（*.log 没进 payload）" \
-    "$(find "$P/output/ubuntu_24.04/one/payload" -name '*.log' | wc -l | tr -d ' ')" "0"
+    "$(find "$P/__output/ubuntu_24.04/one/payload" -name '*.log' | wc -l | tr -d ' ')" "0"
 chk "白障（.wh.）不落进 payload" \
-    "$(find "$P/output/ubuntu_24.04" -name '.wh.*' | wc -l | tr -d ' ')" "0"
-[ -f "$P/output/ubuntu_24.04/empty/OWNED.tsv" ] && ok "占位层留了一个空的 output 层" \
+    "$(find "$P/__output/ubuntu_24.04" -name '.wh.*' | wc -l | tr -d ' ')" "0"
+[ -f "$P/__output/ubuntu_24.04/empty/OWNED.tsv" ] && ok "占位层留了一个空的 output 层" \
     || bad "占位层没有 output 层"
 grep -q '^run -d' "$DOCKER_LOG" && ok "真的起了容器（docker run -d）" || bad "没起容器"
 grep -q -- '--network=host' "$DOCKER_LOG" && ok "容器用 host 网络（代理要它）" || bad "没加 --network=host"
@@ -241,24 +241,24 @@ chk "基镜像记的是 digest，不只记 tag" "yes" \
 d=json.load(open(sys.argv[1]))["inputs"]
 print("yes" if d.get("base_digest") else "no")' "$WTOOL_TEST_ROOT/wtool-layer/layer.json")"
 chk "★它不落进 payload（导出只取 root/.wtool/*）" "0" \
-    "$(find "$P/output/ubuntu_24.04" -name 'layer.json' | wc -l | tr -d ' ')"
-chk "产出事实跟着层走：layer/<target>/<层>.json" "yes" \
-    "$([ -f "$P/layer/ubuntu_24.04/one.json" ] && echo yes || echo no)"
+    "$(find "$P/__output/ubuntu_24.04" -name 'layer.json' | wc -l | tr -d ' ')"
+chk "产出事实跟着层走：__layer/<target>/<层>.json" "yes" \
+    "$([ -f "$P/__layer/ubuntu_24.04/one.json" ] && echo yes || echo no)"
 chk "产出事实里有 payload 的 sha256（OWNED.tsv 的 sha256，覆盖每个文件的内容）" "64" \
     "$(python3 -c 'import json,sys
 print(len(json.load(open(sys.argv[1]))["produced"]["payload_sha256"]))' \
-       "$P/layer/ubuntu_24.04/one.json")"
+       "$P/__layer/ubuntu_24.04/one.json")"
 chk "产出事实里有文件数（>0）" "yes" \
     "$(python3 -c 'import json,sys
 print("yes" if json.load(open(sys.argv[1]))["produced"]["payload_files"] > 0 else "no")' \
-       "$P/layer/ubuntu_24.04/one.json")"
+       "$P/__layer/ubuntu_24.04/one.json")"
 # 事实文件就放在布局目录里（实测 `docker load` **容忍**多出来的文件，见 journal 第 10 轮）；
 # 而 `layer-load` / `push-layer` 是 `tar -c -C 布局 . | docker load`，所以要确认它真在 tar 里
 chk "事实文件和布局在同一个目录里" "yes" \
-    "$([ -f "$P/layer/ubuntu_24.04/one.json" ] && [ -f "$P/layer/ubuntu_24.04/index.json" ] \
+    "$([ -f "$P/__layer/ubuntu_24.04/one.json" ] && [ -f "$P/__layer/ubuntu_24.04/index.json" ] \
        && echo yes || echo no)"
 _tar_probe=$(mktemp)
-tar -c -C "$P/layer/ubuntu_24.04" . > "$_tar_probe"
+tar -c -C "$P/__layer/ubuntu_24.04" . > "$_tar_probe"
 chk "喂给 docker load 的 tar 里带着它（多出来的文件 docker 会忽略）" "yes" \
     "$(tar -tf "$_tar_probe" | grep -qx './one.json' && echo yes || echo no)"
 rm -f "$_tar_probe"
@@ -267,7 +267,7 @@ echo "== 2c. 并行：父层就绪的兄弟层同时跑（BL-34）=="
 #   three 和 other 都挂在 two 下面 —— 它们应该**重叠**跑，而不是一个接一个。
 #   量法：桩把每层的 start/end 记进时间线，看有没有交叠（有层在跑时又开了新层）。
 : > "$DOCKER_TIMELINE"
-rm -rf "$P/output/ubuntu_24.04" "$P/layer"
+rm -rf "$P/__output/ubuntu_24.04" "$P/__layer"
 : > "$DOCKER_IMAGES"
 # 假根也要清：镜像都没了 = 下一轮容器从基础镜像新起，之前那些文件本来就不该在
 # （不清的话层脚本写的文件"早就有了"，桩算出来的增量是空的 —— 实测四层 blob 全 54 字节）
@@ -299,34 +299,34 @@ chk "★也没有再 docker save（layout 里已经有了）" "$(grep -c '^save 
 grep -q '跳过' "$T/build2.log" && ok "说了跳过（✓ X（docker 里已有，跳过））" \
     || bad "没说跳过" "$(cat "$T/build2.log")"
 
-echo "== 4. 删掉 docker 里的镜像 → 从 layer/ 装回来接着走 =="
+echo "== 4. 删掉 docker 里的镜像 → 从 __layer/ 装回来接着走 =="
 : > "$DOCKER_IMAGES"; : > "$DOCKER_LOG"         # docker 存储被 prune 了
-rm -rf "$P/output/ubuntu_24.04/other"           # 顺手让最后一层需要重新导出
+rm -rf "$P/__output/ubuntu_24.04/other"           # 顺手让最后一层需要重新导出
 "$WT" build editor/demo > "$T/build3.log" 2>&1 || bad "docker 里没镜像时 build" "$(cat "$T/build3.log")"
-grep -q '从 layer/ 恢复' "$T/build3.log" \
-    && ok "镜像不在 docker 里 → 从 layer/ 装回来" || bad "没走 layer/ 恢复那条路" "$(cat "$T/build3.log")"
+grep -q '从 __layer/ 恢复' "$T/build3.log" \
+    && ok "镜像不在 docker 里 → 从 __layer/ 装回来" || bad "没走 __layer/ 恢复那条路" "$(cat "$T/build3.log")"
 grep -q '^load' "$DOCKER_LOG" && ok "用的是 docker load（tar 当管道）" || bad "没调 docker load" "$(cat "$DOCKER_LOG")"
-[ -f "$P/output/ubuntu_24.04/other/payload/usr/share/other/file.txt" ] \
+[ -f "$P/__output/ubuntu_24.04/other/payload/usr/share/other/file.txt" ] \
     && ok "缺的那层重新导出了" || bad "缺的那层没补回来"
 
 echo "== 5. 容器里失败：这一层不出、退出码非 0、日志贴出来 =="
 : > "$DOCKER_IMAGES"; : > "$DOCKER_LOG"
-rm -rf "$P/output/ubuntu_24.04" "$P/layer"
+rm -rf "$P/__output/ubuntu_24.04" "$P/__layer"
 printf '#!/bin/sh\necho boom >&2\nexit 3\n' > "$P/scripts/layer.sh"
 _rc=0
 "$WT" build editor/demo > "$T/build4.log" 2>&1 || _rc=$?
 [ "$_rc" != 0 ] && ok "失败时退出码非 0" || bad "失败了还报成功"
 grep -q 'boom' "$T/build4.log" && ok "把容器里的日志尾部贴出来了" || bad "没贴日志" "$(tail -5 "$T/build4.log")"
-[ -d "$P/output/ubuntu_24.04/one" ] && bad "失败了还留了半成品 output 层" || ok "失败时没有留下半成品"
+[ -d "$P/__output/ubuntu_24.04/one" ] && bad "失败了还留了半成品 output 层" || ok "失败时没有留下半成品"
 grep -q '^commit ' "$DOCKER_LOG" && bad "失败了居然 commit 了" || ok "失败时不 commit"
 
 echo "== 6. --dry-run：一个字节都不动 =="
 : > "$DOCKER_LOG"; : > "$DOCKER_IMAGES"
-rm -rf "$P/output" "$P/layer" "$WTOOL_STATE"
+rm -rf "$P/__output" "$P/__layer" "$WTOOL_STATE"
 "$WT" build editor/demo --dry-run > "$T/dry.log" 2>&1 || bad "dry-run" "$(cat "$T/dry.log")"
 chk "dry-run 不碰 docker" "$(grep -c '^run \|^commit \|^save ' "$DOCKER_LOG" || true)" "0"
-[ -d "$P/output" ] && bad "dry-run 建了 output/" || ok "dry-run 不建 output/"
-[ -d "$P/layer" ] && bad "dry-run 建了 layer/" || ok "dry-run 不建 layer/"
+[ -d "$P/__output" ] && bad "dry-run 建了 __output/" || ok "dry-run 不建 __output/"
+[ -d "$P/__layer" ] && bad "dry-run 建了 __layer/" || ok "dry-run 不建 __layer/"
 grep -q 'dry-run' "$T/dry.log" && ok "dry-run 打了计划" || bad "dry-run 没打计划"
 
 echo "== 7. 清单写错时的说法 =="

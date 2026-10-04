@@ -9,13 +9,13 @@
 #      scripts/downloads.sh **不再生成**（那份清单归 scripts/release.json）
 #   3. kind="none" 的项目不被发布；没有 wtool.xml 的仓（上游仓）根本不是 wtool 项目
 #   4. 项目的 remote 名字是 github（repo 客户端）时也能找到目标仓
-#   5. publish-release **只上传 release/**，并且：
-#        · release/ 里没有 dist.json      → 拒绝，并指路 pack-release
-#        · release/.source 是 downloaded → 拒绝（别人打的包不许当自己的发）
+#   5. publish-release **只上传 __release/**，并且：
+#        · __release/ 里没有 dist.json      → 拒绝，并指路 pack-release
+#        · __release/.source 是 downloaded → 拒绝（别人打的包不许当自己的发）
 #        · 上传的文件里没有 .source（内部标记不上传、不进清单）
 #   6. 上传成功后写 scripts/release.json：project / repo / tag / base_url / commit /
 #      packed_at / published_at / wtool_engine / dirty / targets[].target
-#      （从 output/*/ 目录名来）/ assets[].{name,role,bytes,sha256}（不含 .source）
+#      （从 __output/*/ 目录名来）/ assets[].{name,role,bytes,sha256}（不含 .source）
 #   7. 已经存在的 release 走复用（view 失败 / create 报 already exists / view 恢复）
 #   8. 脏检查豁免 wtool 自己生成的文件（docs/download.md / scripts/release.json），
 #      用户手改的仍算脏（要 --force）
@@ -82,9 +82,9 @@ wt() {
         WTOOL_HOME="$T/home" "$WT" "$@"
 }
 
-# 把小项目塞进 git（脏检查要求项目是干净仓库；release/ 和 output/ 是生成物，忽略）
+# 把小项目塞进 git（脏检查要求项目是干净仓库；__release/ 和 __output/ 是生成物，忽略）
 git_init() {   # <项目目录>
-    printf 'release/\noutput/\n' > "$1/.gitignore"
+    printf '__release/\noutput/\n' > "$1/.gitignore"
     git -C "$1" init -q
     git -C "$1" add -A
     git -C "$1" -c user.name=t -c user.email=t@t commit -q -m init
@@ -98,7 +98,7 @@ echo "== 1. pack-release：源码包结构 / 软链 / 生成物（terminal/tmux�
 #   pack-release 会扫 $WTOOL_ROOT 找带标记的文档并改写它，
 #   跑真工作区的话一条测试就能把真的 README 洗掉（这个坑真踩过）。
 WS1="$T/ws1"; ST1="$T/state1"; P1="$WS1/terminal/tmux"
-mkdir -p "$P1/output/bin"
+mkdir -p "$P1/__output/bin"
 cat > "$P1/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" id="terminal/tmux" priority="50">
@@ -112,9 +112,9 @@ cat > "$P1/install.sh" <<'EOF'
 #!/bin/sh
 echo "install ran" >&2
 EOF
-# output/ 是构建产物：进 release.zip，不进源码包（.gitignore 排除了它）
-echo '#!/bin/sh' > "$P1/output/bin/tmux-helper"
-chmod +x "$P1/output/bin/tmux-helper"
+# __output/ 是构建产物：进 release.zip，不进源码包（.gitignore 排除了它）
+echo '#!/bin/sh' > "$P1/__output/bin/tmux-helper"
+chmod +x "$P1/__output/bin/tmux-helper"
 # 一个相对符号链接：验证包里不会把它改成断链
 ln -sf tmux.conf "$P1/tmux.conf.alias"
 git_init "$P1"
@@ -125,11 +125,11 @@ _rc=0
 wt "$T/bin" "$WS1" "$ST1" pack-release terminal/tmux --tag=v-1 > "$T/log1" 2>&1 || _rc=$?
 chk "pack-release 退出码 0" "$_rc" "0"
 [ "$_rc" = 0 ] || sed 's/^/     /' "$T/log1"
-REL1="$P1/release"
+REL1="$P1/__release"
 PKG="$REL1/源码.zip"
-if [ -f "$PKG" ]; then ok "产出了源码包 release/源码.zip"; else bad "没产出源码包"; fi
-[ -f "$REL1/dist.json" ] && ok "写了 release/dist.json" || bad "没有 release/dist.json"
-[ -f "$REL1/release.zip" ] && ok "写了 release/release.zip" || bad "没有 release/release.zip"
+if [ -f "$PKG" ]; then ok "产出了源码包 __release/源码.zip"; else bad "没产出源码包"; fi
+[ -f "$REL1/dist.json" ] && ok "写了 __release/dist.json" || bad "没有 __release/dist.json"
+[ -f "$REL1/release.zip" ] && ok "写了 __release/release.zip" || bad "没有 __release/release.zip"
 
 if [ -f "$PKG" ]; then
     LIST=$(J '
@@ -175,15 +175,15 @@ print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$PKG")
         "$(readlink "$T/x1/wtool/terminal/tmux/tmux.conf.alias" 2>/dev/null || echo '(不是软链)')" "tmux.conf"
 fi
 
-# release.zip 里是 output/（构建产物）+ 声明面
-chk "release.zip 里有构建产物 output/bin/tmux-helper" \
+# release.zip 里是 __output/（构建产物）+ 声明面
+chk "release.zip 里有构建产物 __output/bin/tmux-helper" \
     "$(J '
 import sys, zipfile
-print("yes" if "output/bin/tmux-helper" in zipfile.ZipFile(sys.argv[1]).namelist() else "no")' \
+print("yes" if "__output/bin/tmux-helper" in zipfile.ZipFile(sys.argv[1]).namelist() else "no")' \
        "$REL1/release.zip" 2>/dev/null || echo no)" "yes"
 
 # 来源标记：publish-release 靠它拒绝"把刚下下来的包又传回去"
-chk "release/.source 第一列是 packed" "$(cut -f1 "$REL1/.source" 2>/dev/null)" "packed"
+chk "__release/.source 第一列是 packed" "$(cut -f1 "$REL1/.source" 2>/dev/null)" "packed"
 chk ".source 记的目标仓对" "$(cut -f2 "$REL1/.source" 2>/dev/null)" "allinkernel/wtool-tmux-config"
 chk ".source 记的 tag 对" "$(cut -f3 "$REL1/.source" 2>/dev/null)" "v-1"
 
@@ -211,7 +211,7 @@ wt "$T/bin" "$WS1" "$ST1" publish-release terminal/tmux --tag=v-1 --dry-run \
 chk "dry-run 退出码 0" "$_rc" "0"
 grep -q '\[dry-run\]' "$T/log2" && ok "打了 [dry-run] 标记" \
     || { bad "没有 dry-run 标记"; sed 's/^/     /' "$T/log2"; }
-chk "dry-run 没有真的建/传 release" \
+chk "dry-run 没有真的建/传 __release" \
     "$(grep -cE 'release (create|upload)' "$T/gh.log" || true)" "0"
 if [ -f "$P1/scripts/release.json" ]; then
     bad "dry-run 不该写 scripts/release.json"
@@ -219,7 +219,7 @@ else
     ok "dry-run 没写 scripts/release.json"
 fi
 
-echo "== 3. publish-release：只上传 release/ =="
+echo "== 3. publish-release：只上传 __release/ =="
 # ★ .source 是内部标记，不能上传；同时把 --out 也验一下
 : > "$T/gh.log"
 _rc=0
@@ -229,7 +229,7 @@ chk "publish-release 退出码 0" "$_rc" "0"
 [ "$_rc" = 0 ] || sed 's/^/     /' "$T/log3"
 grep -q 'release create v-1 --repo allinkernel/wtool-tmux-config' "$T/gh.log" \
     && ok "对项目自己的仓建了 release（remote 叫 github 也认得）" \
-    || { bad "没建 release"; sed 's/^/     /' "$T/gh.log"; }
+    || { bad "没建 __release"; sed 's/^/     /' "$T/gh.log"; }
 grep -q 'release upload v-1 --repo allinkernel/wtool-tmux-config' "$T/gh.log" \
     && ok "上传到同一个仓" || bad "没上传"
 grep -q '源码.zip' "$T/gh.log" && ok "上传了源码.zip（pack-release 的产物）" \
@@ -273,7 +273,7 @@ print(",".join(k for k in need if k not in d))' "$RJ")" ""
     chk "dirty=false（只有 wtool 自己生成的文件是新的）" \
         "$(J 'import json,sys;print(str(json.load(open(sys.argv[1]))["dirty"]).lower())' "$RJ")" "false"
     # ADR-025：形状由 <build kind> 决定，引擎不嗅探。这个项目**没有** <build>
-    # （= kind="local"），output/ 下是 output/bin/ 这种**层名**而不是 <os>_<ver>/
+    # （= kind="local"），__output/ 下是 __output/bin/ 这种**层名**而不是 <os>_<ver>/
     # —— 硬扫出来当 target 就是假信息，所以 targets 必须是空的。
     chk "没写 <build>（=local）→ targets 是空的，不把层名当 target" "$(J '
 import json, sys
@@ -289,7 +289,7 @@ print(sum(1 for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == ".so
     chk "源码.zip 的 role=source" "$(J '
 import json, sys
 print(next(a["role"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "源码.zip"))' "$RJ")" "source"
-    chk "release.zip 的 role=release" "$(J '
+    chk "release.zip 的 role=__release" "$(J '
 import json, sys
 print(next(a["role"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "release.zip"))' "$RJ")" "release"
     chk "源码.zip 的 sha256 和盘上的一致" "$(J '
@@ -371,12 +371,12 @@ else
     ok "真工作区没有 wtool-base（无所谓）"
 fi
 
-echo "== 7. 拒绝：release/ 里没有 dist.json（不许凭空发）=="
-# publish-release 只认"本地打出来的包"：release/ 里没有 dist.json 就不是包，
+echo "== 7. 拒绝：__release/ 里没有 dist.json（不许凭空发）=="
+# publish-release 只认"本地打出来的包"：__release/ 里没有 dist.json 就不是包，
 # 拒绝并指路 pack-release。⚠️ 这里不断言退出码 —— 今天拒绝也是退出 0
 #（_failed 只统计不退出），断言 0 会把一个有争议的行为固定下来。
 WS7="$T/ws7"; ST7="$T/state7"; P7="$WS7/nodist"
-mkdir -p "$P7/release"
+mkdir -p "$P7/__release"
 cat > "$P7/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" id="nodist" priority="10">
@@ -384,19 +384,19 @@ cat > "$P7/wtool.xml" <<'EOF'
 </wtool>
 EOF
 git_init "$P7"
-# 有人手工往 release/ 里放了个文件 —— 它不是包
-echo 'stray' > "$P7/release/没清单.txt"
+# 有人手工往 __release/ 里放了个文件 —— 它不是包
+echo 'stray' > "$P7/__release/没清单.txt"
 : > "$T/gh.log"
 wt "$T/bin" "$WS7" "$ST7" publish-release nodist > "$T/log7" 2>&1 || true
-grep -q '没有 dist.json' "$T/log7" && ok "报明了 release/ 里没有 dist.json" \
+grep -q '没有 dist.json' "$T/log7" && ok "报明了 __release/ 里没有 dist.json" \
     || { bad "没报 dist.json 缺失"; sed 's/^/     /' "$T/log7"; }
 grep -q 'wtool pack-release nodist' "$T/log7" && ok "指路了 pack-release" \
     || { bad "没有指路 pack-release"; sed 's/^/     /' "$T/log7"; }
 chk "拒绝之后什么都没传" "$(grep -cE 'release (create|upload)' "$T/gh.log" || true)" "0"
 
-echo "== 8. 拒绝：release/.source 是 downloaded（别人打的包不许当自己的发）=="
+echo "== 8. 拒绝：__release/.source 是 downloaded（别人打的包不许当自己的发）=="
 WS8="$T/ws8"; ST8="$T/state8"; P8="$WS8/dl"
-mkdir -p "$P8/release"
+mkdir -p "$P8/__release"
 cat > "$P8/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" id="dl" priority="10">
@@ -405,9 +405,9 @@ cat > "$P8/wtool.xml" <<'EOF'
 EOF
 git_init "$P8"
 printf '{"project":"dl","repo":"someone/else","tag":"v-9","files":[],"volumes":[]}\n' \
-    > "$P8/release/dist.json"
+    > "$P8/__release/dist.json"
 printf 'downloaded\tsomeone/else\tv-9\tdeadbeef\t2026-01-01T00:00:00+08:00\n' \
-    > "$P8/release/.source"
+    > "$P8/__release/.source"
 : > "$T/gh.log"
 wt "$T/bin" "$WS8" "$ST8" publish-release dl > "$T/log8" 2>&1 || true
 grep -q '下载来的' "$T/log8" && ok "认出来这份包是下载来的" \
@@ -450,7 +450,7 @@ _rc=0
 wt "$T/bin-race" "$WS9" "$ST9" publish-release racy > "$T/log9" 2>&1 || _rc=$?
 chk "退出码是 0" "$_rc" "0"
 grep -q '已经存在' "$T/log9" && ok "认 create 的 already exists，直接复用" \
-    || { bad "没有复用已存在的 release"; sed 's/^/     /' "$T/log9"; }
+    || { bad "没有复用已存在的 __release"; sed 's/^/     /' "$T/log9"; }
 grep -q '创建 release 失败' "$T/log9" && bad "误判成创建失败" || ok "没有误报创建失败"
 grep -q '上传' "$T/log9" && ok "复用之后照常上传资产" || bad "复用后没上传"
 grep -q "release upload $TAG9 --repo fakeowner/racy" "$T/gh.log" \
@@ -591,7 +591,7 @@ grep -q '找不到项目' "$T/log11b" && ok "说清了是找不到这个项目" 
     || { bad "错误信息不对"; sed 's/^/     /' "$T/log11b"; }
 
 echo "== 12. 旧名字 publish / download 直接 die + 指路（不做兼容）=="
-# 两个老名字的语义变了（download 以前一步到 output/，现在只到 release/），
+# 两个老名字的语义变了（download 以前一步到 __output/，现在只到 __release/），
 # 静默兼容会做出错误的事 —— 所以是 die，不是"仍认但警告"。
 _rc=0
 wt "$T/bin" "$WS1" "$ST1" publish terminal/tmux > "$T/log12a" 2>&1 || _rc=$?
@@ -654,7 +654,7 @@ else
     ok "scripts/publish.sh 没被调用（文件存在不再等于能力声明）"
 fi
 chk "引擎照样打出了源码包" \
-    "$([ -f "$WS13/legacy/release/源码.zip" ] && echo yes || echo no)" "yes"
+    "$([ -f "$WS13/legacy/__release/源码.zip" ] && echo yes || echo no)" "yes"
 _rc=0
 wt "$T/bin" "$WS13" "$ST13" publish-release legacy --tag=l-1 > "$T/log13d" 2>&1 || _rc=$?
 chk "publish-release legacy 退出码 0" "$_rc" "0"
@@ -718,7 +718,7 @@ git_init "$P15"
 chk "pack-release lnk" \
     "$(wt "$T/bin" "$WS15" "$ST15" pack-release lnk --repo=fakeowner/lnk --tag=lnk-1 > "$T/log15" 2>&1 && echo 0 || echo 1)" "0"
 mkdir -p "$T/x15"
-unzip_to "$P15/release/源码.zip" "$T/x15" || true
+unzip_to "$P15/__release/源码.zip" "$T/x15" || true
 
 B="$T/x15/wtool/lnk"
 chk "相对软链的指向没被改写" "$(readlink "$B/themes/alias.zsh-theme")" "real.zsh-theme"

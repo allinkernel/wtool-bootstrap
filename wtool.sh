@@ -6,7 +6,7 @@
 #                      系统层：/etc 下的文件 + 要跑的脚本/playbook + apt 包。
 #                      **可能要 sudo、要联网**；和 install 永不互相调用
 #   wtool install      <项目目录> [--dry-run] [--force] [--no-script] [--prune]
-#                      用户层：项目 install.sh（output/ → ~/.wtool）→
+#                      用户层：项目 install.sh（__output/ → ~/.wtool）→
 #                      wtool.xml 的 link（影子 HOME → $HOME）。**永不 sudo、永不联网**
 #                      --prune：顺手清掉"清单里已经删掉、磁盘上还在"的软链（BL-15）
 #   wtool uninstall    <项目目录>|--id <id> [--dry-run] [--force] [--no-script]
@@ -19,30 +19,33 @@
 #   ── 产物与发布 ─────────────────────────────────────────────
 #   wtool build     [<项目>...|all] [--dry-run] [--target=<目标系统>]
 #                       有 build/layers.tsv 的 kind="docker" 项目由**引擎驱动容器**
-#                       （ADR-0029：起容器 / commit / 落 layer/ / 导 output/），
+#                       （ADR-0029：起容器 / commit / 落 __layer/ / 导 __output/），
 #                       其余项目跑自己的 scripts/build.sh
 #   wtool download-release [<项目>...|all] [--dry-run]
-#                       读**项目里提交的** scripts/release.json → 下到 <项目>/release/
+#                       读**项目里提交的** scripts/release.json → 下到 <项目>/__release/
 #                       只下载 + 校验，**不解包**（解包是 unpack-release）
 #   wtool pack-release   <项目>... [--tag=T] [--repo=owner/repo] [--volume-size=32M]
-#                       打包到 <项目>/release/：源码.zip、release.zip（大的切分卷）、
+#                       打包到 <项目>/__release/：源码.zip、release.zip（大的切分卷）、
 #                       dist.json、两个 -hash.txt、.source 来源标记，
 #                       另写 docs/download.md
 #   wtool unpack-release <项目>... [--from=目录]
-#                       照 dist.json 校验每卷 sha256 → 拼接 → 解到 output/
+#                       照 dist.json 校验每卷 sha256 → 拼接 → 解到 __output/
 #   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
-#                       把 <项目>/release/ 里的东西传到 GitHub Release（**只上传**），
+#                       把 <项目>/__release/ 里的东西传到 GitHub Release（**只上传**），
 #                       成功之后写 scripts/release.json（下载清单，记得提交）
-#   wtool layer-save     <项目> --image=<镜像> [--target=] [--layer=]
-#                       docker 镜像 → <项目>/layer/<target>/（OCI 布局，blob 按 sha256 去重）
-#   wtool layer-load     <项目> [--target=]
-#                       <项目>/layer/<target>/ → docker（接着构建 / 恢复容器用）
 #   wtool unpack-layer   <项目> [--layer=] [--target=]
-#                       layer/<target>/ 的顶层 blob → output/<target>/<层>/。**不联网、不要 docker**
+#                       __layer/<target>/ 的顶层 blob → __output/<target>/<层>/。**不联网、不要 docker**
 #   wtool push-layer     <项目>... [--registry=<前缀>] [--target=] [--layer=]
-#                       layer/<target>/ 的层镜像 → 镜像仓库（docker push）
+#                       __layer/<target>/ 的层镜像 → 镜像仓库（docker push）
 #   wtool pull-layer     <项目>... [--registry=<前缀>] [--target=] [--layer=]
-#                       镜像仓库 → layer/<target>/（**目标机不需要 docker**）
+#                       镜像仓库 → __layer/<target>/（**目标机不需要 docker**）
+#
+#   下面这两条是**内部命令**（引擎构建时自己调、agent 排查时用），
+#   不在上面的清单里，也不会出现在 `wtool` 看板的列名里：
+#   wtool _layer-save    <项目> --image=<镜像> [--target=] [--layer=]
+#                       docker 镜像 → <项目>/__layer/<target>/（OCI 布局，blob 按 sha256 去重）
+#   wtool _layer-load    <项目> [--target=]
+#                       <项目>/__layer/<target>/ → docker（接着构建 / 恢复容器用）
 #
 #   ── 一次装好 ───────────────────────────────────────────────
 #   wtool bootstrap [--dry-run] [--force]   所有项目 install（**不做系统层**）
@@ -470,8 +473,8 @@ wt_effective_jobs() {
 #
 # 引擎对每一层做四件事（前两件就是 §5.1 那两条管道）：
 #   ① 镜像不在 docker 里 → 从父层起容器、跑命令、commit（在 → 跳过，这就是续跑）
-#   ② 存进 layer/<target>/（docker save | tar -x，ADR-024）
-#   ③ 从 layer/ 的顶层 blob 导出成 output/<target>/<层>/（过滤 + 扫 OWNED.tsv）
+#   ② 存进 __layer/<target>/（docker save | tar -x，ADR-024）
+#   ③ 从 __layer/ 的顶层 blob 导出成 __output/<target>/<层>/（过滤 + 扫 OWNED.tsv）
 #   ④ 每一步都可跳过 —— 重跑 wtool build 不重编已经编好的层
 #
 # 为什么容器要 `-d` 起、`exec -d` 跑、靠**日志文件里的 EXIT=** 判成败：
@@ -481,7 +484,7 @@ wt_effective_jobs() {
 
 wt_docker_slug() { printf '%s' "$1" | tr '/.' '--' | tr -cd 'A-Za-z0-9_-'; }
 
-# 一层：容器生命周期 + 落 layer/ + 导出 output/
+# 一层：容器生命周期 + 落 __layer/ + 导出 __output/
 #   $1=项目目录 $2=项目 id $3=target $4=基础镜像 $5=层名 $6=父层镜像引用
 #   $7=本层镜像引用（- = 占位层）$8=命令 $9=日志目录
 #   返回 0 = 这层好了（编的或跳过的）
@@ -489,7 +492,7 @@ wt_docker_layer() {
     _dl_dir=$1; _dl_pid=$2; _dl_t=$3; _dl_base=$4; _dl_layer=$5
     _dl_pref=$6; _dl_ref=$7; _dl_cmd=$8; _dl_logdir=$9
     _dl_lay=$(wt_layer_dir "$_dl_dir" "$_dl_t")
-    _dl_out="$_dl_dir/output/$_dl_t/$_dl_layer"
+    _dl_out="$_dl_dir/__output/$_dl_t/$_dl_layer"
     # 输入指纹的文件名**先定下来**：跳过构建的那次也要用它写产出事实
     # （指纹本身是上一次跑留下的，还在 state 里）
     _dl_fp="$_dl_logdir/$(wt_docker_slug "$_dl_layer").fingerprint.json"
@@ -505,31 +508,31 @@ wt_docker_layer() {
 
     _dl_have=0
     "$(wt_docker)" image inspect "$_dl_ref" >/dev/null 2>&1 && _dl_have=1
-    # docker 里没有，但 **layer/ 里有** → 装回来（ADR-024 §7/§8：构建状态全在
-    # committed 的镜像里，docker 存储只是缓存、layer/ 才是项目的资产）。
+    # docker 里没有，但 **__layer/ 里有** → 装回来（ADR-024 §7/§8：构建状态全在
+    # committed 的镜像里，docker 存储只是缓存、__layer/ 才是项目的资产）。
     # 这一条是"删掉镜像之后接着走"的关键：不先试它，就会把已经编好的层重编一遍。
     if [ "$_dl_have" = 0 ] && [ -f "$_dl_lay/index.json" ]; then
         _dl_inlay=$(wt_layer_entries "$_dl_lay" 2>/dev/null \
                     | awk -F'\t' -v l="$_dl_layer" '$1==l{print "yes"; exit}')
         if [ "$_dl_inlay" = yes ]; then
-            wt_info "  $_dl_layer 不在 docker 里，但 layer/$_dl_t/ 里有 → 装回来"
-            wt_layer_load "$_dl_dir" "$_dl_t" || wt_die "layer/$_dl_t/ 装不回 docker"
+            wt_info "  $_dl_layer 不在 docker 里，但 __layer/$_dl_t/ 里有 → 装回来"
+            wt_layer_load "$_dl_dir" "$_dl_t" || wt_die "__layer/$_dl_t/ 装不回 docker"
             "$(wt_docker)" image inspect "$_dl_ref" >/dev/null 2>&1 && _dl_have=1
         fi
     fi
     if [ "$_dl_have" = 0 ]; then
-        # 要从父层出发：父层镜像也必须在 docker 里（同样先试 layer/）
+        # 要从父层出发：父层镜像也必须在 docker 里（同样先试 __layer/）
         if [ "$_dl_pref" = "-" ]; then
             _dl_from=$_dl_base
         else
             _dl_from=$_dl_pref
             if ! "$(wt_docker)" image inspect "$_dl_from" >/dev/null 2>&1; then
                 [ -f "$_dl_lay/index.json" ] || wt_die "$_dl_layer 的父层 $_dl_from 不在 docker 里，
-  layer/$_dl_t/ 也还不存在 —— 没法从中间开始编"
-                wt_info "  父层 $_dl_from 不在 docker 里 → 从 layer/$_dl_t/ 装回来"
+  __layer/$_dl_t/ 也还不存在 —— 没法从中间开始编"
+                wt_info "  父层 $_dl_from 不在 docker 里 → 从 __layer/$_dl_t/ 装回来"
                 wt_layer_load "$_dl_dir" "$_dl_t" || wt_die "装不回 docker"
                 "$(wt_docker)" image inspect "$_dl_from" >/dev/null 2>&1 \
-                    || wt_die "layer/$_dl_t/ 里没有 $_dl_from"
+                    || wt_die "__layer/$_dl_t/ 里没有 $_dl_from"
             fi
         fi
 
@@ -595,29 +598,29 @@ wt_docker_layer() {
         wt_step "$_dl_layer：容器里跑完了 → 固化 $_dl_ref"
     else
         wt_step "$_dl_layer：docker 里已经有 $_dl_ref，跳过构建"
-        [ -f "$_dl_lay/index.json" ] || wt_info "  它还没进 layer/$_dl_t/ → 存一份（这是项目的资产）"
+        [ -f "$_dl_lay/index.json" ] || wt_info "  它还没进 __layer/$_dl_t/ → 存一份（这是项目的资产）"
     fi
 
-    # ② 存进 layer/<target>/（已经存过就不重复 save —— GB 级的 I/O）
+    # ② 存进 __layer/<target>/（已经存过就不重复 save —— GB 级的 I/O）
     _dl_inlay=$(wt_layer_entries "$_dl_lay" 2>/dev/null \
                 | awk -F'\t' -v l="$_dl_layer" '$1==l{print "yes"; exit}')
     if [ "$_dl_inlay" != yes ]; then
         wt_layer_import "$_dl_dir" "$_dl_t" "$_dl_ref" "$_dl_layer" \
-            || wt_die "存不进 layer/$_dl_t/（$_dl_ref）"
+            || wt_die "存不进 __layer/$_dl_t/（$_dl_ref）"
     fi
 
-    # ③ 导出成 output/<target>/<层>/ —— 每层只导自己的增量（ADR-025 第 4 条）
+    # ③ 导出成 __output/<target>/<层>/ —— 每层只导自己的增量（ADR-025 第 4 条）
     if [ -f "$_dl_out/OWNED.tsv" ]; then
-        wt_step "$_dl_layer：output/ 里已经有了，跳过导出"
+        wt_step "$_dl_layer：__output/ 里已经有了，跳过导出"
     else
-        wt_layer_export "$_dl_dir" "$_dl_t" "$_dl_layer" "$_dl_dir/output/$_dl_t" \
+        wt_layer_export "$_dl_dir" "$_dl_t" "$_dl_layer" "$_dl_dir/__output/$_dl_t" \
             "$(wt_docker_export_filter "$_dl_dir")" >/dev/null \
             || wt_die "$_dl_layer 导出失败"
-        wt_step "$_dl_layer → output/$_dl_t/$_dl_layer/（$(du -sh -- "$_dl_out" 2>/dev/null | cut -f1)）"
+        wt_step "$_dl_layer → __output/$_dl_t/$_dl_layer/（$(du -sh -- "$_dl_out" 2>/dev/null | cut -f1)）"
         _dl_exported=1
     fi
 
-    # 产出事实跟着层走（不提交）：layer/<target>/<层>.json（ADR-026 §4）。
+    # 产出事实跟着层走（不提交）：__layer/<target>/<层>.json（ADR-026 §4）。
     # 只在"刚导出"或"还没有事实文件"时写 —— 否则每次重跑都把 exported_at 刷新一遍，
     # 那份事实就不再是"什么时候产出来的"了。
     _dl_facts="$_dl_lay/$(printf '%s' "$_dl_layer" | tr '/' '-').json"
@@ -700,7 +703,7 @@ PYFP
 }
 
 # 一层的**产出事实**（ADR-026 §4 的"事实"那一半）：跟着层走，不提交。
-# 落在 layer/<target>/<层>.json —— 实测 `docker load` 容忍布局目录里多出来的文件，
+# 落在 __layer/<target>/<层>.json —— 实测 `docker load` 容忍布局目录里多出来的文件，
 # 所以不用另起一个目录（那会让"哪一层"和文件对不上号）。
 wt_docker_facts() {   # <项目目录> <项目 id> <target> <层> <镜像引用> <输出层目录> <指纹文件>
     _fc_dir=$1; _fc_pid=$2; _fc_t=$3; _fc_layer=$4; _fc_ref=$5; _fc_out=$6; _fc_fp=$7
@@ -857,7 +860,7 @@ wt_docker_run_plan() {   # <项目目录> <项目 id> <target> <基础镜像> <p
                 # 否则用户只看到"✓"，不知道到底干了活没有（细节仍在那一层的日志里）
                 _dp_note=""
                 grep -q '跳过构建' "$_dp_logdir/$_dp_slug.wtool.log" 2>/dev/null && _dp_note="（docker 里已有，跳过）"
-                grep -q '装回来' "$_dp_logdir/$_dp_slug.wtool.log" 2>/dev/null && _dp_note="（从 layer/ 恢复）"
+                grep -q '装回来' "$_dp_logdir/$_dp_slug.wtool.log" 2>/dev/null && _dp_note="（从 __layer/ 恢复）"
                 wt_step "✓ $_dp_l$_dp_note"
             else
                 wt_warn "✗ $_dp_l（退出码 $_dp_rc），它的日志："
@@ -906,7 +909,7 @@ wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--jobs=N
         wt_info "── $_db_pid  目标 $_db_t（基础镜像 $_db_base）"
         _db_plan=$(python3 "$PY" docker-plan "$_db_dir" --target="$_db_t") \
             || wt_die "$_db_pid 的 build/layers.tsv 有问题（上面写了）"
-        _db_out="$_db_dir/output/$_db_t"
+        _db_out="$_db_dir/__output/$_db_t"
         if wt_dry; then
             printf '%s\n' "$_db_plan" | while IFS='	' read -r _l _p _r _c; do
                 [ -n "$_l" ] || continue
@@ -934,7 +937,7 @@ wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--jobs=N
 $_db_targets
 EOF
     [ "$_db_n" -gt 0 ] || wt_die "$_db_pid 一个目标都没编"
-    wt_info "$_db_pid：$_db_n 个目标就绪（层在 layer/，安装产物在 output/）"
+    wt_info "$_db_pid：$_db_n 个目标就绪（层在 __layer/，安装产物在 __output/）"
     return 0
 }
 
@@ -943,7 +946,7 @@ EOF
 #
 # 「怎么构建」由项目在 `wtool.xml` 的 `<build kind="local|docker"/>` 里声明
 # （ADR-025）—— 引擎因此能在**动手之前**判断这台机器行不行（没 docker 就直接指路
-# `download-release`，需求 4），也能知道 `output/` 该长什么形状。
+# `download-release`，需求 4），也能知道 `__output/` 该长什么形状。
 # 具体编什么、产物在哪，仍然是脚本自己的事。
 # --------------------------------------------------------------------------
 cmd_build() {
@@ -1037,8 +1040,8 @@ EOF
             # 不等脚本跑到一半才 die，也不装傻继续。
             wt_warn "$_pid 声明了 <build kind=\"docker\"/>，但这台机器上没有 docker —— 跳过。"
             wt_step "拿现成的包（推荐）："
-            wt_step "  wtool download-release $_pid     # 发布页 → release/"
-            wt_step "  wtool unpack-release   $_pid     # release/ → output/"
+            wt_step "  wtool download-release $_pid     # 发布页 → __release/"
+            wt_step "  wtool unpack-release   $_pid     # __release/ → __output/"
             wt_step "  wtool install          $_pid"
             _failed=$((_failed + 1))
             continue
@@ -1064,9 +1067,9 @@ EOF
 }
 
 # --------------------------------------------------------------------------
-# download-release：从 GitHub Release 把包下到 <项目>/release/
+# download-release：从 GitHub Release 把包下到 <项目>/__release/
 #
-# **它只干一件事**：下载 + 校验 + 落到 `release/`。**不解包、不认包结构** ——
+# **它只干一件事**：下载 + 校验 + 落到 `__release/`。**不解包、不认包结构** ——
 # 解包是 `unpack-release` 的事（ADR-023：四条边各自单一职责）。
 #
 # 该下什么、每个文件的 sha256 是多少，一律读**项目里提交的** `scripts/release.json`：
@@ -1140,7 +1143,7 @@ $(python3 "$PY" publish-list --root "$WTOOL_ROOT")
 EOF
         [ "$_n" -gt 0 ] || wt_info "  （一个都没有）"
         wt_info "下载其中一个：wtool download-release <项目>；全部：wtool download-release all"
-        wt_info "下完还要 wtool unpack-release <项目> 才产出 output/ —— 两步是分开的。"
+        wt_info "下完还要 wtool unpack-release <项目> 才产出 __output/ —— 两步是分开的。"
         return 0
     fi
 
@@ -1203,7 +1206,7 @@ PY
         _repo=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8")).get("repo",""))' "$_rl")
         _tag=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8")).get("tag",""))' "$_rl")
         wt_info "  清单 : scripts/release.json（$_repo $_tag）"
-        wt_info "  落点 : release/"
+        wt_info "  落点 : __release/"
 
         if wt_dry; then
             printf '%s\n' "$_rows" | while IFS='	' read -r _n _s _b _u; do
@@ -1213,13 +1216,13 @@ PY
             continue
         fi
 
-        mkdir -p -- "$_path/release"
+        mkdir -p -- "$_path/__release"
         _ids=""
         _ids_fetched=0
         _got=0
         while IFS='	' read -r _n _s _b _u; do
             [ -n "${_n:-}" ] || continue
-            _dest="$_path/release/$_n"
+            _dest="$_path/__release/$_n"
             # 已经下好了（sha 对得上）就跳过 —— 重跑是幂等的
             if [ -f "$_dest" ] && [ -n "$_s" ] && \
                [ "$(sha256sum -- "$_dest" 2>/dev/null | cut -d' ' -f1)" = "$_s" ]; then
@@ -1259,7 +1262,7 @@ EOF
 
         # 来源标记：publish-release 靠它拒绝"把刚下下来的包又传回去"（ADR-026）
         printf 'downloaded\t%s\t%s\t%s\n' "$_repo" "$_tag" "$(date -Iseconds)" \
-            > "$_path/release/.source"
+            > "$_path/__release/.source"
         wt_record_action "$_pid" download
         wt_info "  下了 $_got 个文件"
         wt_info "  下一步: wtool unpack-release $_pid"
@@ -1332,18 +1335,18 @@ cmd_install() {
 
     wt_git_precheck "$_project"
 
-    # 产物检查（§4.1）：项目里有 build.sh ⟺ 装之前 output/ 得在。
+    # 产物检查（§4.1）：项目里有 build.sh ⟺ 装之前 __output/ 得在。
     # 理由：install 是**断网也要能跑**的，所以它不替你去编译或下载 ——
     # 但也不能装作没事，那样装出来的是半成品。
     if wt_project_script "$_project" build.sh >/dev/null 2>&1 \
        ; then
-        if [ -z "$(ls -A -- "$_project/output" 2>/dev/null)" ]; then
+        if [ -z "$(ls -A -- "$_project/__output" 2>/dev/null)" ]; then
             if [ "${WTOOL_FORCE:-0}" = 1 ]; then
-                wt_warn "output/ 还没有东西（--force 继续），装出来的可能不完整"
+                wt_warn "__output/ 还没有东西（--force 继续），装出来的可能不完整"
             else
-                wt_die "$_project 要先产出产物（output/ 是空的）：
-  wtool download-release $_project   # 下现成的包到 release/（要联网）
-  wtool unpack-release   $_project   # 拼分卷 + 解到 output/
+                wt_die "$_project 要先产出产物（__output/ 是空的）：
+  wtool download-release $_project   # 下现成的包到 __release/（要联网）
+  wtool unpack-release   $_project   # 拼分卷 + 解到 __output/
   wtool build    $_project      # 或者自己编（可能要几十分钟）
 install 不替你做这个决定 —— 它永不联网。"
             fi
@@ -1367,7 +1370,7 @@ install 不替你做这个决定 —— 它永不联网。"
 
     # 执行顺序（§4.2，和以前相反，别改回去）：
     #   ① 引擎基建：中转链接 + env 块
-    #   ① 项目自己的 install.sh：output/ → ~/.wtool
+    #   ① 项目自己的 install.sh：__output/ → ~/.wtool
     #   ② wtool.xml 的 link：影子 HOME → $HOME
     # ②建的软链**指向**①铺出来的东西，顺序反了就是先建一堆悬空链接。
     wt_plan_exec "$_scratch/plan.tsv"
@@ -1377,7 +1380,7 @@ install 不替你做这个决定 —— 它永不联网。"
     if [ "$_no_script" = 1 ]; then
         wt_info "跳过项目自己的 install.sh（--no-script）"
     elif wt_project_script "$_project" install.sh >/dev/null; then
-        wt_info "项目脚本: install.sh（output/ → ~/.wtool）"
+        wt_info "项目脚本: install.sh（__output/ → ~/.wtool）"
         wt_run_project_script "$_project" install.sh || wt_die "install.sh 失败: $WTOOL_PROJECT_ID"
     fi
 
@@ -1932,13 +1935,13 @@ cmd_bootstrap() {
 
         _needs=""
         wt_project_script "$_path" build.sh >/dev/null 2>&1 && _needs="build"
-        # 判据和 `wtool install` **完全一致**：只看 `output/` 里有没有东西。
+        # 判据和 `wtool install` **完全一致**：只看 `__output/` 里有没有东西。
         # ⚠️ 别把"做过 build / 下过包"也算进来：`download-release` 只把包放到
-        #    `release/`，`output/` 还是空的 —— 那时候放行，紧接着 install 就会 die
+        #    `__release/`，`__output/` 还是空的 —— 那时候放行，紧接着 install 就会 die
         #    （实测：这两个判据不一致会让人看到"bootstrap 说能装、装的时候说没产物"）。
         _ready=0
         if [ -n "$_needs" ]; then
-            [ -n "$(ls -A -- "$_path/output" 2>/dev/null)" ] && _ready=1
+            [ -n "$(ls -A -- "$_path/__output" 2>/dev/null)" ] && _ready=1
         fi
 
         if [ -n "$_needs" ] && [ "$_ready" = 0 ]; then
@@ -2035,9 +2038,9 @@ cmd_sudo_bootstrap() {
 }
 
 # --------------------------------------------------------------------------
-# pack-release：打包 → <项目>/release/
+# pack-release：打包 → <项目>/__release/
 #
-# 产出全部落在 release/：源码.zip、release.zip、（超 32M 就切分卷）、dist.json、
+# 产出全部落在 __release/：源码.zip、release.zip、（超 32M 就切分卷）、dist.json、
 # 两个 -hash.txt，外加一个 `.source` 来源标记（`packed` / `downloaded` ——
 # publish-release 靠它拒绝"把刚下下来的包又传回去"）。
 # 另外往**项目目录里**写 docs/download.md（给人看的下载页，进 Git）。
@@ -2065,7 +2068,7 @@ cmd_pack_release() {
     done
     [ -n "$_targets" ] || wt_die "用法: wtool pack-release <项目>... [--tag=TAG] [--repo=owner/repo] [--volume-size=32M]
 
-  产出落在 <项目>/release/：源码.zip、release.zip（大的切分卷）、dist.json、
+  产出落在 <项目>/__release/：源码.zip、release.zip（大的切分卷）、dist.json、
   两个 -hash.txt、.source 来源标记；另外写 <项目>/docs/download.md"
     [ -n "$_vol_override" ] || _vol_override=${WTOOL_VOLUME_SIZE:-32M}
 
@@ -2100,7 +2103,7 @@ cmd_pack_release() {
 # unpack-release：按 dist.json 校验每卷 sha256 → 拼接 → 解开
 #
 # 只认 dist.json，**不需要任何项目特定知识**：
-#   release 那一份解到项目根（里面有 output/ 和声明面 wtool.xml / env.zsh /
+#   release 那一份解到项目根（里面有 __output/ 和声明面 wtool.xml / env.zsh /
 #   env.bash），源码包只校验不铺开。
 # "解开"和"装"是两件事 —— 装是 wtool install 的事（这样才登记得进清单、卸得掉）。
 # --------------------------------------------------------------------------
@@ -2117,7 +2120,7 @@ cmd_unpack_release() {
     done
     [ -n "$_targets" ] || wt_die "用法: wtool unpack-release <项目>... [--from=下载目录]
 
-  默认从 <项目>/release/ 读 dist.json 和分卷；--from= 可以指到别处。" \
+  默认从 <项目>/__release/ 读 dist.json 和分卷；--from= 可以指到别处。" \
         ""
     [ -z "$_from" ] || _from=$(cd -- "$_from" && pwd) || wt_die "目录不存在: $_from"
 
@@ -2147,8 +2150,8 @@ cmd_unpack_release() {
         else
             wt_unpack_release "$_path" "$_scratch"
         fi
-        # 改名（2026-09，release/ → output/）之前打的包，解开后顶层是 release/<target>/。
-        # 这里顺手提示一句 —— 不然下一步 `wtool install` 只会说"output/ 是空的"，
+        # 改名（2026-09，__release/ → __output/）之前打的包，解开后顶层是 __release/<target>/。
+        # 这里顺手提示一句 —— 不然下一步 `wtool install` 只会说"__output/ 是空的"，
         # 人会去重下几百兆，而其实只要 mv 一下。
         wt_check_old_dir_names "$_pid" "$_path"
         _done=$((_done + 1))
@@ -2156,12 +2159,13 @@ cmd_unpack_release() {
     wt_info "unpack-release 完成（$_done 个项目）"
 }
 
-# 目录改名（2026-09）的迁移提示：老机器上还叫 release/ 和 publish/ 的目录。
-#   publish/  →  release/    （打包发布产出）
-#   release/  →  output/     （构建产出）
+# 目录改名（2026-09 → 2026-10）的迁移提示：老机器上还叫 release/ 和 publish/ 的目录。
+#   publish/   →  __release/   （打包发布产出）
+#   release/   →  __output/    （构建产出；2026-10 又加了下划线前缀，见 ADR-0033）
 # **只 detect + 提示，不自动 mv**：目录名是用户的决定，而且现在可能有进程正在
 # 往里写（build/download 跑一半），什么时候搬只有人知道。
-# 旧 release/ 靠**形状**认：里面是 <os>_<ver>/<层>/；新的 release/ 是 *.zip + dist.json。
+# 旧 release/ 靠**形状**认：里面是 <os>_<ver>/<层>/；新的 __output/ 也是这样，
+# 所以这条只对"名字还没改、里面已经是新产出"的老机器有用（提示他搬）。
 wt_check_old_dir_names() {   # <项目 id> <项目目录>（都为空 = 工作区里全部项目）
     _od_id=$1; _od_path=$2
     if [ -n "$_od_path" ]; then
@@ -2173,8 +2177,9 @@ wt_check_old_dir_names() {   # <项目 id> <项目目录>（都为空 = 工作�
         [ -d "$_od_dir" ] || continue
         _od_old_pub=0
         [ -d "$_od_dir/publish" ] && _od_old_pub=1
-        # 旧 release/ 靠**形状**认：里面是 <os>_<ver>/<层>/；新的 release/ 是 *.zip + dist.json。
+        # 旧 release/ 靠**形状**认：里面是 <os>_<ver>/<层>/（新的 __release/ 是 *.zip + dist.json）。
         _od_old_rel=0
+        # ⚠️ 这里扫的是**旧名字** release/（没有下划线）—— 别跟着改名走
         for _od_sub in "$_od_dir"/release/*/; do
             [ -d "$_od_sub" ] || continue
             case $(basename -- "$_od_sub") in
@@ -2184,13 +2189,13 @@ wt_check_old_dir_names() {   # <项目 id> <项目目录>（都为空 = 工作�
         done
         if [ "$_od_old_pub" = 1 ] && [ "$_od_old_rel" = 1 ]; then
             # 两个都在：**顺序不能反**，反了 mv publish release 会把 publish/ 塞进
-            # 还是旧构建产出的 release/ 里，第二步再整个搬去 output/ —— 变成 output/publish/。
+            # 还是旧构建产出的 release/ 里，第二步再整个搬去 __output/ —— 变成 __output/publish/。
             wt_warn "[$_od_pid] 两个旧目录都在，按这个顺序搬（反了会把 publish/ 塞进 release/ 里）："
-            wt_warn "  cd $_od_dir && mv release output && mv publish release"
+            wt_warn "  cd $_od_dir && mv release __output && mv publish __release"
         elif [ "$_od_old_pub" = 1 ]; then
-            wt_warn "[$_od_pid] 旧目录名：publish/ 现在叫 release/，请 mv publish release"
+            wt_warn "[$_od_pid] 旧目录名：publish/ 现在叫 __release/，请 mv publish __release"
         elif [ "$_od_old_rel" = 1 ]; then
-            wt_warn "[$_od_pid] 这看起来是旧名字的构建产出，请 mv release output"
+            wt_warn "[$_od_pid] 这看起来是旧名字的构建产出，请 mv release __output"
         fi
     done
 }
@@ -2691,7 +2696,7 @@ EOF
 #
 # 行为由项目自己的 wtool.xml 决定：
 #   **只上传**：打包是 pack-release 的事（ADR-023）。要传的东西必须已经在
-#   <项目>/release/ 里，而且带 dist.json 与 .source=packed。
+#   <项目>/__release/ 里，而且带 dist.json 与 .source=packed。
 #
 #   kind="source"（默认）  → 传到项目 origin 的 release（或 to= 指定的仓）
 #   to="owner/repo"        → 推到别的仓
@@ -2793,7 +2798,7 @@ cmd_publish_release() {
     # 失败时别把产物一起删掉。
     # 踩过：构建跑满 30 分钟、产物 576M，上传到一半代理断线（EOF），
     # 然后 trap 把临时目录连产物一起清了 —— 想重试就得从头再编一遍。
-    # 这里产物本来就住在项目的 release/ 里，所以只需要别删它。
+    # 这里产物本来就住在项目的 __release/ 里，所以只需要别删它。
     _cleanup_scratch() { rm -rf -- "$_scratch"; }
     trap '_cleanup_scratch' EXIT INT TERM
 
@@ -2855,17 +2860,17 @@ cmd_publish_release() {
             fi
         fi
 
-        # 要传的东西：**必须是本地打出来的**（release/ 里那一份）
-        _rel="$_path/release"
+        # 要传的东西：**必须是本地打出来的**（__release/ 里那一份）
+        _rel="$_path/__release"
         if [ ! -f "$_rel/dist.json" ]; then
-            wt_warn "  release/ 里没有 dist.json —— 先打包：wtool pack-release $_pid"
+            wt_warn "  __release/ 里没有 dist.json —— 先打包：wtool pack-release $_pid"
             _failed=$((_failed + 1))
             continue
         fi
         # 来源标记：刚 download-release 下来的包不许当自己的发出去（ADR-026）
         if [ -f "$_rel/.source" ] && \
            [ "$(cut -f1 < "$_rel/.source" 2>/dev/null)" = "downloaded" ]; then
-            wt_warn "  release/ 里是**下载来的**包（$(cut -f2,3 < "$_rel/.source" 2>/dev/null | tr '\t' ' ')）"
+            wt_warn "  __release/ 里是**下载来的**包（$(cut -f2,3 < "$_rel/.source" 2>/dev/null | tr '\t' ' ')）"
             wt_warn "  不能把别人打的包当自己的发出去。要发自己这一版：wtool pack-release $_pid"
             _failed=$((_failed + 1))
             continue
@@ -2887,12 +2892,12 @@ cmd_publish_release() {
         fi
 
         # ⚠️ `.source` 是内部标记（来源：packed / downloaded），**不上传、不进清单**。
-        # 它以点开头，所以 `release/*` 这种 shell 展开本来也看不到它 ——
+        # 它以点开头，所以 `__release/*` 这种 shell 展开本来也看不到它 ——
         # 这里显式排除是为了 find 那条路。
         _files=$(find "$_rel" -maxdepth 1 -type f ! -name '.source' | LC_ALL=C sort)
         _n=$(printf '%s\n' "$_files" | awk 'NF{n++} END{print n+0}')
         if [ "$_n" = 0 ]; then
-            wt_warn "  release/ 里什么都没有，跳过（先 wtool pack-release $_pid）"
+            wt_warn "  __release/ 里什么都没有，跳过（先 wtool pack-release $_pid）"
             _failed=$((_failed + 1))
             continue
         fi
@@ -2949,7 +2954,7 @@ except Exception:
         # 发布声明：**提交进仓库**的 scripts/release.json（ADR-026）。
         # 它是 download-release 唯一要读的东西，所以必须在上传成功之后才写。
         # targets[] 的形状由 <build kind> 决定（ADR-025）—— 判据在 planner 里
-        # （`release-targets`），shell 不再自己扫 output/*/：kind="local" 的项目
+        # （`release-targets`），shell 不再自己扫 __output/*/：kind="local" 的项目
         # 那样扫出来的是**层名**（"bin"/"main"），是假信息。
         _targets=$(python3 "$PY" release-targets "$_path" 2>/dev/null || true)
         # "$_dirty" 已经扣掉 wtool 自己生成的文件（release.json / download.md）
@@ -3091,16 +3096,16 @@ _publish_kind_cn() {
 }
 
 # --------------------------------------------------------------------------
-# push-layer / pull-layer / layer-save / layer-load / unpack-layer
+# push-layer / pull-layer / unpack-layer（+ 内部命令 _layer-save / _layer-load）
 #
 # **第二条发布通道：容器镜像仓库**。运的和 pack-release / publish-release（GitHub 分卷那条）
-# 是同一份东西 —— `<项目>/layer/<target>/` 里那几个**真镜像**：
+# 是同一份东西 —— `<项目>/__layer/<target>/` 里那几个**真镜像**：
 #
-#   layer-save     docker 里的镜像              →  layer/<target>/（OCI 布局，ADR-024）
-#   layer-load     layer/<target>/              →  docker
-#   unpack-layer   layer/<target>/ 的顶层 blob  →  output/<target>/<层>/（**不联网、不要 docker**）
-#   push-layer     layer/<target>/              →  镜像仓库
-#   pull-layer     镜像仓库                     →  layer/<target>/（**目标机不需要 docker**）
+#   _layer-save    docker 里的镜像              →  __layer/<target>/（OCI 布局，ADR-024；内部）
+#   _layer-load    __layer/<target>/              →  docker（内部）
+#   unpack-layer   __layer/<target>/ 的顶层 blob  →  __output/<target>/<层>/（**不联网、不要 docker**）
+#   push-layer     __layer/<target>/              →  镜像仓库
+#   pull-layer     镜像仓库                     →  __layer/<target>/（**目标机不需要 docker**）
 #
 # 为什么值得多这条通道（2026-09-26 实测）：上传两条路一样慢（~0.25 MB/s），
 # 但下载 **ACR 10.2 MB/s vs GitHub 2.6~4.8 MB/s** —— 发布一次慢，取用快一倍多。
@@ -3121,7 +3126,7 @@ _publish_kind_cn() {
 wt_layer_repo() { printf '%s/%s\n' "$1" "$(basename "$2")"; }
 wt_layer_tag()  { printf '%s-%s\n' "$(printf '%s' "$1" | tr '/' '-')" "$2"; }
 
-# 读一棵 layer/<target>/ 布局的层清单：一行一个镜像，TSV 五列
+# 读一棵 __layer/<target>/ 布局的层清单：一行一个镜像，TSV 五列
 #   层名 <TAB> target <TAB> docker 里的镜像名 <TAB> manifest digest <TAB> ref.name
 # "按层名找镜像"的操作（push / unpack）都从这里拿清单 —— 唯一入口。
 #
@@ -3187,21 +3192,21 @@ wt_need_skopeo() {
 }
 
 # --------------------------------------------------------------------------
-# layer/ 存储：docker 镜像 ⇄ <项目>/layer/<target>/（OCI 镜像布局）
+# __layer/ 存储：docker 镜像 ⇄ <项目>/__layer/<target>/（OCI 镜像布局）
 #
 # 决策和实测数据见 harness/docs/adr/0024。**两条管道就是全部**：
-#   写：docker save <镜像> | tar -x -C layer/<target>/     ← tar 只当管道，不落盘
-#   读：tar -c -C layer/<target>/ . | docker load
+#   写：docker save <镜像> | tar -x -C __layer/<target>/     ← tar 只当管道，不落盘
+#   读：tar -c -C __layer/<target>/ . | docker load
 # 磁盘上留下的是**目录**：blobs/sha256/… 按内容命名，所以父链天然只存一份
 # （实测两份 tar 324M+424M 合进同一目录只有 424M）；装回去是同一个 image ID。
 #
-# ⚠️ `layer/` 只对 kind="docker" 的项目存在（本地直接编的项目没有层）。
+# ⚠️ `__layer/` 只对 kind="docker" 的项目存在（本地直接编的项目没有层）。
 # --------------------------------------------------------------------------
 
-wt_layer_dir() { printf '%s/layer/%s\n' "$1" "$2"; }   # <项目目录> <target>
+wt_layer_dir() { printf '%s/__layer/%s\n' "$1" "$2"; }   # <项目目录> <target>
 
 # 一把"目录当锁"的互斥锁。为什么要它：`--jobs` 并行跑层时，两个层会**同时**
-# 往同一棵 `layer/<target>/` 写 index.json —— 各自读旧的、各写各的，最后一个
+# 往同一棵 `__layer/<target>/` 写 index.json —— 各自读旧的、各写各的，最后一个
 # 覆盖前一个，前一个层的条目就**丢了**（实测：three 导不出来，报"找不到层 three，
 # layout 里有 3 个镜像"）。
 #   · 用 mkdir：POSIX、原子、不用外部命令
@@ -3227,11 +3232,11 @@ wt_unlock() { rm -rf -- "$1"; }
 # --------------------------------------------------------------------------
 # 全局写锁（BL-17）：两个终端同时改状态目录，会撞 registry.tsv / journal.tsv 的
 # "读—改—写" —— 各自读旧的、各写各的，最后落盘的那个把前一个的条目抹掉
-# （和 layer/index.json 那次是同一类问题，见 hazards H17）。
+# （和 __layer/index.json 那次是同一类问题，见 hazards H17）。
 #
 #   · 只锁**会改状态目录**的命令（install / uninstall / bootstrap / sudo-* /
 #     repair / kill-self-forever）。build / download 那种几十分钟的命令不锁 ——
-#     锁住一整轮构建会让人白等，而它们改的是 output/ 和 layer/，不是账本。
+#     锁住一整轮构建会让人白等，而它们改的是 __output/ 和 __layer/，不是账本。
 #   · **可重入**：锁在自己手里时导出的 WTOOL_LOCK_OWNER 会被子进程继承；
 #     子进程（项目脚本里再调 wtool）看到它就知道"自己人在里面"，既不抢锁、
 #     也不替父进程放锁。
@@ -3261,12 +3266,12 @@ wt_run_locked() {   # <命令...>
     return $_wl_rc
 }
 
-# 把一个 docker 镜像写进 layer/<target>/。同一棵 layout 里的 index.json 要**合并**
+# 把一个 docker 镜像写进 __layer/<target>/。同一棵 layout 里的 index.json 要**合并**
 # —— 直接把后一个 save 的 index.json 覆盖上去，前一个镜像的条目就没了（实测过）。
 wt_layer_import() {   # <项目目录> <target> <镜像> <层名>
     _li_dir=$(wt_layer_dir "$1" "$2")
     _li_img=$3; _li_name=$4
-    wt_have_docker || wt_die "layer-save 需要 docker（它要把镜像从 docker 里导出来）"
+    wt_have_docker || wt_die "_layer-save 需要 docker（它要把镜像从 docker 里导出来）"
     "$(wt_docker)" image inspect "$_li_img" >/dev/null 2>&1 || wt_die "docker 里没有这个镜像: $_li_img"
     _li_tmp=$(mktemp -d "${TMPDIR:-/tmp}/wtool-lsave.XXXXXX") || return 1
     if ! "$(wt_docker)" save "$_li_img" | tar -x -C "$_li_tmp"; then
@@ -3314,14 +3319,14 @@ PY
     mv -f -- "$_li_dir/index.json.new" "$_li_dir/index.json"
     wt_unlock "$_li_lock"
     rm -rf -- "$_li_tmp"
-    wt_info "  已存进 layer/$2/（层名 $_li_name）"
+    wt_info "  已存进 __layer/$2/（层名 $_li_name）"
 }
 
-# 把 layer/<target>/ 里的镜像装回 docker（接着构建 / 恢复容器用）。
+# 把 __layer/<target>/ 里的镜像装回 docker（接着构建 / 恢复容器用）。
 wt_layer_load() {   # <项目目录> <target>
     _ll_dir=$(wt_layer_dir "$1" "$2")
-    [ -f "$_ll_dir/index.json" ] || wt_die "没有 $_ll_dir —— 先 wtool layer-save（或 pull-layer）"
-    wt_have_docker || wt_die "layer-load 需要 docker"
+    [ -f "$_ll_dir/index.json" ] || wt_die "没有 $_ll_dir —— 先 wtool _layer-save（或 wtool pull-layer）"
+    wt_have_docker || wt_die "_layer-load 需要 docker"
     wt_run tar -c -C "$_ll_dir" . | "$(wt_docker)" load
 }
 
@@ -3337,10 +3342,10 @@ cmd_layer_save() {
             *)         _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_targets" ] && [ -n "$_img" ] || wt_die "用法: wtool layer-save <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
+    [ -n "$_targets" ] && [ -n "$_img" ] || wt_die "用法: wtool _layer-save <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
 
-  把 docker 里的一个镜像**存进项目的 layer/<target>/**（OCI 镜像布局，blob 按 sha256 去重）。
-  层名不给就从镜像 tag 推；target 不给就从 output/ 推一个。
+  把 docker 里的一个镜像**存进项目的 __layer/<target>/**（OCI 镜像布局，blob 按 sha256 去重）。
+  层名不给就从镜像 tag 推；target 不给就从 __output/ 推一个。
 
   磁盘上留下的是**目录**不是 tar：blobs/sha256/… 按内容命名，父子层共用一份。"
     # 层名不给就从镜像名推：去掉 registry 路径，**也去掉 tag / digest** ——
@@ -3352,10 +3357,10 @@ cmd_layer_save() {
         _row=$(wt_resolve_project "$_want") || exit $?
         _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
         [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
-        [ -n "$_t" ] || wt_die "$_pid 没有 output/ 目标 —— 用 --target=<os_ver> 明确指一个"
-        wt_info "── $_pid  $_img → layer/$_t/"
+        [ -n "$_t" ] || wt_die "$_pid 没有 __output/ 目标 —— 用 --target=<os_ver> 明确指一个"
+        wt_info "── $_pid  $_img → __layer/$_t/"
         if wt_dry; then wt_step "[dry-run] docker save $_img | tar -x -C $(wt_layer_dir "$_path" "$_t")"; continue; fi
-        wt_layer_import "$_path" "$_t" "$_img" "$_name" || wt_die "存不进 layer/$_t"
+        wt_layer_import "$_path" "$_t" "$_img" "$_name" || wt_die "存不进 __layer/$_t"
     done
 }
 
@@ -3369,21 +3374,21 @@ cmd_layer_load() {
             *)         _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_targets" ] || wt_die "用法: wtool layer-load <项目> [--target=<os_ver>]
+    [ -n "$_targets" ] || wt_die "用法: wtool _layer-load <项目> [--target=<os_ver>]
 
-  把 <项目>/layer/<target>/ 里的镜像**装回 docker**（tar 只当管道）。
+  把 <项目>/__layer/<target>/ 里的镜像**装回 docker**（tar 只当管道）。
   要接着构建、或者恢复一个已经没了的容器，就用它。"
     for _want in $_targets; do
         _row=$(wt_resolve_project "$_want") || exit $?
         _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
         [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
-        [ -n "$_t" ] || wt_die "$_pid 没有 output/ 目标 —— 用 --target=<os_ver> 明确指一个"
-        wt_info "── $_pid  layer/$_t/ → docker"
+        [ -n "$_t" ] || wt_die "$_pid 没有 __output/ 目标 —— 用 --target=<os_ver> 明确指一个"
+        wt_info "── $_pid  __layer/$_t/ → docker"
         wt_layer_load "$_path" "$_t" || wt_die "装不回 docker"
     done
 }
 
-# 从 layer/<target>/ 里找出某一层的**顶层 blob**（就是"这一层"，ADR-024 §8 那条链：
+# 从 __layer/<target>/ 里找出某一层的**顶层 blob**（就是"这一层"，ADR-024 §8 那条链：
 # index.json → manifest → layers[-1] → blobs/sha256/<digest>）。
 # 层名不给（或给 -）时：layout 里只有一个镜像就用它，多个就要求明确指一个。
 wt_layer_last_blob() {   # <layout 目录> [层名]
@@ -3472,12 +3477,12 @@ wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径> [允许指向
     return 0
 }
 
-# 缺 --target= 时从 output/ 里推一个出来（只有一个才敢推）
+# 缺 --target= 时从 __output/ 里推一个出来（只有一个才敢推）
 wt_guess_target() {   # $1=项目目录
     # ‼️ 必须永远 return 0：调用点普遍写成 `[ -n "$_t" ] || _t=$(wt_guess_target …)`，
     # 而 `set -e` 会看整条 `||` 列表的状态 —— 猜不到时返回 1 会让 wtool **一声不吭地退出 1**
-    # （2026-09-28 实测：unpack-layer 在 output/ 还没建时就死得无声无息）。
-    _gt=$(ls -d "$1"/output/*/ 2>/dev/null | head -1) || true
+    # （2026-09-28 实测：unpack-layer 在 __output/ 还没建时就死得无声无息）。
+    _gt=$(ls -d "$1"/__output/*/ 2>/dev/null | head -1) || true
     [ -n "$_gt" ] && basename -- "$_gt"
     return 0
 }
@@ -3496,8 +3501,8 @@ cmd_pull_layer() {
     done
     [ -n "$_targets" ] || wt_die "用法: wtool pull-layer <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
 
-  从镜像仓库把**层镜像**拉进 <项目>/layer/<target>/（OCI 布局，ADR-024）。接着：
-    wtool unpack-layer <项目>     # layer/ → output/（不需要 docker）
+  从镜像仓库把**层镜像**拉进 <项目>/__layer/<target>/（OCI 布局，ADR-024）。接着：
+    wtool unpack-layer <项目>     # __layer/ → __output/（不需要 docker）
     wtool install      <项目>
 
   <前缀> 形如 crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com/wtool-docker-registry，
@@ -3514,14 +3519,14 @@ cmd_pull_layer() {
         _repo=$(wt_layer_repo "$_reg" "$_path")
         [ -n "$_only_t" ] || _only_t=$(wt_guess_target "$_path")
         if [ -z "$_only_t" ]; then
-            _lt=$(ls -d "$_path"/layer/*/ 2>/dev/null | head -1) || true
+            _lt=$(ls -d "$_path"/__layer/*/ 2>/dev/null | head -1) || true
             [ -n "$_lt" ] && _only_t=$(basename -- "$_lt")
         fi
-        [ -n "$_only_t" ] || wt_die "$_pid 没有 output/ 也没有 layer/ 目标 —— 用 --target=<os_ver> 指一个"
+        [ -n "$_only_t" ] || wt_die "$_pid 没有 __output/ 也没有 __layer/ 目标 —— 用 --target=<os_ver> 指一个"
         _lay=$(wt_layer_dir "$_path" "$_only_t")
         wt_info "── $_pid  ← $_repo:*-$_only_t"
 
-        # tag 清单以**仓库**为准 —— 这样在一台连 output/ 都还空着的机器上也能拉
+        # tag 清单以**仓库**为准 —— 这样在一台连 __output/ 都还空着的机器上也能拉
         # （这正是"装到公司机器"那个场景：那边没有本地构建产物）。
         _tags=$("$_sk" list-tags "docker://$_repo" 2>/dev/null | python3 -c '
 import json, sys
@@ -3555,7 +3560,7 @@ except Exception:
 
             _n=$((_n + 1))
             if wt_dry; then
-                wt_step "[dry-run] $_repo:$_tag → layer/$_only_t/$_layer"
+                wt_step "[dry-run] $_repo:$_tag → __layer/$_only_t/$_layer"
                 continue
             fi
             wt_run mkdir -p -- "$_lay"
@@ -3590,7 +3595,7 @@ cmd_push_layer() {
     done
     [ -n "$_targets" ] || wt_die "用法: wtool push-layer <项目>... [--registry=<前缀>] [--target=<os_ver>] [--layer=<层名>]
 
-  把 <项目>/layer/<target>/ 里的层镜像推到镜像仓库：tag = <层名（/ 换成 -）>-<target>。
+  把 <项目>/__layer/<target>/ 里的层镜像推到镜像仓库：tag = <层名（/ 换成 -）>-<target>。
   推的是**真镜像**（基础层 + 每层一个 commit），blob 按 sha256 去重 ——
   共享父链只在第一个镜像里传一次。
 
@@ -3611,17 +3616,17 @@ cmd_push_layer() {
         _repo=$(wt_layer_repo "$_reg" "$_path")
         [ -n "$_only_t" ] || _only_t=$(wt_guess_target "$_path")
         if [ -z "$_only_t" ]; then
-            _lt=$(ls -d "$_path"/layer/*/ 2>/dev/null | head -1) || true
+            _lt=$(ls -d "$_path"/__layer/*/ 2>/dev/null | head -1) || true
             [ -n "$_lt" ] && _only_t=$(basename -- "$_lt")
         fi
-        [ -n "$_only_t" ] || wt_die "$_pid 没有 output/ 也没有 layer/ 目标 —— 用 --target=<os_ver> 指一个"
+        [ -n "$_only_t" ] || wt_die "$_pid 没有 __output/ 也没有 __layer/ 目标 —— 用 --target=<os_ver> 指一个"
         _lay=$(wt_layer_dir "$_path" "$_only_t")
-        [ -f "$_lay/index.json" ] || wt_die "没有 $_lay —— 先 wtool layer-save / pull-layer"
+        [ -f "$_lay/index.json" ] || wt_die "没有 $_lay —— 先 wtool _layer-save / pull-layer"
 
         wt_layer_entries "$_lay" | awk -F'\t' -v t="$_only_t" '$1!="-" && ($2=="-" || $2==t)' \
             > "$_scratch/rows"
         [ -s "$_scratch/rows" ] || wt_die "$_lay 里一个层镜像都没有（index.json 是空的？）"
-        wt_info "── $_pid  layer/$_only_t/ → $_repo"
+        wt_info "── $_pid  __layer/$_only_t/ → $_repo"
 
         if wt_dry; then
             while IFS="$(printf '\t')" read -r _l _lt2 _limg _ldg _lrn; do
@@ -3642,7 +3647,7 @@ cmd_push_layer() {
             [ "$_l" != "-" ] || continue
             [ -z "$_only_l" ] || [ "$_l" = "$_only_l" ] || continue
             [ "$_limg" != "-" ] || wt_die "层 $_l 不知道对应 docker 里的哪个镜像（layout 是旧版写的）。
-  重新存一次：wtool layer-save <项目> --image=<镜像> --layer=$_l"
+  重新存一次：wtool _layer-save <项目> --image=<镜像> --layer=$_l"
             _tag=$(wt_layer_tag "$_l" "$_only_t")
             wt_run "$(wt_docker)" tag "$_limg" "$_repo:$_tag" || wt_die "docker tag $_limg → $_repo:$_tag 失败"
             if ! "$(wt_docker)" push "$_repo:$_tag" > "$_scratch/push.log" 2>&1; then
@@ -3658,15 +3663,15 @@ cmd_push_layer() {
     wt_info "push-layer 完成（$_done 个项目）"
 }
 
-# 从 layer/<target>/ 里把**某一层**的顶层 blob 解成 output/<target>/<层>/{payload,OWNED.tsv}。
-#   $1=项目目录  $2=target  $3=层名（空=layout 里只有一个就用它）  $4=输出根（默认 output/<target>）
+# 从 __layer/<target>/ 里把**某一层**的顶层 blob 解成 __output/<target>/<层>/{payload,OWNED.tsv}。
+#   $1=项目目录  $2=target  $3=层名（空=layout 里只有一个就用它）  $4=输出根（默认 __output/<target>）
 #   $5=过滤清单（可选，tar --exclude-from 的形状；空=只用默认的 .wh. 过滤）
 # 三个消费者：unpack-layer（人来解一层）、push/pull 之后的验证、**kind=docker 的 build**
-# （每编完一层立刻导出 —— 这就是 ADR-025 第 4 条"一层镜像对一层 output"）。
+# （每编完一层立刻导出 —— 这就是 ADR-025 第 4 条"一层镜像对一层 __output"）。
 wt_layer_export() {
     _le_dir=$1; _le_t=$2; _le_layer=$3; _le_root=$4; _le_filter=${5:-}
     _le_lay=$(wt_layer_dir "$_le_dir" "$_le_t")
-    [ -f "$_le_lay/index.json" ] || wt_die "没有 $_le_lay —— 先 wtool layer-save（或 pull-layer）"
+    [ -f "$_le_lay/index.json" ] || wt_die "没有 $_le_lay —— 先 wtool _layer-save（或 wtool pull-layer）"
     _blobinfo=$(wt_layer_last_blob "$_le_lay" "$_le_layer") \
         || wt_die "$(wt_layer_last_blob "$_le_lay" "$_le_layer" 2>&1 >/dev/null)"
     _le_blob=$(printf '%s\n' "$_blobinfo" | sed -n 1p)
@@ -3715,33 +3720,33 @@ cmd_unpack_layer() {
     done
     [ -n "$_targets" ] || wt_die "用法: wtool unpack-layer <项目> [--layer=<层名>] [--target=<os_ver>] [--output=<目录>]
 
-  把 <项目>/layer/<target>/ 里某一层的**顶层 blob** 解成安装产物：
-    → <项目>/output/<target>/<层>/{payload,OWNED.tsv}（--output= 可以指到别处）
+  把 <项目>/__layer/<target>/ 里某一层的**顶层 blob** 解成安装产物：
+    → <项目>/__output/<target>/<层>/{payload,OWNED.tsv}（--output= 可以指到别处）
   **不需要 docker**（直接读 blob），也不联网。
 
-  这就是 ADR-025 那条分界：layer/ 里的镜像是**完整运行时**（一个字节都不丢），
-  output/ 才是**过滤过的安装产物** —— 白障（.wh.）在这里丢掉。
+  这就是 ADR-025 那条分界：__layer/ 里的镜像是**完整运行时**（一个字节都不丢），
+  __output/ 才是**过滤过的安装产物** —— 白障（.wh.）在这里丢掉。
   层名不给时：layout 里只有一个镜像就用它。"
     for _want in $_targets; do
         _row=$(wt_resolve_project "$_want") || exit $?
         _pid=$(printf '%s\n' "$_row" | cut -f2); _path=$(printf '%s\n' "$_row" | cut -f3)
         [ -n "$_t" ] || _t=$(wt_guess_target "$_path")
-        # output/ 可能还没建（unpack-layer 正是来建它的）—— 那就看 layer/ 里现成的 target 目录
+        # __output/ 可能还没建（unpack-layer 正是来建它的）—— 那就看 __layer/ 里现成的 target 目录
         if [ -z "$_t" ]; then
-            _lt=$(ls -d "$_path"/layer/*/ 2>/dev/null | head -1) || true
+            _lt=$(ls -d "$_path"/__layer/*/ 2>/dev/null | head -1) || true
             [ -n "$_lt" ] && _t=$(basename -- "$_lt")
         fi
         [ -n "$_t" ] || wt_die "$_pid 没有 output 目标，用 --target= 指定"
         _lay=$(wt_layer_dir "$_path" "$_t")
-        [ -f "$_lay/index.json" ] || wt_die "没有 $_lay —— 先 wtool layer-save（或 pull-layer）"
+        [ -f "$_lay/index.json" ] || wt_die "没有 $_lay —— 先 wtool _layer-save（或 wtool pull-layer）"
         _name=$(wt_layer_last_blob "$_lay" "$_layer" 2>/dev/null | sed -n 2p)
-        wt_info "── $_pid  layer/$_t/${_name:-?} → ${_outdir:-"$_path/output/$_t"}/"
+        wt_info "── $_pid  __layer/$_t/${_name:-?} → ${_outdir:-"$_path/__output/$_t"}/"
 
         if wt_dry; then
             wt_step "[dry-run] 读顶层 blob → payload/ + OWNED.tsv"
             continue
         fi
-        _dst=$(wt_layer_export "$_path" "$_t" "$_layer" "${_outdir:-"$_path/output/$_t"}" "${WTOOL_EXPORT_FILTER:-}")
+        _dst=$(wt_layer_export "$_path" "$_t" "$_layer" "${_outdir:-"$_path/__output/$_t"}" "${WTOOL_EXPORT_FILTER:-}")
         wt_step "解完：$(du -sh -- "$_dst" 2>/dev/null | cut -f1)（$(awk 'END{print NR}' "$_dst/OWNED.tsv") 个文件）"
     done
 }
@@ -3768,12 +3773,12 @@ case $_cmd in
     sudo-install)   wt_run_locked cmd_sudo_install "$@" ;;
     sudo-uninstall) wt_run_locked cmd_sudo_uninstall "$@" ;;
     sudo-bootstrap) wt_run_locked cmd_sudo_bootstrap "$@" ;;
-    download) wt_die "download 已改名 download-release，而且**语义变了**：它现在只把包下到 release/，不解包。
-  接着敲：wtool unpack-release <项目>      # 解到 output/，再 wtool install
+    download) wt_die "download 已改名 download-release，而且**语义变了**：它现在只把包下到 __release/，不解包。
+  接着敲：wtool unpack-release <项目>      # 解到 __output/，再 wtool install
   （理由见 harness/docs/adr/0023）" ;;
     publish)  wt_die "publish 已拆成两条（各干一件事）：
-  wtool pack-release    <项目>    # output/ → release/（本地打包）
-  wtool publish-release <项目>    # release/ → GitHub（只上传）
+  wtool pack-release    <项目>    # __output/ → __release/（本地打包）
+  wtool publish-release <项目>    # __release/ → GitHub（只上传）
   （理由见 harness/docs/adr/0023）" ;;
     provision) wt_die "provision 已改名为 sudo-install，请用：
   wtool sudo-install <项目>      # 一个
@@ -3784,17 +3789,21 @@ case $_cmd in
     publish-release) cmd_publish_release "$@" ;;
     push-layer)    cmd_push_layer "$@" ;;
     pull-layer)    cmd_pull_layer "$@" ;;
-    push-layers)   wt_die "push-layers 已改名 push-layer，而且**对象变了**：推的现在是 layer/<target>/ 里的**真镜像**（ADR-024），不是 output/ 打的假镜像。
+    push-layers)   wt_die "push-layers 已改名 push-layer，而且**对象变了**：推的现在是 __layer/<target>/ 里的**真镜像**（ADR-024），不是 __output/ 打的假镜像。
   敲：wtool push-layer <项目> [--registry=<前缀>]" ;;
-    pull-layers)   wt_die "pull-layers 已改名 pull-layer，而且**落点变了**：现在拉进 layer/<target>/（不再直接落 output/）。
-  wtool pull-layer   <项目> [--registry=<前缀>]   # 镜像仓库 → layer/
-  wtool unpack-layer <项目>                      # layer/ → output/（不需要 docker）" ;;
+    pull-layers)   wt_die "pull-layers 已改名 pull-layer，而且**落点变了**：现在拉进 __layer/<target>/（不再直接落 __output/）。
+  wtool pull-layer   <项目> [--registry=<前缀>]   # 镜像仓库 → __layer/
+  wtool unpack-layer <项目>                      # __layer/ → __output/（不需要 docker）" ;;
     pack-layer)    wt_die "pack-layer 已删除（ADR-024）：方向本来就是反的 —— 层是源，output 是层的导出物。
   现在两件事各有命令：
-    wtool layer-save <项目> --image=<镜像>   # docker 镜像 → layer/<target>/
-    wtool unpack-layer <项目>                # layer/<target>/ → output/" ;;
-    layer-save)    cmd_layer_save "$@" ;;
-    layer-load)    cmd_layer_load "$@" ;;
+    wtool _layer-save <项目> --image=<镜像>  # docker 镜像 → __layer/<target>/（内部命令）
+    wtool unpack-layer <项目>                # __layer/<target>/ → __output/" ;;
+    _layer-save)   cmd_layer_save "$@" ;;
+    _layer-load)   cmd_layer_load "$@" ;;
+    layer-save)    wt_warn "layer-save 现在是内部命令，叫 _layer-save（引擎/agent 用，不在 wtool 看板里）"
+                   cmd_layer_save "$@" ;;
+    layer-load)    wt_warn "layer-load 现在是内部命令，叫 _layer-load（引擎/agent 用，不在 wtool 看板里）"
+                   cmd_layer_load "$@" ;;
     unpack-layer)  cmd_unpack_layer "$@" ;;
     bootstrap) wt_run_locked cmd_bootstrap "$@" ;;
     check)     cmd_check "$@" ;;

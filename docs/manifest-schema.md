@@ -60,21 +60,21 @@
    `wtool build` 在**动手之前**就拒绝（`build.sh` 一行都不会跑），
    并给出 `download-release` + `unpack-release` + `install` 三条命令。
    这台机器够不够编，同样在跑脚本之前判断（不够就加 `--force` 硬上）。
-2. **`output/` 的形状**：
+2. **`__output/` 的形状**：
 
-   | kind | `output/` 下是什么 |
+   | kind | `__output/` 下是什么 |
    |---|---|
-   | `local` | `output/<层>/…` —— **没有** `<os>_<ver>/` 那一层 |
-   | `docker` | `output/<os>_<ver>/<层>/…` |
+   | `local` | `__output/<层>/…` —— **没有** `<os>_<ver>/` 那一层 |
+   | `docker` | `__output/<os>_<ver>/<层>/…` |
 
    形状**由声明唯一确定**：`release.json` 的 `targets[]` 就是按这个算的
-   （`local` → 空；`docker` → `output/*/` 的目录名）。所以 `local` 项目的
-   `output/` 里就算有 `bin/`、`main/` 这种目录，也不会被当成"发行版"。
+   （`local` → 空；`docker` → `__output/*/` 的目录名）。所以 `local` 项目的
+   `__output/` 里就算有 `bin/`、`main/` 这种目录，也不会被当成"发行版"。
 
 > 只声明 kind，**targets 和层清单不进 XML** —— 那是项目数据，住项目里固定路径的文件：
 > `build/targets.tsv`（目标系统 → 基础镜像）、`build/layers.tsv`（层名 / 父层 / 镜像名 /
 > 容器里跑的命令）、`build/export.filter`（导出时丢什么）。见 `harness/docs/adr/0029`。
-> 有 `build/layers.tsv` 时**引擎驱动容器**（起容器 / commit / 落 `layer/` / 导 `output/`）；
+> 有 `build/layers.tsv` 时**引擎驱动容器**（起容器 / commit / 落 `__layer/` / 导 `__output/`）；
 > 只有 `scripts/build.sh` 时仍然跑脚本（迁移前的形态）；两个都没有就拒绝构建。
 
 ---
@@ -266,7 +266,7 @@ state），还原依据单独记在 `system.tsv`；apt 包按"跑前跑后的已
 ```
 
 提示是"发布不再调项目脚本，构建逻辑放 `scripts/build.sh`" —— 发布全项目走同一条引擎的路：
-`wtool pack-release`（`output/` → `release/`）+ `wtool publish-release`（`release/` → GitHub）。
+`wtool pack-release`（`__output/` → `__release/`）+ `wtool publish-release`（`__release/` → GitHub）。
 
 ---
 
@@ -313,7 +313,7 @@ error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元�
 | 同一清单内 `home` 不重复 | 拒绝 |
 | `home` 未被其他项目在 `registry.tsv` 里登记 | 拒绝（`--force` 降级为警告） |
 | 落点在磁盘上不存在，或已是正确的软链 | 拒绝（`--force` 备份后接管） |
-| 有 `build.sh` 就必须有非空的 `output/` | 拒绝（`--force` 降级为警告） |
+| 有 `build.sh` 就必须有非空的 `__output/` | 拒绝（`--force` 降级为警告） |
 | `<publish kind=…>` 只能是 `source` / `none`；不能有 `script=` | 拒绝 |
 | `<build kind=…>` 只能是 `local` / `docker`；`min-cores` / `min-mem` / `min-disk` 必须是正整数 | 拒绝 |
 | 旧标签 | 警告（能装，但提醒改成新标签） |
@@ -346,7 +346,7 @@ error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元�
 ```
 
 要编译 / 要产出的项目，再加 `scripts/`（只有 `build.sh` 和 `install.sh` 两种，
-**按需，别留空壳**）和 `output/`（产物，`.gitignore` 里）。
+**按需，别留空壳**）和 `__output/`（产物，`.gitignore` 里）。
 下载和发布**不用脚本**：那是引擎的 `download-release` / `unpack-release`（取现成的包）和
 `pack-release` / `publish-release`（打包上传）。
 **文件存在即能力声明**：`scripts/` 下有没有那个文件，直接决定项目表里那一列亮不亮。

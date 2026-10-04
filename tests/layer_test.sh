@@ -1,19 +1,19 @@
 #!/bin/sh
-# layer_test.sh —— `layer/<target>/` 那棵 OCI 镜像目录（ADR-024 / BL-27）
+# layer_test.sh —— `__layer/<target>/` 那棵 OCI 镜像目录（ADR-024 / BL-27）
 #
 # 全程在临时目录里跑：**不联网、不碰真 docker、不碰真 $HOME / 真工作区**。
 # docker 是打桩的（`$T/bin/docker`）：save 吐预先造好的 OCI tar，load 把 stdin 落盘。
 # 验证点：
-#   1. 写：`docker save | tar -x` 之后 layer/<target>/ 是一棵**目录**
+#   1. 写：`docker save | tar -x` 之后 __layer/<target>/ 是一棵**目录**
 #      （blobs/sha256/… + index.json + oci-layout）
 #   2. **去重**：两个共享父链的镜像存进同一棵 layout，那个 blob 只留一份
 #   3. **index 合并**：第二个进来不把第一个的条目弄丢（annotation 里记层名）
 #   4. 读：喂给 `docker load` 的 tar 里有 oci-layout / index.json / 全部 blob
-#   5. `layer/` 默认不存在；dry-run 不建它
+#   5. `__layer/` 默认不存在；dry-run 不建它
 #   6. `pack-layer` 已删除：die + 指路
-#   7. `unpack-layer`：blob → output/<target>/<层>/{payload,OWNED.tsv}（不联网、不要 docker）
+#   7. `unpack-layer`：blob → __output/<target>/<层>/{payload,OWNED.tsv}（不联网、不要 docker）
 #   8. `push-layer`：docker tag + docker push（缺 io.wtool.image 的条目直接失败，不推半截）
-#   9. `pull-layer`：skopeo copy → layer/<target>/，层名从 tag 还原、annotation 补上
+#   9. `pull-layer`：skopeo copy → __layer/<target>/，层名从 tag 还原、annotation 补上
 #  10. 老名字 `push-layers` / `pull-layers` die + 指路
 set -eu
 
@@ -34,7 +34,7 @@ trap 'rm -rf -- "$T"' EXIT INT TERM
 # 环境里继承来的 WTOOL_* 会指到真 $HOME / 真工作区，先清掉
 for _v in $(env | grep -o '^WTOOL_[A-Za-z_]*'); do unset "$_v"; done
 export WTOOL_ROOT="$T/ws" WTOOL_STATE="$T/state" WTOOL_HOME="$T/home"
-mkdir -p "$WTOOL_ROOT/terminal/demo/scripts" "$WTOOL_ROOT/terminal/demo/output/ubuntu_24.04" \
+mkdir -p "$WTOOL_ROOT/terminal/demo/scripts" "$WTOOL_ROOT/terminal/demo/__output/ubuntu_24.04" \
          "$WTOOL_STATE" "$WTOOL_HOME" "$T/bin"
 
 P="$WTOOL_ROOT/terminal/demo"
@@ -42,7 +42,7 @@ cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" id="terminal/demo" priority="50"/>
 EOF
-printf 'output/\nrelease/\n' > "$P/.gitignore"
+printf '__output/\nrelease/\n' > "$P/.gitignore"
 git -C "$P" init -q && git -C "$P" add -A \
     && git -C "$P" -c user.name=t -c user.email=t@t commit -qm init
 
@@ -82,11 +82,11 @@ PATH="$T/bin:$PATH"
 export PATH
 : > "$T/docker.log"
 
-L="$P/layer/ubuntu_24.04"
+L="$P/__layer/ubuntu_24.04"
 
 # --------------------------------------------------------------------------
-printf '\n== 1. layer-save：docker 镜像 → layer/<target>/ ==\n'
-echo hi > "$P/output/ubuntu_24.04/x.bin"        # 让 --target 能推出来
+printf '\n== 1. layer-save：docker 镜像 → __layer/<target>/ ==\n'
+echo hi > "$P/__output/ubuntu_24.04/x.bin"        # 让 --target 能推出来
 "$WT" layer-save terminal/demo --image=imgA > "$T/s1.log" 2>&1 \
     || bad "layer-save imgA" "$(cat "$T/s1.log")"
 [ -f "$L/oci-layout" ] && ok "oci-layout 建出来了" || bad "没有 oci-layout"
@@ -131,12 +131,12 @@ chk "喂过去的 tar 里有 oci-layout / index.json / 全部 blob" \
     "$(tar -tf "$T/loaded.tar" | grep -E '^\./(oci-layout|index.json)$|^\./blobs/sha256/.+$' |
        grep -vc '/$' || true)"
 
-printf '\n== 4. layer/ 默认不存在 + dry-run 不建它 ==\n'
-rm -rf "$P/layer"
+printf '\n== 4. __layer/ 默认不存在 + dry-run 不建它 ==\n'
+rm -rf "$P/__layer"
 "$WT" layer-save terminal/demo --image=imgA --dry-run > "$T/s3.log" 2>&1 \
     || bad "dry-run" "$(cat "$T/s3.log")"
 grep -q 'dry-run' "$T/s3.log" && ok "dry-run 打了计划" || bad "dry-run 没打计划"
-[ -d "$P/layer" ] && bad "dry-run 建了 layer/" || ok "dry-run 不建 layer/"
+[ -d "$P/__layer" ] && bad "dry-run 建了 __layer/" || ok "dry-run 不建 __layer/"
 
 printf '\n== 5. pack-layer 已删除（die + 指路）==\n'
 _rc=0
@@ -150,7 +150,7 @@ grep -q 'layer-save' "$T/pl.log" && grep -q 'unpack-layer' "$T/pl.log" \
 [ "$fail" -eq 0 ] || exit 1
 
 # --------------------------------------------------------------------------
-printf '\n== 6. unpack-layer：读 blob → output/（不需要 docker）==\n'
+printf '\n== 6. unpack-layer：读 blob → __output/（不需要 docker）==\n'
 #   手造一层真 blob：容器里的形状是 root/.wtool/**（影子 $HOME），
 #   解开时要剥掉前两节、丢掉白障、再扫目录生成 OWNED.tsv。
 # 第 4 节把整棵 layout 删了（dry-run 那条）—— 这里重新走一遍**真的** layer-save
@@ -178,11 +178,11 @@ d["manifests"].append({"mediaType":"application/vnd.oci.image.manifest.v1+json",
                                       "io.wtool.image":"imgMain"}})
 json.dump(d,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)' "$L/index.json" "$_msha"
 
-rm -rf "$P/output/ubuntu_24.04"
+rm -rf "$P/__output/ubuntu_24.04"
 "$WT" unpack-layer terminal/demo --layer=main > "$T/ul.log" 2>&1 \
     || bad "unpack-layer" "$(cat "$T/ul.log")"
-O="$P/output/ubuntu_24.04/main"
-[ -x "$O/payload/usr/bin/demo" ] && ok "blob 解成了 output/<target>/<层>/payload（可执行位也在）" \
+O="$P/__output/ubuntu_24.04/main"
+[ -x "$O/payload/usr/bin/demo" ] && ok "blob 解成了 __output/<target>/<层>/payload（可执行位也在）" \
     || bad "payload 不对" "$(cat "$T/ul.log")"
 [ -L "$O/payload/usr/bin/demo-link" ] && ok "payload 里的软链还是软链" || bad "软链丢了"
 [ -s "$O/OWNED.tsv" ] && ok "OWNED.tsv 扫出来了" || bad "没有 OWNED.tsv"
@@ -222,7 +222,7 @@ _rc=0
 [ "$_rc" != 0 ] && ok "指到包外面的软链让它失败了" || bad "居然装上了（换台机器必定悬空）"
 grep -q '悬空' "$T/bad.log" && ok "说清了为什么不能要" || bad "没说清原因" "$(cat "$T/bad.log")"
 
-printf '\n== 8. push-layer：layer/<target>/ → 镜像仓库（docker tag + docker push）==\n'
+printf '\n== 8. push-layer：__layer/<target>/ → 镜像仓库（docker tag + docker push）==\n'
 #   第 7 节往 index.json 里塞了一个没有 io.wtool.image 的条目（手造的）——
 #   推到最后会撞上它，正好验"半截不推"。
 : > "$T/docker.log"
@@ -238,8 +238,8 @@ chk "推了 3 个层（imgA / lang-demo / main）" "3" "$(grep -c '^push ' "$T/d
 [ "$_rc" != 0 ] && ok "有条目不知道对应哪个镜像 → 直接失败，不推半截" || bad "居然当成功了"
 grep -q 'layer-save' "$T/push.log" && ok "指了路（重新 layer-save 一次）" || bad "没指路" "$(cat "$T/push.log")"
 
-printf '\n== 9. pull-layer：镜像仓库 → layer/<target>/（stub skopeo，不联网）==\n'
-rm -rf "$P/layer"                       # 从"全新机器"开始：连 layer/ 都没有
+printf '\n== 9. pull-layer：镜像仓库 → __layer/<target>/（stub skopeo，不联网）==\n'
+rm -rf "$P/__layer"                       # 从"全新机器"开始：连 __layer/ 都没有
 cat > "$T/mkentry.py" <<'PYEOF'
 import json, os, sys
 lay, tag = sys.argv[1], sys.argv[2]
@@ -289,11 +289,11 @@ for m in d["manifests"]:
     > "$T/pull.log" 2>&1 || bad "pull-layer" "$(cat "$T/pull.log")"
 chk "只拉这个 target 的 tag（另一个 target 的不碰）" "2" "$(grep -c '^copy ' "$T/skopeo.log")"
 chk "★层名还原：lang-demo → lang/demo" "lang/demo" \
-    "$(entries_of "$P/layer/ubuntu_24.04/index.json" | awk -F'\t' '$3 ~ /:lang-demo-/{print $1}')"
+    "$(entries_of "$P/__layer/ubuntu_24.04/index.json" | awk -F'\t' '$3 ~ /:lang-demo-/{print $1}')"
 chk "拉回来的条目记了 target" "ubuntu_24.04" \
-    "$(entries_of "$P/layer/ubuntu_24.04/index.json" | awk -F'\t' '$3 ~ /:main-/{print $2}')"
+    "$(entries_of "$P/__layer/ubuntu_24.04/index.json" | awk -F'\t' '$3 ~ /:main-/{print $2}')"
 chk "拉回来的条目记了来源（镜像名 = docker://…）" "docker://reg.example.com/ns/demo:main-ubuntu_24.04" \
-    "$(entries_of "$P/layer/ubuntu_24.04/index.json" | awk -F'\t' '$3 ~ /:main-/{print $3}')"
+    "$(entries_of "$P/__layer/ubuntu_24.04/index.json" | awk -F'\t' '$3 ~ /:main-/{print $3}')"
 : > "$T/skopeo.log"
 "$WT" pull-layer terminal/demo --target=ubuntu_24.04 --registry=reg.example.com/ns --layer=main \
     > "$T/pull2.log" 2>&1 || bad "pull-layer --layer=main" "$(cat "$T/pull2.log")"
@@ -328,10 +328,10 @@ d["manifests"].append({"mediaType":"application/vnd.oci.image.manifest.v1+json",
 json.dump(d,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)' "$L2/index.json" "$_msha" "$1"
 }
 # 重起一棵干净的 layout（第 4 节删过、第 6/7 节又重建过，状态不干净）
-rm -rf "$P/layer/ubuntu_24.04" "$P/output/ubuntu_24.04"
-# output/ 和 layer/ 都被前面的小节删过了 → target 猜不出来，明确指一个
+rm -rf "$P/__layer/ubuntu_24.04" "$P/__output/ubuntu_24.04"
+# __output/ 和 __layer/ 都被前面的小节删过了 → target 猜不出来，明确指一个
 "$WT" layer-save terminal/demo --image=imgA --target=ubuntu_24.04 >/dev/null 2>&1
-L2="$P/layer/ubuntu_24.04"
+L2="$P/__layer/ubuntu_24.04"
 _mkblob yes; _addblob esc
 _rc=0
 "$WT" unpack-layer terminal/demo --layer=esc > "$T/esc1.log" 2>&1 || _rc=$?
@@ -344,7 +344,7 @@ _rc=0
 "$WT" unpack-layer terminal/demo --layer=esc > "$T/esc2.log" 2>&1 || _rc=$?
 chk "声明了 /usr/bin/python3 就放行" "$_rc" "0"
 chk "放行后记的还是软链原值（不是跟随目标算 sha256）" "L:/usr/bin/python3" \
-    "$(awk -F'\t' '$1=="usr/bin/py3"{print $2}' "$P/output/ubuntu_24.04/esc/OWNED.tsv")"
+    "$(awk -F'\t' '$1=="usr/bin/py3"{print $2}' "$P/__output/ubuntu_24.04/esc/OWNED.tsv")"
 # 白名单只放行它列的那条：换一条别的路径仍然拒
 printf '/usr/bin/python\n' > "$P/build/system-paths"
 _rc=0

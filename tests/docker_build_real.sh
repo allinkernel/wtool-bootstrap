@@ -3,8 +3,8 @@
 #
 # 和 `docker_build_test.sh` 的分工：
 #   docker_build_test.sh   打桩 docker：逻辑（排序/续跑/失败路径/契约文件）全覆盖，跑得快、不联网
-#   本脚本                 **真 docker**：只走一遍"起容器 → 跑命令 → commit → 落 layer/ →
-#                          导 output/"，用最小的镜像（alpine）验那条链路在真环境里通
+#   本脚本                 **真 docker**：只走一遍"起容器 → 跑命令 → commit → 落 __layer/ →
+#                          导 __output/"，用最小的镜像（alpine）验那条链路在真环境里通
 #
 # 为什么必须真跑一次：打桩测不出"真 docker 的脾气"——
 #   `docker exec -d` 的缓冲、commit 抓不抓得到可写层、`docker save | tar -x` 的格式、
@@ -73,17 +73,17 @@ chk "wtool build 退出码 0" "$_rc" "0"
 
 chk "镜像 commit 出来了" "yes" \
     "$(docker image inspect "$TAG:$TARGET" >/dev/null 2>&1 && echo yes || echo no)"
-chk "层进了 layer/$TARGET/（OCI 布局）" "yes" \
-    "$([ -f "$P/layer/$TARGET/index.json" ] && echo yes || echo no)"
+chk "层进了 __layer/$TARGET/（OCI 布局）" "yes" \
+    "$([ -f "$P/__layer/$TARGET/index.json" ] && echo yes || echo no)"
 chk "payload 里是这一层装的东西" "hello from a real container" \
-    "$(cat "$P/output/$TARGET/one/payload/usr/share/wtool-smoke/hello.txt" 2>/dev/null || echo 缺失)"
+    "$(cat "$P/__output/$TARGET/one/payload/usr/share/wtool-smoke/hello.txt" 2>/dev/null || echo 缺失)"
 chk "OWNED.tsv 扫了出来（层名对）" "one" \
-    "$(awk -F'\t' 'END{print $3}' "$P/output/$TARGET/one/OWNED.tsv" 2>/dev/null || echo 缺失)"
+    "$(awk -F'\t' 'END{print $3}' "$P/__output/$TARGET/one/OWNED.tsv" 2>/dev/null || echo 缺失)"
 chk "输入指纹在**镜像里**（从 registry 拉回来能自述来历）" "one" \
     "$(docker run --rm --entrypoint sh "$TAG:$TARGET" -c 'cat /wtool-layer/layer.json' 2>/dev/null \
        | python3 -c 'import json,sys;print(json.load(sys.stdin)["layer"])' 2>/dev/null || echo 缺失)"
 chk "产出事实跟着层走" "yes" \
-    "$([ -f "$P/layer/$TARGET/one.json" ] && echo yes || echo no)"
+    "$([ -f "$P/__layer/$TARGET/one.json" ] && echo yes || echo no)"
 
 echo "== 续跑：第二次不该再起容器 =="
 _ctr_before=$(docker ps -a --format '{{.Names}}' | grep -c '^wtool-build-' || true)
@@ -95,14 +95,14 @@ grep -q '跳过' "$T/real2.log" && ok "第二次说了跳过（✓ 层（docker 
 _ctr_after=$(docker ps -a --format '{{.Names}}' | grep -c '^wtool-build-' || true)
 chk "没留下容器" "$_ctr_before" "$_ctr_after"
 
-echo "== 删掉 docker 里的镜像 → 从 layer/ 装回来 =="
+echo "== 删掉 docker 里的镜像 → 从 __layer/ 装回来 =="
 docker rmi -f "$TAG:$TARGET" >/dev/null 2>&1 || true
-rm -rf "$P/output/$TARGET/one"
-"$WT" build demo --target="$TARGET" > "$T/real3.log" 2>&1 || bad "从 layer/ 恢复" "$(cat "$T/real3.log")"
-grep -q '从 layer/ 恢复' "$T/real3.log" && ok "从 layer/ 装回来了" \
+rm -rf "$P/__output/$TARGET/one"
+"$WT" build demo --target="$TARGET" > "$T/real3.log" 2>&1 || bad "从 __layer/ 恢复" "$(cat "$T/real3.log")"
+grep -q '从 __layer/ 恢复' "$T/real3.log" && ok "从 __layer/ 装回来了" \
     || bad "没走恢复" "$(tail -5 "$T/real3.log")"
 chk "payload 又回来了" "hello from a real container" \
-    "$(cat "$P/output/$TARGET/one/payload/usr/share/wtool-smoke/hello.txt" 2>/dev/null || echo 缺失)"
+    "$(cat "$P/__output/$TARGET/one/payload/usr/share/wtool-smoke/hello.txt" 2>/dev/null || echo 缺失)"
 
 printf '\n----------------------------------------\n'
 printf 'docker_build_real: PASS %d  FAIL %d\n' "$pass" "$fail"

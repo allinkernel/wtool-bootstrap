@@ -74,7 +74,7 @@ cat <<'TIP'
   并列出来，让你自己决定跑哪条：
 
       wtool download-release <项目>   从发布页拿现成的包（分钟级）
-      wtool unpack-release   <项目>   校验 + 拼卷 + 解到 output/
+      wtool unpack-release   <项目>   校验 + 拼卷 + 解到 __output/
       wtool build            <项目>   自己编（小时级）
       wtool install          <项目>
   ────────────────────────────────────────────────────────────

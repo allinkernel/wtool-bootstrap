@@ -11,16 +11,16 @@
 #                 state 里记过 build                             → 已完成
 #   install       没有 install.sh 也没有 <link>/<env> 声明 → 不支持
 #                 已经装过（state 里记着）                → 已完成
-#                 有 build.sh 但 <项目>/output/ 是空的    → 待产出
+#                 有 build.sh 但 <项目>/__output/ 是空的    → 待产出
 #                 其余                                     → 可执行
-#                 ⚠️ 判据是**看磁盘**（output/ 里有没有东西），
+#                 ⚠️ 判据是**看磁盘**（__output/ 里有没有东西），
 #                    不是"build 做过没有" —— 和 `wtool install` 自己
 #                    的判据是同一件事，第 3 节会真跑一遍对账。
 #
 # 格子取值的四种标签（终端里带颜色）：
 #   不支持  红   这个项目没这项能力
 #   可执行  黄   现在就能跑
-#   待产出  蓝   能力有，但要先把 output/ 产出来
+#   待产出  蓝   能力有，但要先把 __output/ 产出来
 #   已完成  绿   跑过了
 # 颜色是这些格子唯一的区别（字符一样），所以测试一律开 --color=always 看转义码。
 #
@@ -60,14 +60,14 @@ C_DONE=$(printf '\033[32m已完成\033[0m')
 # --------------------------------------------------------------------------
 # 项目夹具：覆盖四个格子的组合
 #
-# scripted / pending / ready 三个项目的脚本**完全一样**，差别只在 output/：
+# scripted / pending / ready 三个项目的脚本**完全一样**，差别只在 __output/：
 #   scripted  一开头也是空的，第 2、3 节现场给它放产物，看格子跟着翻
-#   pending   output/ 空           → install 待产出
-#   ready     output/ 里有产物     → install 可执行
+#   pending   __output/ 空           → install 待产出
+#   ready     __output/ 里有产物     → install 可执行
 # 两个项目之间只差磁盘上有没有东西，这就是新判据的全部。
 # --------------------------------------------------------------------------
 mkdir -p "$WS/declarative" "$WS/nowhere" "$WS/legacy" "$WS/outer/inner" \
-         "$WS/ready/output" "$WS/needsudo/provision"
+         "$WS/ready/__output" "$WS/needsudo/provision"
 
 # 有 build.sh + install.sh 的项目（脚本内容无所谓：表格只问"在不在"）
 mkbuildable() {   # <项目目录>
@@ -85,7 +85,7 @@ cat > "$WS/declarative/wtool.xml" <<'EOF'
 </wtool>
 EOF
 
-# 有 build.sh + install.sh，但 output/ 是空的（要真跑 install，所以得是 git 仓库）
+# 有 build.sh + install.sh，但 __output/ 是空的（要真跑 install，所以得是 git 仓库）
 mkbuildable "$WS/scripted"
 cat > "$WS/scripted/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -93,16 +93,16 @@ cat > "$WS/scripted/wtool.xml" <<'EOF'
 EOF
 git -C "$WS/scripted" init -q 2>/dev/null || true
 
-# 和 scripted 一模一样，但 output/ 空着 → install 该是"待产出"
+# 和 scripted 一模一样，但 __output/ 空着 → install 该是"待产出"
 mkbuildable "$WS/pending"
 cat > "$WS/pending/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" id="pending" priority="25"/>
 EOF
 
-# 和 pending 一模一样，只多了 output/x → install 该是"可执行"
+# 和 pending 一模一样，只多了 __output/x → install 该是"可执行"
 mkbuildable "$WS/ready"
-printf 'built\n' > "$WS/ready/output/x"
+printf 'built\n' > "$WS/ready/__output/x"
 cat > "$WS/ready/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" id="ready" priority="28"/>
@@ -155,10 +155,12 @@ tbl() { env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S" "$@"; }
 tbl1() { tbl "$@" | awk 'BEGIN{n=0} /^┌/{n++} n==1{print}'; }
 # 取某一行的某一列。列都是带颜色的中文词，用 awk 字段切最省事。
 # 表格带边框，所以 awk 的字段是：
-#   $1=│ $2=id $3=│ $4=prio $5=│ $6=build $7=│ $8=install $10=sudo $12=pack
-#   $14=publish $16=download $18=layer
+#   $1=│ $2=id $3=│ $4=prio $5=│ $6=build $8=install $10=uninstall $12=sudo
+#   $14=sudo-un $16=pack $18=publish $20=download $22=layer
 # 第 n 列 = $(2*n)
-cell() {   # <项目 id> <列号 3..9>
+#   3=build  4=install  5=uninstall  6=sudo  7=sudo-un
+#   8=pack   9=publish  10=download  11=layer
+cell() {   # <项目 id> <列号 3..11>
     tbl1 --color=always | awk -v id="$1" -v c="$2" '$2 == id {print $(2 * c); exit}'
 }
 # 某一列等于某个标签的那些行，按 id 排好（用来一次比对一整组，比数个数更严）
@@ -181,14 +183,14 @@ printf 'build\t2026-09-15T00:00:00+0800\t\n' > "$S/scripted/actions.tsv"
 chk "构建过之后 build 变已完成（绿）" \
     "$(cell scripted 3)" "$C_DONE"
 
-echo "== 2. install 列：能力看脚本/清单，状态**看磁盘**（output/）=="
-# scripted 此刻 state 里已经记过一笔 build，但 output/ 还是空的 ——
+echo "== 2. install 列：能力看脚本/清单，状态**看磁盘**（__output/）=="
+# scripted 此刻 state 里已经记过一笔 build，但 __output/ 还是空的 ——
 # 旧的判据（"build 做过没有"）在这里会说"可执行"，新判据（看磁盘）必须说"待产出"。
-chk "★记过 build 但 output/ 空 → 待产出（蓝），不是可执行" \
+chk "★记过 build 但 __output/ 空 → 待产出（蓝），不是可执行" \
     "$(cell scripted 4)" "$C_TODO"
-chk "pending 一样有 build.sh、output/ 空 → 待产出（蓝）" \
+chk "pending 一样有 build.sh、__output/ 空 → 待产出（蓝）" \
     "$(cell pending 4)" "$C_TODO"
-chk "ready 也有 build.sh，但 output/ 里有东西 → 可执行（黄）" \
+chk "ready 也有 build.sh，但 __output/ 里有东西 → 可执行（黄）" \
     "$(cell ready 4)" "$C_CAN"
 chk "declarative 没有 build.sh → 不用等产出，直接可执行（黄）" \
     "$(cell declarative 4)" "$C_CAN"
@@ -196,30 +198,30 @@ chk "nowhere 既没脚本也没 link/env → 不支持（红）" \
     "$(cell nowhere 4)" "$C_NONE"
 
 # 给 scripted 放一个产物：格子必须立刻从"待产出"翻成"可执行"
-mkdir -p "$WS/scripted/output"; printf 'built\n' > "$WS/scripted/output/x"
-chk "★output/ 里有东西之后 → 可执行（黄）" \
+mkdir -p "$WS/scripted/__output"; printf 'built\n' > "$WS/scripted/__output/x"
+chk "★__output/ 里有东西之后 → 可执行（黄）" \
     "$(cell scripted 4)" "$C_CAN"
 
 echo "== 3. ★install 那一格和 wtool install 的判据是同一件事（真装一遍）=="
 # 判据一致才叫"格子没骗人"：格子说"待产出"的时候 wtool install 必须真的拒绝，
 # 放了产物它才该成功，成功之后格子才是"已完成"。全程只用临时 $WTOOL_HOME。
-rm -rf -- "$WS/scripted/output"
-chk "清掉 output/ → 格子退回 待产出（蓝）" \
+rm -rf -- "$WS/scripted/__output"
+chk "清掉 __output/ → 格子退回 待产出（蓝）" \
     "$(cell scripted 4)" "$C_TODO"
 
 _rc=0
 sh "$WT" install "$WS/scripted" > "$T/install-empty.log" 2>&1 || _rc=$?
 if [ "$_rc" -ne 0 ]; then
-    ok "output/ 空时 wtool install 拒绝执行（退出码 $_rc）"
+    ok "__output/ 空时 wtool install 拒绝执行（退出码 $_rc）"
 else
-    bad "output/ 空时 wtool install 居然成功了" "$(tail -2 "$T/install-empty.log")"
+    bad "__output/ 空时 wtool install 居然成功了" "$(tail -2 "$T/install-empty.log")"
 fi
-grep -q 'output/ 是空的' "$T/install-empty.log" \
-    && ok "拒绝的理由说清了是 output/ 空的" \
-    || bad "拒绝的理由没提 output/" "$(tail -2 "$T/install-empty.log")"
+grep -q '__output/ 是空的' "$T/install-empty.log" \
+    && ok "拒绝的理由说清了是 __output/ 空的" \
+    || bad "拒绝的理由没提 __output/" "$(tail -2 "$T/install-empty.log")"
 
-mkdir -p "$WS/scripted/output"; printf 'built\n' > "$WS/scripted/output/x"
-chk "放了 output/x → 格子变 可执行（黄）" \
+mkdir -p "$WS/scripted/__output"; printf 'built\n' > "$WS/scripted/__output/x"
+chk "放了 __output/x → 格子变 可执行（黄）" \
     "$(cell scripted 4)" "$C_CAN"
 
 _rc=0
@@ -307,20 +309,28 @@ else
     bad "有行前缀区没填满（列会错位）"
 fi
 
-echo "== 9. 表头：逐项目的引擎命令都要在（2026-09-29 用户要求）=="
-# 以前只有 build / install 两列 —— 用户看不到 sudo-install / pack-release 这些
-# 同样是"逐项目"的命令。现在七列：build install sudo pack publish download layer。
-for col in 项目 prio build install sudo pack publish download layer; do
+echo "== 9. 表头：逐项目的引擎命令都要在（2026-09-29 / 2026-10-04 用户要求）=="
+# 2026-09-29：以前只有 build / install 两列 → 七列。
+# 2026-10-04：用户要求 install / sudo 后面各跟一列 uninstall / sudo-uninstall
+#             （装之前"未安装"、装完变"可执行"），所以现在是九列。
+for col in 项目 prio build install uninstall sudo sudo-un pack publish download layer; do
     tbl1 --color=never | sed -n 2p | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
 done
-# 列名是缩写，就得有"列名=命令"的对照，否则等于让人猜
-for pair in "build=wtool build" "install=wtool install" "sudo=wtool sudo-install" \
-            "pack=wtool pack-release" "publish=wtool publish-release" \
-            "download=wtool download-release" "layer=wtool layer-*"; do
-    tbl --color=never | grep -qF "$pair" && ok "图例里有 $pair" || bad "图例缺 $pair"
+# 图例里**每条命令都要写全名**（用户 2026-10-04：不要省略 pull-layer / push-layer）
+for cmd in "wtool build" "wtool install" "wtool uninstall" "wtool sudo-install" \
+           "wtool sudo-uninstall" "wtool pack-release" "wtool publish-release" \
+           "wtool download-release" "wtool unpack-layer" "wtool push-layer" "wtool pull-layer"; do
+    tbl --color=never | grep -qF "$cmd" && ok "图例里写了 $cmd" || bad "图例缺 $cmd"
 done
-# 「未发布」是新加的第五种格子：项目和"待产出"不是一回事（本机 vs 别人那台机器）
+# 内部命令不进图例（用户要求把它们藏起来）
+for hidden in "wtool layer-*" "wtool _layer-save" "wtool _layer-load"; do
+    tbl --color=never | grep -qF "$hidden" \
+        && bad "图例里不该出现内部命令 $hidden" \
+        || ok "图例里没有内部命令 $hidden"
+done
+# 「未发布」「未安装」是两个新格子（本机 vs 别人那台机器 / 装了没）
 tbl --color=never | grep -q '未发布' && ok "有「未发布」这个格子" || bad "缺「未发布」格子"
+tbl --color=never | grep -q '未安装' && ok "有「未安装」这个格子" || bad "缺「未安装」格子"
 
 echo "== 9b. 看板的后四段（install / sudo-install / bootstrap / sudo-bootstrap）=="
 DASH=$(tbl --color=never)
@@ -343,14 +353,32 @@ printf '%s\n' "$DASH" | grep -q 'wtool pack-release' && ok "发布了图里有 p
     || bad "发布图缺 pack-release"
 printf '%s\n' "$DASH" | grep -q 'read wtool.xml' && ok "安装图里有 read wtool.xml" \
     || bad "安装图缺 wtool.xml 那一步"
+# 用户 2026-10-04 批注：产出那两条路里，route 2 只写 wtool unpack-release
+# （download-release 的落点是 __release/，不是 __output/，所以不该画进这条）
+_pic=$(printf '%s\n' "$DASH" | sed -n '/^  install$/,/^  release$/p')
+printf '%s\n' "$_pic" | grep -q 'route 2:  wtool unpack-release' \
+    && ok "安装图的 route 2 只写 wtool unpack-release" \
+    || bad "安装图的 route 2 不对（用户要求只写 unpack-release）"
+printf '%s\n' "$_pic" | grep -q 'route 2:.*download-release' \
+    && bad "安装图 route 2 里还挂着 download-release" \
+    || ok "安装图 route 2 里没有 download-release"
+# 发布图：download-release 落 __release/，unpack-release 才从 __release/ 解到 __output/
+_rel=$(printf '%s\n' "$DASH" | sed -n '/^  release$/,$p' | sed -n '1,9p')
+printf '%s\n' "$_rel" | grep -q 'pack-release.*__release/' \
+    && ok "发布图：pack-release 的落点是 __release/" || bad "发布图的 pack-release 画错了"
+printf '%s\n' "$_rel" | grep -q 'download-release' \
+    && ok "发布图里有 download-release" || bad "发布图缺 download-release"
+printf '%s\n' "$_rel" | grep -q 'unpack-release )-->  __output/' \
+    && ok "发布图：unpack-release 从 __release/ 解到 __output/" \
+    || bad "发布图没画 unpack-release → __output/"
 
 echo "== 9b2. sudo 那格：清单里有系统层声明才不是"不支持" =="
-chk "needsudo 声明了系统层 → sudo 可执行（黄）" "$(cell needsudo 5)" "$C_CAN"
-chk "declarative 没声明系统层 → sudo 不支持（红）" "$(cell declarative 5)" "$C_NONE"
+chk "needsudo 声明了系统层 → sudo 可执行（黄）" "$(cell needsudo 6)" "$C_CAN"
+chk "declarative 没声明系统层 → sudo 不支持（红）" "$(cell declarative 6)" "$C_NONE"
 # 跑过一次（state 里有 marker）→ 已完成
 mkdir -p "$S/needsudo/provisioned"
 : > "$S/needsudo/provisioned/apt-base"
-chk "跑过之后 sudo 变已完成（绿）" "$(cell needsudo 5)" "$C_DONE"
+chk "跑过之后 sudo 变已完成（绿）" "$(cell needsudo 6)" "$C_DONE"
 printf '2026-09-29T10:00:00+0800\tprovision\t\n' > "$S/needsudo/actions.tsv"
 DASH2=$(tbl --color=never)
 printf '%s\n' "$DASH2" | grep -q 'needsudo' && ok "第 3/5 段里有 needsudo" \
@@ -395,9 +423,9 @@ chk "汇总的「待构建」数 == 表格 build 列 可执行 的行数" \
     && ok "「待构建」不是 0，上面那条比对才测得到东西" \
     || bad "「待构建」是 0，上面那条比对测不到东西"
 
-# install 列的"待产出"必须正好是"有 build.sh、能装、但 output/ 空、还没装过"的那几个。
+# install 列的"待产出"必须正好是"有 build.sh、能装、但 __output/ 空、还没装过"的那几个。
 # 夹具里只有 pending：scripted 已经装过（第 3 节），ready 有产物。
-chk "待产出的正好是 output/ 空的那个项目（pending）" \
+chk "待产出的正好是 __output/ 空的那个项目（pending）" \
     "$(ids_where 4 "$C_TODO" | tr '\n' ' ')" "pending "
 
 echo "== 11. ★表格只显示有 wtool.xml 的项目（回归）=="

@@ -259,7 +259,7 @@ def _parse_publish(node, meta, manifest_path, errors):
 def _parse_build(child, meta, manifest_path, errors):
     """`<build kind="local|docker" min-cores= min-mem= min-disk=/>`（ADR-025）。
 
-    `kind` 决定 `output/` 的形状：`local` 没有 `<os>_<ver>/` 那一层，`docker` 有。
+    `kind` 决定 `__output/` 的形状：`local` 没有 `<os>_<ver>/` 那一层，`docker` 有。
     形状**由声明唯一确定**，引擎不再嗅探（ADR-025 第 2 条）。
 
     三个 `min-*` 是"这台机器够不够跑这个构建"的门槛（引擎侧有默认值），
@@ -1593,16 +1593,22 @@ LBL_DONE = "已完成"
 # 第 5 个标签：项目还没发布过（仓库里没有 scripts/release.json）——
 # 它和"待产出"不是一回事：产出是本机的事，发布是另一台机器上的事。
 LBL_UNPUB = "未发布"
+# 「未安装」：这条 uninstall 命令**现在没什么可撤的**（还没装）。
+# 它和「不支持」不一样 —— 不支持是"这项目根本没这项能力"。
+# 用户 2026-10-04 要求：install 旁边跟一列 uninstall，装之前是未安装、
+# 装之后变可执行；sudo 那一对同理。
+LBL_NOTINST = "未安装"
 
 C_RED = "\033[31m"
 C_YELLOW = "\033[33m"
 C_GREEN = "\033[32m"
 C_BLUE = "\033[34m"
 C_MAGENTA = "\033[35m"
+C_CYAN = "\033[36m"
 C_OFF = "\033[0m"
 
 _LBL_COLOR = {LBL_NONE: C_RED, LBL_TODO: C_BLUE, LBL_CAN: C_YELLOW,
-              LBL_DONE: C_GREEN, LBL_UNPUB: C_MAGENTA}
+              LBL_DONE: C_GREEN, LBL_UNPUB: C_MAGENTA, LBL_NOTINST: C_CYAN}
 
 
 def _state_cell(state, color_on):
@@ -1622,7 +1628,7 @@ def pipeline_states(path, pub, st):
     每个格子只有四种取值：
       不支持      这个项目没这项能力
       可执行      现在就能跑
-      待产出      能力有，但要先把 `output/` 产出来
+      待产出      能力有，但要先把 `__output/` 产出来
       已完成      跑过了
     """
     def _script(name):
@@ -1656,7 +1662,7 @@ def pipeline_states(path, pub, st):
         out["install"] = LBL_DONE
     elif has_build and not _has_output(path):
         # 判据和 `wtool install` 一致：**看磁盘**，不看"做过没有"。
-        # 有 build.sh 就必须先有 output/，否则装出来是半成品。
+        # 有 build.sh 就必须先有 __output/，否则装出来是半成品。
         out["install"] = LBL_TODO
     else:
         out["install"] = LBL_CAN
@@ -1665,8 +1671,8 @@ def pipeline_states(path, pub, st):
 
 
 def _has_output(path):
-    """`<项目>/output/` 里有没有东西（和 cmd_install 的判据同一件事）。"""
-    out = os.path.join(path, "output")
+    """`<项目>/__output/` 里有没有东西（和 cmd_install 的判据同一件事）。"""
+    out = os.path.join(path, DIR_OUT)
     try:
         with os.scandir(out) as it:
             for _ in it:
@@ -1747,8 +1753,8 @@ def _manifest_entries(path):
 
 
 def _layer_layouts(path):
-    """`layer/<target>/index.json` 有几个（>0 说明这台机器上已经有层了）。"""
-    root = os.path.join(path, "layer")
+    """`__layer/<target>/index.json` 有几个（>0 说明这台机器上已经有层了）。"""
+    root = os.path.join(path, DIR_LAYER)
     n = 0
     try:
         for name in os.listdir(root):
@@ -1766,13 +1772,15 @@ def command_states(path, pub, st, state_dir):
 
       build            wtool build
       install          wtool install
+      uninstall        wtool uninstall          （装过才可撤，没装就是"未安装"）
       sudo             wtool sudo-install
+      sudo-uninstall   wtool sudo-uninstall     （和 sudo 成对看）
       pack             wtool pack-release
       publish          wtool publish-release
       download         wtool download-release
-      layer            wtool layer-save / layer-load / unpack-layer / push-layer / pull-layer
+      layer            wtool unpack-layer / push-layer / pull-layer
 
-    格子取值：不支持 / 可执行 / 待产出 / 已完成 / 未发布（都定义在 LBL_*）。
+    格子取值：不支持 / 可执行 / 待产出 / 已完成 / 未发布 / 未安装（都定义在 LBL_*）。
     """
     def _script(name):
         return (os.path.isfile(os.path.join(path, "scripts", name))
@@ -1794,7 +1802,7 @@ def command_states(path, pub, st, state_dir):
     else:
         out["build"] = LBL_CAN
 
-    # install：和 `wtool install` 的判据同一件事（声明面 + output/ 在不在）
+    # install：和 `wtool install` 的判据同一件事（声明面 + __output/ 在不在）
     if not (_script("install.sh") or bool(kinds & {"link", "env"})):
         out["install"] = LBL_NONE
     elif st.get("installed"):
@@ -1804,17 +1812,34 @@ def command_states(path, pub, st, state_dir):
     else:
         out["install"] = LBL_CAN
 
+    # uninstall：和 install 成对 —— 装过才可撤（用户 2026-10-04 要求）
+    if out["install"] == LBL_NONE:
+        out["uninstall"] = LBL_NONE
+    elif st.get("installed"):
+        out["uninstall"] = LBL_CAN
+    else:
+        out["uninstall"] = LBL_NOTINST
+
     # sudo-install：清单里得有系统层声明（sysfile / source / task）
+    _sudo_done = bool(st.get("provisioned") or os.path.isfile(
+        os.path.join(state_dir, st["id"], "apt.tsv")))
     if not (kinds & {"sysfile", "source", "task"}):
         out["sudo"] = LBL_NONE
-    elif st.get("provisioned") or os.path.isfile(
-            os.path.join(state_dir, st["id"], "apt.tsv")):
+    elif _sudo_done:
         out["sudo"] = LBL_DONE
     else:
         out["sudo"] = LBL_CAN
 
-    # pack-release：源码包谁都能打；有 build 能力的要等 output/
-    if os.path.isfile(os.path.join(path, "release", "dist.json")):
+    # sudo-uninstall：和 sudo-install 成对
+    if out["sudo"] == LBL_NONE:
+        out["sudo-uninstall"] = LBL_NONE
+    elif _sudo_done:
+        out["sudo-uninstall"] = LBL_CAN
+    else:
+        out["sudo-uninstall"] = LBL_NOTINST
+
+    # pack-release：源码包谁都能打；有 build 能力的要等 __output/
+    if os.path.isfile(os.path.join(path, DIR_REL, "dist.json")):
         out["pack"] = LBL_DONE
     elif has_build and not _has_output(path):
         out["pack"] = LBL_TODO
@@ -1849,7 +1874,11 @@ def command_states(path, pub, st, state_dir):
     return out
 
 
-DASH_COLS = [("build", "build"), ("install", "install"), ("sudo", "sudo"),
+# 列顺序：install / uninstall 成对、sudo / sudo-uninstall 成对（用户 2026-10-04 要求：
+# "装之前 install 是可执行、uninstall 是未安装；装完之后 install 变已完成、
+#  uninstall 变可执行，sudo 同此逻辑"）
+DASH_COLS = [("build", "build"), ("install", "install"), ("uninstall", "uninstall"),
+             ("sudo", "sudo"), ("sudo-uninstall", "sudo-un"),
              ("pack", "pack"), ("publish", "publish"),
              ("download", "download"), ("layer", "layer")]
 
@@ -1892,7 +1921,7 @@ def _section_install(projects, verbose):
         else:
             state = LBL_CAN
         if p["cmds"]["install"] == LBL_TODO:
-            what = "要先产出 output/：wtool build，或 wtool download-release + wtool unpack-release"
+            what = "要先产出 __output/：wtool build，或 wtool download-release + wtool unpack-release"
         else:
             bits = []
             if p["n_link"]:
@@ -1934,7 +1963,7 @@ def _section_bootstrap(projects, verbose):
     i = 0
     for p in projects:
         if p["cmds"]["build"] == LBL_CAN and not _has_output(p["path"]):
-            state, what = "跳过", "要先产出 output/（wtool build 或 download-release + unpack-release）"
+            state, what = "跳过", "要先产出 __output/（wtool build 或 download-release + unpack-release）"
         elif p["cmds"]["install"] == LBL_NONE:
             i += 1
             state, what = "会跑", "没声明要装什么 —— 只登记一条中转软链（install 对它是空操作）"
@@ -1966,31 +1995,35 @@ def _section_sudo_bootstrap(projects, verbose):
 INSTALL_PIC = [
     "  install",
     "  -------",
-    "      route 1:  wtool build -----------------+",
-    "                                              +-->  output/  --+",
-    "      route 2:  wtool download-release ------+                 |",
-    "                  wtool unpack-release ------+                 |",
-    "                                                               v",
-    "                                                    wtool install     (never sudo / never network)",
-    "                                                               |",
-    "                                                               v",
-    "                                                    ~/.wtool/         (mirror of $HOME)",
-    "                                                               |",
-    "                                     read wtool.xml -----------+---->  symlinks in $HOME",
-    "                                                                       $HOME/x  -->  ~/.wtool/x",
+    "      route 1:  wtool build ----------+",
+    "                                      +-->  __output/  --+",
+    "      route 2:  wtool unpack-release -+                  |",
+    "                                                         v",
+    "                                              wtool install     (never sudo / never network)",
+    "                                                         |",
+    "                                                         v",
+    "                                              ~/.wtool/         (mirror of $HOME)",
+    "                                                         |",
+    "                               read wtool.xml -----------+---->  symlinks in $HOME",
+    "                                                                 $HOME/x  -->  ~/.wtool/x",
 ]
 
 RELEASE_PIC = [
     "  release",
     "  -------",
-    "      output/  --( wtool pack-release )-->  release/  --( wtool publish-release )-->  GitHub Release",
-    "                                                 ^                                          |",
-    "                                                 +--( wtool unpack-release )<--( wtool download-release )",
+    "      __output/  --( wtool pack-release )-->  __release/  --( wtool publish-release )-->  GitHub Release",
+    "                                                   ^                                            |",
+    "                                                   +-------( wtool download-release )-----------+",
+    "                                                   |",
+    "                                                   +--( wtool unpack-release )-->  __output/",
 ]
 
 README_TEXT = [
     "  流水线：产出 → install，前面的没做后面的跑不起来。",
-    "  产出有两条路：wtool build，或者 wtool download-release + wtool unpack-release。",
+    "  产出有两条路：wtool build；或者 wtool download-release（下到 __release/）",
+    "                + wtool unpack-release（解到 __output/）。",
+    "  注意 download-release 的落点是 __release/，**不是** __output/；",
+    "  它下完还要再跑一次 wtool unpack-release 才变成能 install 的产物。",
     "  前置没做时 install 会直接报错告诉你去跑哪条，不会替你跑。",
     "  （发布和下载不是「项目能力」，是引擎统一做的 —— 见 harness/docs/adr/0023。）",
 ]
@@ -2050,11 +2083,17 @@ def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
     out += _hdr("1. 每个项目能跑哪些命令（引擎里逐项目的那些）")
     out += _section_command_table(projects, color)
     out.append("")
-    out.append("  列名 = 引擎命令：build=wtool build   install=wtool install   sudo=wtool sudo-install")
-    out.append("                 pack=wtool pack-release   publish=wtool publish-release")
-    out.append("                 download=wtool download-release   layer=wtool layer-*")
-    out.append("  格子：%s 这个项目没这项能力   %s 现在就能跑   %s 要先产出 output/   %s 跑过了   %s 还没发布过"
-               % (LBL_NONE, LBL_CAN, LBL_TODO, LBL_DONE, LBL_UNPUB))
+    # 列名就是引擎命令，**一条都不省**（用户 2026-10-04 要求：
+    # "这里不要省略 pull-layer 和 push-layer"）。
+    out.append("  列名 = 引擎命令（逐项目的那些）：")
+    out.append("      build            wtool build               install     wtool install")
+    out.append("      uninstall        wtool uninstall           sudo        wtool sudo-install")
+    out.append("      sudo-un          wtool sudo-uninstall      pack        wtool pack-release")
+    out.append("      publish          wtool publish-release     download    wtool download-release")
+    out.append("      layer            wtool unpack-layer / wtool push-layer / wtool pull-layer")
+    out.append("                       （层是项目的资产：unpack 出安装产物、push/pull 走镜像仓库）")
+    out.append("  格子：%s 这个项目没这项能力   %s 现在就能跑   %s 要先产出 __output/   %s 跑过了   %s 还没发布过   %s 还没装（撤不了）"
+               % (LBL_NONE, LBL_CAN, LBL_TODO, LBL_DONE, LBL_UNPUB, LBL_NOTINST))
     out.append("")
     out.append(table_summary(projects))
 
@@ -2706,7 +2745,7 @@ def publish_info(project_dir, ws_root=None):
     print("tag\t%s" % (pub.get("tag") or DEFAULT_PUBLISH_TAG))
     print("to\t%s" % (pub.get("to") or "-"))
     print("asset\t%s" % (pub.get("asset") or "-"))
-    # 构建方式（ADR-025）：kind 决定 output/ 的形状，min-* 决定这台机器够不够
+    # 构建方式（ADR-025）：kind 决定 __output/ 的形状，min-* 决定这台机器够不够
     _bld = meta.get("build") or {}
     print("build\t%s" % (_bld.get("kind") or "local"))
     print("min_cores\t%s" % (_bld.get("min_cores") if _bld.get("min_cores") else "-"))
@@ -2747,12 +2786,22 @@ def claimed_homes(root, exclude_id="", home=""):
 
 
 # --------------------------------------------------------------------------
-# pack-release：把项目打成 release/ 里的分卷
+# pack-release：把项目打成 __release/ 里的分卷
 #
 # Python 只算"打哪些文件"（读 .gitignore 是文本逻辑），实际打包、切卷、
-# 算 sha256 由 shell 侧做（wtool_fs.sh），产物落在 <项目>/release/。
+# 算 sha256 由 shell 侧做（wtool_fs.sh），产物落在 <项目>/__release/。
 # --------------------------------------------------------------------------
-ALWAYS_IGNORED_DIRS = ("output", "release", ".git", "__pycache__",
+# 三个"跑起来才有"的目录，名字带 `__` 前缀（用户 2026-10-04 要求，见 ADR-0033）：
+# 一眼看出它们不是仓库自带的目录，`ls` 时也和源码分得开。
+# 旧的 output/ release/ layer/ 也列在忽略表里 —— 老工作区里可能还留着，
+# 别让它们被打进源码包（那是 GB 级的）。
+DIR_OUT = "__output"
+DIR_REL = "__release"
+DIR_LAYER = "__layer"
+
+ALWAYS_IGNORED_DIRS = (DIR_OUT, DIR_REL, DIR_LAYER,
+                       "__output", "__release", "__layer",
+                       ".git", "__pycache__",
                        ".mypy_cache", ".pytest_cache", ".ruff_cache")
 
 
@@ -2858,9 +2907,9 @@ def _ignored(rel, is_dir, rules):
 def source_file_list(project_root):
     """源码包里要打进去的文件（相对项目目录，已按路径排序）。
 
-    **一定读 .gitignore**：不读的话 GB 级的 output/ 会被原样打进源码包
+    **一定读 .gitignore**：不读的话 GB 级的 __output/ 会被原样打进源码包
     （实测过）。git 可用就让 git 算，否则自己解析 .gitignore。
-    另外无论 .gitignore 怎么写，output/ 和 release/ 永远排除。
+    另外无论 .gitignore 怎么写，__output/、__release/、__layer/ 永远排除。
     """
     root = os.path.abspath(project_root)
     files = _git_ls_files(root)
@@ -2890,9 +2939,9 @@ def source_file_list(project_root):
 
 
 def release_file_list(project_root):
-    """output/ 里的文件（相对项目目录）。文件从这儿来，装到别的机器上去。"""
+    """__output/ 里的文件（相对项目目录）。文件从这儿来，装到别的机器上去。"""
     root = os.path.abspath(project_root)
-    rel_root = os.path.join(root, "output")
+    rel_root = os.path.join(root, DIR_OUT)
     out = []
     if not os.path.isdir(rel_root):
         return out
@@ -2956,7 +3005,7 @@ def write_dist(args):
         # 顺序有意义：volumes 按顺序逐个拼接就是原来的大文件
         "files": files,
         "volumes": volumes,
-        "how": ("把 dist.json 和所有分卷下到项目的 release/ 目录，然后："
+        "how": ("把 dist.json 和所有分卷下到项目的 __release/ 目录，然后："
                 "wtool unpack-release <项目> ；wtool install <项目>"),
     }
     text = json.dumps(dist, ensure_ascii=False, indent=2) + "\n"
@@ -2969,7 +3018,7 @@ def _downloadable_rows(rows):
     """从 rows.tsv 里挑出**真正能下载的东西**。
 
     rows.tsv 的每一行是 `名字 sha256 字节 role of`：
-    被切成卷的大文件（of 非空的行指向它）本身不留在 release/ 里，
+    被切成卷的大文件（of 非空的行指向它）本身不留在 __release/ 里，
     所以下载页和 downloads.sh 都不该列它 —— 列了就是 404。
     """
     split = {row[4] for row in rows if len(row) > 4 and row[4]}
@@ -2980,7 +3029,7 @@ def _downloadable_rows(rows):
         if len(row) > 4 and row[4]:
             out.append(row)                      # 分卷：要下
         elif row[0] in split:
-            continue                             # 被切开的原始大文件：不在 release/ 里
+            continue                             # 被切开的原始大文件：不在 __release/ 里
         else:
             out.append(row)
     return out
@@ -3048,7 +3097,7 @@ def docker_layers(project_dir):
 
     四列：`层名 \t 父层 \t 镜像名 \t 容器里跑的命令`
       · 父层 `-`      = 从目标系统的基础镜像出发（第一层）
-      · 镜像名 `-`    = 占位层：不构建，只留一个空的 output 层
+      · 镜像名 `-`    = 占位层：不构建，只留一个空的 __output 层
       · 命令里的 `{target}` 会被替换成当前目标（引擎替换，这里只校验）
     """
     _tpath, lpath, _fpath = docker_manifest_paths(project_dir)
@@ -3113,12 +3162,12 @@ def docker_plan_order(layers):
 def release_targets(project_dir):
     """`release.json` 的 `targets[]` —— **形状由声明决定，引擎不嗅探**（ADR-025）。
 
-    | `<build kind>` | `output/` 的形状 | targets[] |
+    | `<build kind>` | `__output/` 的形状 | targets[] |
     |---|---|---|
-    | `docker` | `output/<os>_<ver>/<层>/…` | 每个 `<os>_<ver>` 一个名字 |
-    | `local`  | `output/<层>/…`（没有 target 那一层） | **空** |
+    | `docker` | `__output/<os>_<ver>/<层>/…` | 每个 `<os>_<ver>` 一个名字 |
+    | `local`  | `__output/<层>/…`（没有 target 那一层） | **空** |
 
-    `kind="local"` 时如果照旧扫 `output/*/`，扫出来的是**层名**（"bin"、"main"）
+    `kind="local"` 时如果照旧扫 `__output/*/`，扫出来的是**层名**（"bin"、"main"）
     —— 那是假信息：对静态链接的产物来说，"这一版是给哪个发行版的"根本不存在。
     """
     root = os.path.abspath(project_dir)
@@ -3129,7 +3178,7 @@ def release_targets(project_dir):
     kind = ((meta or {}).get("build") or {}).get("kind") or "local"
     if kind != "docker":
         return ""
-    out = os.path.join(root, "output")
+    out = os.path.join(root, DIR_OUT)
     try:
         names = sorted(d for d in os.listdir(out)
                        if os.path.isdir(os.path.join(out, d)))
@@ -3143,10 +3192,10 @@ def release_json(args):
 
     它是 `wtool download-release` **唯一要读的东西**，所以必须自足：
     光凭它就能拼出每个资产的下载地址、校验 sha256 —— 不用先下任何东西
-    （这一点是它和 `release/dist.json` 的根本区别：后者跟着包走，
+    （这一点是它和 `__release/dist.json` 的根本区别：后者跟着包走，
     和包同源，所以只能用来拼卷，不能当"可信清单"）。
 
-    资产表**按 `release/` 目录里实际有的文件**算（和 `publish-release`
+    资产表**按 `__release/` 目录里实际有的文件**算（和 `publish-release`
     上传时用的 `find -maxdepth 1 -type f` 同一条规则）—— 保证"清单里有的
     就是传上去的"，不会漂移。role 从 dist.json 里补，补不到的留空。
 
@@ -3211,8 +3260,8 @@ def release_json(args):
         # 定下来（BL-28）才补得上。补上之前 download-release 不能按 glibc 选包。
         "targets": [{"target": t} for t in targets],
         "assets": assets,
-        "how": ("wtool download-release %s   # 下到项目的 release/（按本文件的 sha256 校验）\n"
-                "wtool unpack-release %s     # 拼分卷 + 解到 output/\n"
+        "how": ("wtool download-release %s   # 下到项目的 __release/（按本文件的 sha256 校验）\n"
+                "wtool unpack-release %s     # 拼分卷 + 解到 __output/\n"
                 "wtool install %s            # 装到本机" % (pid, pid, pid)),
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -3222,13 +3271,13 @@ def download_doc(args):
     """`docs/download.md` 的内容：给人看的下载页。
 
     ⚠️ **资产表必须和 `scripts/release.json` 的 `assets[]` 是同一批文件** ——
-    两者都按 `release/` 目录里**实际有什么**算（不是按"源码包/产物包"那一类算）。
+    两者都按 `__release/` 目录里**实际有什么**算（不是按"源码包/产物包"那一类算）。
     漏掉 `dist.json` 或 `*-hash.txt` 的话，照页面手动下的人会缺文件，
     而 `unpack-release` 正好要 `dist.json` 才拼得了分卷。
 
     人分两类，页面要同时照顾：
       · 装了 wtool 的 —— 三条命令搞定，走 `download-release` + `unpack-release`；
-      · 只有浏览器的 —— 手点上面那些直链，下完放进项目的 `release/` 再 unpack。
+      · 只有浏览器的 —— 手点上面那些直链，下完放进项目的 `__release/` 再 unpack。
     """
     base = "https://github.com/%s/releases/download/%s" % (args.repo, args.tag)
     roles = {}
@@ -3273,11 +3322,11 @@ def download_doc(args):
             "",
             "```sh",
             "wtool download-release %s   # 按仓库里提交的 scripts/release.json 下载 + 校验" % args.project_id,
-            "wtool unpack-release %s     # 拼分卷 + 解到 output/" % args.project_id,
+            "wtool unpack-release %s     # 拼分卷 + 解到 __output/" % args.project_id,
             "wtool install %s            # 装到本机（登记、软链、shell 集成）" % args.project_id,
             "```",
             "",
-            "**只有浏览器的机器**：把上面每个文件点下来，放进项目的 `release/` 目录，",
+            "**只有浏览器的机器**：把上面每个文件点下来，放进项目的 `__release/` 目录，",
             "再在那台机器上跑后两条命令 —— `unpack-release` 认包里的 `dist.json`，",
             "缺了哪一卷它会说清楚。",
             "",

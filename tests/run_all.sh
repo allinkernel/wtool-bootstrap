@@ -7,7 +7,7 @@
 #   tests/release_copy_test.sh 从发布包解压出来的工作区（没有 .git 也没有 repo 客户端）（17 条）
 #   tests/release_test.sh     pack-release / unpack-release / download-release（62 条）
 #   tests/contract_test.sh    新契约：新标签、两跳软链、执行顺序、check/repair、kill（69 条）
-#   tests/layer_test.sh       layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（39 条）
+#   tests/layer_test.sh       __layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（39 条）
 #   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）（44 条）
 #   tests/install_env_test.sh install.sh 第 0 步：镜像测速 / 挑源 / 换源与退路（打桩，不联网）（27 条）
 #   tests/docker_build_real.sh 同一件事的**真 docker** 冒烟测试（人工跑，见文件头）
@@ -31,7 +31,7 @@ printf '\n########## 6/10 pack-release / unpack-release / download-release #####
 sh "$here/release_test.sh"
 printf '\n########## 7/10 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
 sh "$here/contract_test.sh"
-printf '\n########## 8/10 layer/（OCI 镜像目录）##########\n'
+printf '\n########## 8/10 __layer/（OCI 镜像目录）##########\n'
 sh "$here/layer_test.sh"
 printf '\n########## 9/10 引擎驱动容器构建（kind=docker）##########\n'
 sh "$here/docker_build_test.sh"
