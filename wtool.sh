@@ -1439,7 +1439,8 @@ cmd_uninstall() {
     [ -n "$_project" ] || [ -n "$_id" ] || wt_die "用法: wtool uninstall <项目目录>|--id <id>|all [--dry-run] [--force] [--no-script]"
 
     # `all` = 卸掉所有装过的项目（判据是 state 里的账，不是项目表：
-    # 项目目录可能已经不在磁盘上了，那种情况正好靠 --id 也卸得掉）。
+    # 项目目录可能已经不在磁盘上了 —— 那种情况下面显式降级成 `--no-script`
+    # 走 state 的账，因为没有脚本可跑）。
     if [ "$_project" = "all" ]; then
         _all_ids=$(wt_installed_ids)
         if [ -z "$_all_ids" ]; then
@@ -1457,6 +1458,12 @@ cmd_uninstall() {
             [ "${WTOOL_DRY_RUN:-0}" = 1 ] && _force_all="$_force_all --dry-run"
             _noscript_all=""
             [ "${WTOOL_NO_SCRIPT:-0}" = 1 ] && _noscript_all="--no-script"
+            # 项目目录可能已经被删掉（场景 5b：仓库没了也得卸得掉）。那种情况
+            # 没有脚本可跑 —— 降级成 `--no-script` 走 state 的账，由下面那条路
+            # 打一句警告说明是哪个项目（BL-47：解析不出来必须报错，不许静默跳过）。
+            if [ -z "$_noscript_all" ] && ! wt_resolve_uninstall_id "$_ai" >/dev/null 2>&1; then
+                _noscript_all="--no-script"
+            fi
             # shellcheck disable=SC2086
             cmd_uninstall --id "$_ai" $_force_all $_noscript_all || _rc_all=1
         done
@@ -1482,7 +1489,26 @@ cmd_uninstall() {
             --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
             $([ "$WTOOL_FORCE" = 1 ] && echo --force) || exit $?
     else
-        python3 "$PY" plan-uninstall --id "$_id" \
+        # ‼️ `--id` / 裸 id 这条路必须先把**项目根**解析出来（BL-47）。
+        #    以前这里不解析，meta 里的 project_root 是 `-`，第 3 步
+        #    "跑项目自己的 install.sh --uninstall"就**静默跳过**了 ——
+        #    不报错、不警告，用户以为卸干净了；只有目录形式才真跑（实测复现）。
+        #    解析不出来时**明确报错**（除非 --no-script 已经说了不跑脚本）。
+        _id_root=""
+        _id_res=$(wt_resolve_uninstall_id "$_id") || _id_res=""
+        if [ -n "$_id_res" ]; then
+            _id=$(printf '%s\n' "$_id_res" | cut -f1)
+            _id_root=$(printf '%s\n' "$_id_res" | cut -f2)
+        elif [ "${WTOOL_NO_SCRIPT:-0}" = 1 ]; then
+            wt_warn "找不到项目「$_id」的工作区目录（项目表里没有、state 里记的路径也不在了）；"
+            wt_warn "  --no-script 已给，跳过项目脚本，只撤 state 的账"
+        else
+            wt_die "找不到项目「$_id」：工作区项目表里没有它，state 里也没记过它的项目根 ——
+项目脚本（install.sh --uninstall）没法跑，不会静默跳过。
+确认 id 拼写；或直接给项目目录：wtool uninstall <项目目录>；
+确实不需要跑项目脚本，加 --no-script。"
+        fi
+        python3 "$PY" plan-uninstall --id "$_id" --project-root "$_id_root" \
             --home "$WTOOL_HOME" --state "$WTOOL_STATE" --scratch "$_scratch" \
             $([ "$WTOOL_FORCE" = 1 ] && echo --force) || exit $?
     fi
@@ -1573,14 +1599,23 @@ cmd_uninstall() {
     # 引擎拆的是指向那些实体的软链 —— 反过来的话，脚本可能已经找不到
     # 自己装的东西了。而且 install 现在是"先脚本后软链"，uninstall 逆着来
     # 才叫配对。
-    if [ "${WTOOL_NO_SCRIPT:-0}" != 1 ] \
-       && wt_project_script "$WTOOL_PROJECT_ROOT" install.sh >/dev/null 2>&1; then
-        wt_info "项目脚本: install.sh --uninstall"
-        if ! wt_run_project_script "$WTOOL_PROJECT_ROOT" install.sh --uninstall; then
-            if [ "${WTOOL_FORCE:-0}" = 1 ]; then
-                wt_warn "  install.sh --uninstall 失败（--force 继续）"
-            else
-                wt_die "install.sh --uninstall 失败；加 --force 强行继续"
+    #
+    # ‼️ 这里**不许静默跳过**（BL-47）：没有 project_root = 脚本没跑，
+    #    而用户完全看不出来。--no-script 那条路在上面就放行了，能走到这儿
+    #    就必须有根目录 —— 没有就是引擎自己的 bug，宁可停下来。
+    if [ "${WTOOL_NO_SCRIPT:-0}" != 1 ]; then
+        case ${WTOOL_PROJECT_ROOT:-} in
+            ""|"-") wt_die "内部错误：没有 project_root，项目脚本没法跑（BL-47）——
+撤 $HOME 软链已经做完了；只撤 state 的账可以加 --no-script 重跑" ;;
+        esac
+        if wt_project_script "$WTOOL_PROJECT_ROOT" install.sh >/dev/null 2>&1; then
+            wt_info "项目脚本: install.sh --uninstall"
+            if ! wt_run_project_script "$WTOOL_PROJECT_ROOT" install.sh --uninstall; then
+                if [ "${WTOOL_FORCE:-0}" = 1 ]; then
+                    wt_warn "  install.sh --uninstall 失败（--force 继续）"
+                else
+                    wt_die "install.sh --uninstall 失败；加 --force 强行继续"
+                fi
             fi
         fi
     fi
@@ -2943,6 +2978,59 @@ wt_publish_resolve() {
            printf '%s\n' "$_hits" | awk -F'\t' '{print "  " $2}' >&2
            wt_die "请写完整的项目 id" ;;
     esac
+}
+
+# 项目表（`publish-list` 原来的 7 列）缓存到 `_wt_proj_tbl`。一次进程里扫一次就够 ——
+# `uninstall all` 对每个项目要按 id 解析一次（外层还预检一次），不缓存就是
+# 每个项目扫两遍全树（实测一遍 ~0.6s，5 个项目多花 2.7s）。
+# ⚠️ 缓存必须由**当前 shell** 填（`$(...)` 是子 shell，在里面赋值留不下来）。
+_wt_proj_tbl=""
+_wt_proj_tbl_ready=0
+wt_proj_tbl_load() {
+    if [ "$_wt_proj_tbl_ready" != 1 ]; then
+        _wt_proj_tbl=$(python3 "$PY" publish-list --root "$WTOOL_ROOT" 2>/dev/null) || _wt_proj_tbl=""
+        _wt_proj_tbl_ready=1
+    fi
+}
+
+# 项目 id → "id<TAB>项目根"（给 uninstall 用）。找不到返回 1 —— **不 die**，
+# 由调用方决定怎么说（uninstall 要按 `--no-script` 分两种说法）。
+#
+# 为什么要这一步（BL-47，2026-10-04 实测）：`wtool uninstall <id>` 那条路以前
+# 拿不到 project_root（meta 里写 `-`），于是"跑项目自己的 install.sh --uninstall"
+# 被**静默跳过** —— 不报错、不警告，只有目录形式才跑。
+#
+# 只认**完整 id**（`--id` 给的就是项目 id；state 目录也是按完整 id 建的）：
+# 认末段 id（`tmux`）会有个危险的岔子 —— state 里那条账叫 `foo/bar`，
+# 而表里只有 `x/foo/bar` 时会把**另一个项目**卸掉。找不到时把末段同名的
+# 候选打到 stderr 提示用户写完整 id，但不替他选。
+#
+# 两条来源，按顺序：
+#   ① 工作区项目表（publish-list —— 看板 / 发布 / 状态用的是同一张表，没有第二套扫描）
+#   ② state 里 install 当时记下的 project_root（工作区**外面**装的项目只能靠这条），
+#      只在那个目录还在时才算数 —— 目录没了就没有脚本可跑
+wt_resolve_uninstall_id() {
+    _ru_id=$1
+    wt_proj_tbl_load
+    _ru_tbl=$_wt_proj_tbl
+    _ru_row=$(printf '%s\n' "$_ru_tbl" | awk -F'\t' -v w="$_ru_id" '$2 == w { print; exit }')
+    if [ -n "$_ru_row" ]; then
+        printf '%s\t%s\n' "$(printf '%s\n' "$_ru_row" | cut -f2)" \
+                          "$(printf '%s\n' "$_ru_row" | cut -f3)"
+        return 0
+    fi
+    _ru_rec=$(wt_meta_get "$WTOOL_STATE/$_ru_id/meta.tsv" project_root) || _ru_rec=""
+    if [ -n "$_ru_rec" ] && [ "$_ru_rec" != "-" ] && [ -d "$_ru_rec" ]; then
+        printf '%s\t%s\n' "$_ru_id" "$_ru_rec"
+        return 0
+    fi
+    # 什么也没找到：表里有"末段同名"的就说一句，免得用户以为项目不存在
+    printf '%s\n' "$_ru_tbl" | awk -F'\t' -v w="$_ru_id" '
+        length(w) < length($2) && substr($2, length($2) - length(w)) == "/" w {
+            if (!hit) { print "（工作区里有末段同名的项目，id 要写完整：）"; hit=1 }
+            print "  " $2
+        }' >&2
+    return 1
 }
 
 # 把用户给的项目名解析成一行完整的 7 列记录（和 publish-list 同格式）。

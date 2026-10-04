@@ -301,7 +301,28 @@ wtool:              WTOOL_ARTIFACTS=… WTOOL_STATE_DIR=…
    （`system.tsv` / `system/` / `apt.tsv` / `provisioned/`）**留着** ——
    删了，`sudo-uninstall` 就再也没依据还原了。
 
-`uninstall --id <id>` 可在**仓库已经被删掉**的情况下使用。
+#### `<项目目录>` 和 `--id <id>` 两条路**等价**（BL-47）
+
+**都跑项目脚本**（第 5 步），**都是"完全配对"** —— 区别只在"项目根从哪来"：
+
+| 形式 | 项目根怎么来的 |
+|---|---|
+| `uninstall <项目目录>` | 就是这个目录（`cd` 进去取绝对路径） |
+| `uninstall <id>` / `uninstall --id <id>` | ① 在工作区项目表里按 id **精确**匹配（`publish-list`，和看板 / 发布 / 状态用的是同一张表）；② 表里没有就退回 state 里 install 当时记下的 `project_root`（**工作区外面**装的项目只能靠这条），只在那个目录还在时才算数 |
+
+> **只认完整 id**：`wtool uninstall tmux` **不**替你猜 `terminal/tmux`。
+> 理由是 state 里的账按完整 id 建目录 —— 表里只有 `x/foo/bar` 而 state 里是
+> `foo/bar` 时，"末段匹配"会把**另一个项目**卸掉。找不到时会把末段同名的
+> 候选列出来（"id 要写完整"），但不替你选。
+
+解析不出来（表里没有、state 里也没记过、或者记的那个目录已经不在了）时：
+
+- **默认明确报错、退出码非 0**，并提示目录形式和 `--no-script` 两条退路。
+  **绝不静默跳过项目脚本** —— 那是 BL-47 的原始症状（`--id` 那条路拿不到
+  `project_root`，第 5 步一声不响地不跑，只有目录形式才跑）。
+- `--no-script`（明说"不跑项目脚本"）时不报错，只警告一句，按 state 的账撤。
+- `uninstall all` 里项目目录已经不在磁盘上的，自动降级成 `--no-script`
+  并警告一句（"仓库被删了也得卸得掉"，见 `tests/contract_test.sh` 场景 5b）。
 
 ### `~/usr` 这条全局软链
 
@@ -421,12 +442,12 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | table | `tests/table_test.sh` | 94 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 63 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 208 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同） |
+| contract | `tests/contract_test.sh` | 221 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同）、**`--id` / 裸 id 的 uninstall 也跑项目脚本**（标记文件 + 参数；解析不出来时明确报错、退出码非 0，`--no-script` 只警告 —— BL-47） |
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 46 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **738** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
+共 **751** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
 `run_all.sh` **文件头**注释里那几行逐组条数也同步成了这一版，但**以它跑出来的 PASS 行为准**）：
 
 ```sh

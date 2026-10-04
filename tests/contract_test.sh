@@ -1023,8 +1023,9 @@ esac
 "$WT" install dry/proj > "$T/i15.log" 2>&1 || bad "（前置）真装一遍失败" "$(cat "$T/i15.log")"
 [ -L "$WTOOL_HOME/.dry.conf" ] && ok "（前置）真装之后 \$HOME 软链在" \
     || bad "（前置）真装没建成"
-#   ⚠️ 这里必须用**目录**（不是 id）：`wtool uninstall <id>` 拿不到 project_root，
-#   项目脚本那一步会被静默跳过（2026-10-04 实测，见本次提交的报告）。
+#   这里给的是**目录**形式。id 形式（`--id` / 裸 id）以前拿不到 project_root，
+#   项目脚本那一步会被静默跳过；BL-47 修好之后两种形式等价 —— 见场景 16
+#   （那里用标记文件断言 id 形式真跑了脚本，本场景仍然只验 dry-run 的零副作用）。
 _before=$(_snap)
 _rc=0
 _out=$("$WT" uninstall "$P4" --dry-run 2>&1) || _rc=$?
@@ -1040,6 +1041,105 @@ fi
 case $_out in
     *"install.sh"*) ok "uninstall --dry-run 也打印了脚本路径" ;;
     *) bad "uninstall --dry-run 没打印脚本路径" "$_out" ;;
+esac
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 16：uninstall 认 id 也要跑项目脚本（BL-47）==\n'
+#   改之前：`wtool uninstall --id <id>`（以及裸 id）那条路拿不到 project_root，
+#   第 3 步"跑项目自己的 install.sh --uninstall"被**静默跳过** —— 不报错、不警告，
+#   只有目录形式才跑。改前的复现（id 形式那行不会打印"项目脚本"、
+#   标记文件也不出现；目录形式两样都有）：
+#     T=$(mktemp -d); export WTOOL_ROOT=$T/ws WTOOL_HOME=$T/home WTOOL_STATE=$T/state
+#     mkdir -p $WTOOL_ROOT/foo/bar/scripts $WTOOL_HOME
+#     printf '#!/bin/sh\necho un >> "$WTOOL_PROJECT_ROOT/uninstall-called.txt"\n' \
+#       > $WTOOL_ROOT/foo/bar/scripts/install.sh
+#     printf '<?xml version="1.0"?>\n<wtool schema="1" id="foo/bar"/>\n' \
+#       > $WTOOL_ROOT/foo/bar/wtool.xml
+#     git -C $WTOOL_ROOT/foo/bar init -q && git -C $WTOOL_ROOT/foo/bar add -A \
+#       && git -C $WTOOL_ROOT/foo/bar -c user.name=t -c user.email=t@t commit -qm init
+#     sh bootstrap/wtool.sh install foo/bar
+#     sh bootstrap/wtool.sh uninstall --id foo/bar
+#     ls $WTOOL_ROOT/foo/bar/uninstall-called.txt    # ← 改前：不存在（目录形式才有）
+#   本场景的判据就是那个标记文件（写在**项目目录**里：state 卸完会被删掉）。
+newhome
+mkdir -p "$WTOOL_ROOT"
+P5=$(mkproj "idrun/proj" "idrun/proj")
+mkdir -p "$P5/__output" "$P5/scripts"
+printf 'payload\n' > "$P5/__output/out.bin"
+printf 'conf\n' > "$P5/idrun.conf"
+cat > "$P5/scripts/install.sh" <<'EOF'
+#!/bin/sh
+# 只要被调用就留证据（参数也记下来）
+case ${1:-} in
+    --uninstall) echo "uninstall $*" >> "$WTOOL_PROJECT_ROOT/uninstall-called.txt"; exit 0 ;;
+esac
+mkdir -p -- "$WTOOL_PREFIX/bin"
+ln -sfn -- "$WTOOL_PROJECT_ROOT/idrun.conf" "$WTOOL_PREFIX/bin/idrun.conf"
+EOF
+cat > "$P5/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="idrun/proj" priority="50">
+  <link home="~/.idrun.conf" wtool="~/.wtool/.idrun.conf" subproject="idrun.conf"/>
+</wtool>
+EOF
+git -C "$P5" add -A && git -C "$P5" -c user.name=t -c user.email=t@t commit -qm init
+
+# ① `--id` 形式
+"$WT" install idrun/proj > "$T/i16.log" 2>&1 || bad "（前置）真装一遍失败" "$(cat "$T/i16.log")"
+_rc=0
+_out=$("$WT" uninstall --id idrun/proj 2>&1) || _rc=$?
+chk "uninstall --id 退出 0" "$_rc" "0"
+if [ -e "$P5/uninstall-called.txt" ]; then
+    ok "★uninstall --id 真跑了 install.sh --uninstall（BL-47 修好）"
+else
+    bad "uninstall --id 又静默跳过项目脚本（标记文件没出现）" "$_out"
+fi
+chk "脚本收到的参数是 --uninstall" "uninstall --uninstall" \
+    "$(cat "$P5/uninstall-called.txt" 2>/dev/null)"
+case $_out in
+    *"项目脚本: install.sh --uninstall"*) ok "日志里说了要跑项目脚本" ;;
+    *) bad "日志里没提项目脚本" "$_out" ;;
+esac
+
+# ② 裸 id 形式（不带 --id；install 认 id，uninstall 也得认，见场景 10）
+rm -f -- "$P5/uninstall-called.txt"
+"$WT" install idrun/proj >/dev/null 2>&1
+_rc=0
+_out=$("$WT" uninstall idrun/proj 2>&1) || _rc=$?
+chk "裸 id uninstall 退出 0" "$_rc" "0"
+[ -e "$P5/uninstall-called.txt" ] && ok "★裸 id 形式也跑了项目脚本" \
+    || bad "裸 id 形式静默跳过项目脚本（标记文件没出现）" "$_out"
+
+# ③ 解析不出来 → **明确报错**、退出码非 0
+#    （改前这里是"uninstall 完成" + 什么都不做 —— 静默跳过就是这条路的病根）
+_rc=0
+_out=$("$WT" uninstall --id no/such-proj 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "id 解析不出来时退出码非 0" || bad "找不到项目却退 0" "$_out"
+case $_out in
+    *"找不到项目"*) ok "报错里说清了找不到项目" ;;
+    *) bad "没有明确报错" "$_out" ;;
+esac
+case $_out in
+    *"wtool uninstall <项目目录>"*) ok "报错里给了目录形式这条退路" ;;
+    *) bad "报错没给退路" "$_out" ;;
+esac
+# `--no-script` 是**明说**不跑脚本，那种情况只要警告、不该报错
+_rc=0
+_out=$("$WT" uninstall --id no/such-proj --no-script 2>&1) || _rc=$?
+chk "解析不出来 + --no-script 只警告（退出 0）" "$_rc" "0"
+case $_out in
+    *"warning"*) ok "解析不出来 + --no-script 打了警告（不是静默）" ;;
+    *) bad "--no-script 那条路一句话都没说" "$_out" ;;
+esac
+
+# ④ 末段 id **不替用户猜**：state 的账是按完整 id 建目录的，
+#    "唯一的末段匹配"会在"表里只剩 x/foo/bar、账上却是 foo/bar"时卸错项目。
+_rc=0
+_out=$("$WT" uninstall --id proj 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "末段 id 不认（要完整 id）" || bad "末段 id 被认了" "$_out"
+case $_out in
+    *"idrun/proj"*) ok "把末段同名的候选列出来了（提示写完整 id）" ;;
+    *) bad "没提示候选项目" "$_out" ;;
 esac
 
 printf '\n----------------------------------------\n'

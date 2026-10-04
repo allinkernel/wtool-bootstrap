@@ -1187,6 +1187,11 @@ def plan_uninstall(args, scratch):
         if meta is None:
             raise PlanError("\n".join(errors))
         project_id = meta["id"] or os.path.basename(project_root)
+    elif args.project_root:
+        # `--id` 那条路：项目根由引擎解析好传进来（BL-47）。写进 meta.tsv 是
+        # 为了让引擎第 3 步（跑 install.sh --uninstall）拿得到目录 ——
+        # 以前这里是空的，那一步就被静默跳过了。
+        project_root = os.path.abspath(args.project_root)
     if not is_safe_rel(project_id):
         raise PlanError("项目 id 非法: %r" % project_id)
 
@@ -3759,6 +3764,8 @@ def build_parser():
     ip.add_argument("--prune", action="store_true")
     up = sub.add_parser("plan-uninstall")
     common(up)
+    # `--id` 那条路：项目根由引擎解析（扫工作区项目表）后传进来（BL-47）
+    up.add_argument("--project-root", default="")
     pp = sub.add_parser("plan-provision")
     common(pp)
     pp.add_argument("--os-id", default="")
