@@ -786,6 +786,88 @@ chk "dry-run 不等锁（只读，不写状态）" "$_rc" "0"
 rm -rf "$WTOOL_STATE/.lock"
 
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+printf '\n== 场景 13：Tab 补全（wtool <TAB> 立刻列命令）==\n'
+#   用户 2026-10-04：wtool 生效后按 Tab 不该去补当前目录的文件，要列可选命令；
+#   bash / zsh 都要。候选由引擎自己算（`wtool _complete`），补全脚本只转发。
+_cmds=$(WTOOL_SUDO=yes "$WT" _complete "" 2>/dev/null | tr '\n' ' ')
+for want in install uninstall bootstrap build check doctor pack-release \
+            publish-release download-release unpack-release \
+            sudo-install sudo-uninstall sudo-bootstrap \
+            unpack-layer push-layer pull-layer; do
+    case " $_cmds " in
+        *" $want "*) ok "补全里有 $want" ;;
+        *) bad "补全里缺 $want" "$_cmds" ;;
+    esac
+done
+case " $_cmds " in
+    *" _layer-save "*) bad "内部命令 _layer-save 不该进补全" ;;
+    *) ok "内部命令不进补全（和 --help 口径一致）" ;;
+esac
+chk "补 s 开头 → sudo-*" "sudo-install sudo-uninstall sudo-bootstrap" \
+    "$(WTOOL_SUDO=yes "$WT" _complete "s" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+# 没有 sudo 的机器：连补全也不提 sudo-*（和看板一个口径）
+case "$(WTOOL_SUDO=never "$WT" _complete "" 2>/dev/null)" in
+    *sudo-install*) bad "没有 sudo 时补全还提 sudo-install" ;;
+    *) ok "没有 sudo 时补全不提 sudo-*" ;;
+esac
+case "$(WTOOL_SUDO=yes "$WT" _complete "-" install 2>/dev/null)" in
+    *--dry-run*) ok "install 的开关补得出来" ;;
+    *) bad "install 的开关补不出来" ;;
+esac
+case "$(WTOOL_SUDO=yes "$WT" _complete "-" pack-release 2>/dev/null)" in
+    *--tag=*) ok "pack-release 的开关也补得出来（行首那条别漏）" ;;
+    *) bad "pack-release 的开关补不出来（多半是列表匹配把换行当分隔符了）" ;;
+esac
+for f in completion/wtool.bash completion/wtool.zsh; do
+    [ -r "$boot/$f" ] && ok "有 $f" || bad "缺 $f"
+done
+grep -q 'completion/wtool.bash' "$boot/env.bash" && ok "env.bash 挂了补全" || bad "env.bash 没挂补全"
+grep -q 'completion/wtool.zsh'  "$boot/env.zsh"  && ok "env.zsh 挂了补全"  || bad "env.zsh 没挂补全"
+#   `; exit 0` 是必须的：env.bash 的最后一条命令万一非 0，`set -e` 会把测试带走
+_bc=$(WTOOL_PROJECT_DIR="$boot" WTOOL_PREFIX="$H/prefix" \
+      bash -c '. "$1" >/dev/null 2>&1; complete -p wtool 2>/dev/null; exit 0' sh "$boot/env.bash" 2>/dev/null)
+case $_bc in
+    *-F*wtool*) ok "bash 里 complete -p wtool 注册成功" ;;
+    *) bad "bash 里没注册上补全" "$_bc" ;;
+esac
+if command -v zsh >/dev/null 2>&1; then
+    _zc=$(WTOOL_PROJECT_DIR="$boot" WTOOL_PREFIX="$H/prefix" ZSH_COMPDUMP="$H/.zcompdump" \
+          zsh -f -c '. "$1" >/dev/null 2>&1; print -r -- "${_comps[wtool]:-}"; exit 0' sh "$boot/env.zsh" 2>/dev/null)
+    chk "zsh 里 wtool 挂到了 _wtool" "$_zc" "_wtool"
+else
+    ok "没有 zsh，跳过 zsh 补全那条"
+fi
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 14：sudo 探测两处实现必须一致（ADR-0035）==\n'
+#   一条规则两处实现：引擎的 wtool_plan.py:sudo_state()（看板列不列那两列）
+#   和 install-env.sh:env_sudo_state()（走不走提权流程）。同样的输入必须同样说法。
+_py_state() {   # <WTOOL_SUDO> → none / yes
+    BOOT="$boot" WTOOL_SUDO=$1 python3 -c '
+import sys, os
+sys.path.insert(0, os.environ["BOOT"] + "/lib")
+import wtool_plan
+print("none" if wtool_plan.sudo_state() == "none" else "yes")'
+}
+_sh_state() {   # <WTOOL_SUDO> → none / yes（install-env.sh 和 wtool.sh 两处都要一致）
+    WTOOL_SUDO=$1 sh -c '. "$1"; env_sudo_state' sh "$boot/scripts/install-env.sh" 2>/dev/null
+}
+for v in never auto yes; do
+    _py=$(_py_state "$v"); _sh=$(_sh_state "$v")
+    _sh_bool=yes; [ "$_sh" = none ] && _sh_bool=none
+    chk "WTOOL_SUDO=$v：python 看板和 install.sh 说法一致" "$_py" "$_sh_bool"
+done
+_dash_nosudo=$(WTOOL_SUDO=never python3 "$boot/lib/wtool_plan.py" table --root "$WTOOL_ROOT" --state "$H/s14" --color=never 2>/dev/null)
+case $_dash_nosudo in
+    *"│ sudo "*) bad "没有 sudo 时看板还列着 sudo 列" ;;
+    *) ok "没有 sudo 时不列 sudo 列" ;;
+esac
+case $_dash_nosudo in
+    *"没有 sudo"*) ok "说清了为什么少两列" ;;
+    *) bad "没说明少列的原因" ;;
+esac
+
 printf '\n----------------------------------------\n'
 printf 'contract_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

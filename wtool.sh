@@ -47,6 +47,9 @@
 #   wtool _layer-load    <项目> [--target=]
 #                       <项目>/__layer/<target>/ → docker（接着构建 / 恢复容器用）
 #
+#   补全（Tab）：bash / zsh 各有一份，由项目的 env 挂上 —— 见
+#     completion/wtool.bash、completion/wtool.zsh；候选由 `wtool _complete` 给
+#
 #   ── 一次装好 ───────────────────────────────────────────────
 #   wtool bootstrap [--dry-run] [--force]   所有项目 install（**不做系统层**）
 #
@@ -2442,6 +2445,127 @@ cmd_status() {
     return 0
 }
 
+# ==========================================================================
+# Tab 补全（用户 2026-10-04：`wtool <TAB>` 要立刻列出可选命令，
+# 而不是去补当前目录里的文件名）
+#
+# 命令表**只写在这里一份**：`wtool _complete` 读它，bash/zsh 两个补全脚本
+# 通过 `wtool _complete` 拿候选 —— 别在 shell 脚本里再抄一份命令清单。
+# tests/contract_test.sh 会拿下面 case 分发里的分支名和 WTOOL_SUBCOMMANDS
+# 对一遍：少一条/多一条都会红（表过期比没有补全更糟）。
+# 下划线开头的是内部命令，**不进补全**（和 --help 的口径一致）。
+# ==========================================================================
+WTOOL_SUBCOMMANDS="build install uninstall bootstrap
+check repair doctor
+pack-release unpack-release publish-release download-release
+sudo-install sudo-uninstall sudo-bootstrap
+unpack-layer push-layer pull-layer"
+
+# 第一个位置参数是"项目"的命令（补全时列项目 id，再加 all）
+WTOOL_PROJECT_CMDS="install uninstall build pack-release publish-release
+download-release unpack-release sudo-install sudo-uninstall
+unpack-layer push-layer pull-layer"
+
+# 补全和看板用同一套 sudo 规则（ADR-0035）。install-env.sh 里有同名函数，
+# 但引擎这里不能 source 它（那是 install.sh 的库）—— 所以实现一遍，
+# 规则本身只有四行，两处都写在一起、由 contract_test 场景 14 对着测。
+env_sudo_state() {
+    if [ "$(id -u 2>/dev/null || echo 0)" = 0 ]; then printf 'root'; return 0; fi
+    case ${WTOOL_SUDO:-auto} in
+        never|no|off)        printf 'none';    return 0 ;;
+        yes|always|force|on) printf 'nopass';  return 0 ;;
+    esac
+    command -v sudo >/dev/null 2>&1 || { printf 'none'; return 0; }
+    if sudo -n true 2>/dev/null; then printf 'nopass'; return 0; fi
+    if sudo -n -l >/dev/null 2>&1; then printf 'askpass'; return 0; fi
+    printf 'none'
+}
+
+wt_list_has() {   # <值> <空格/换行分隔的列表>
+    # ⚠️ 别用 `case " $list " in *" $x "*)`：列表是多行写的，换行处没有空格，
+    #    排在行首的命令永远匹配不上（实测 pack-release / doctor 补不出来）。
+    for _lh in $2; do
+        [ "$_lh" = "$1" ] && return 0
+    done
+    return 1
+}
+
+wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列真的存在的**）
+    # ⚠️ 这张表要和各自的参数解析对得上：补出一个不存在的开关，比不补更坏。
+    #    tests/contract_test.sh 会逐个 `wtool <命令> <开关>` 试一遍（--dry-run 那种
+    #    无害的），确保表里的开关都能被认出来。
+    case $1 in
+        install)            printf '%s\n' --dry-run --force --prune --no-script --head= --home= --state= ;;
+        uninstall)          printf '%s\n' --dry-run --force --no-script --id= --home= --state= ;;
+        bootstrap)          printf '%s\n' --dry-run --force --prune ;;
+        build)              printf '%s\n' --dry-run --force --jobs= --target= --root= ;;
+        pack-release)       printf '%s\n' --dry-run --tag= --volume-size= --repo= ;;
+        publish-release)    printf '%s\n' --dry-run --force --tag= --allow-foreign ;;
+        download-release)   printf '%s\n' --dry-run --root= ;;
+        unpack-release)     printf '%s\n' --dry-run --from= ;;
+        sudo-install)       printf '%s\n' --dry-run --force ;;
+        sudo-uninstall)     printf '%s\n' --dry-run --force --id= ;;
+        sudo-bootstrap)     printf '%s\n' --dry-run --force ;;
+        unpack-layer)       printf '%s\n' --dry-run --target= --layer= --output= ;;
+        push-layer)         printf '%s\n' --dry-run --registry= --target= --layer= --image= ;;
+        pull-layer)         printf '%s\n' --dry-run --registry= --target= --layer= --username= ;;
+        check)              printf '%s\n' --json --home= --state= --root= ;;
+        repair)             printf '%s\n' --dry-run --force --head= --home= --state= ;;
+        doctor)             printf '%s\n' --quiet --json --brief --version ;;
+        init)               printf '%s\n' --id= --priority= --all --with-install --with-build --with-download --with-publish ;;
+    esac
+}
+
+cmd_complete() {   # <正在补的词> [已经敲过的词...]
+    _cc_cur=${1:-}
+    [ $# -gt 0 ] && shift
+    # 补第一个词：列子命令
+    if [ $# -eq 0 ]; then
+        # 和看板一个口径：这台机器上没有 sudo，就不提 sudo-* 那几个命令
+        # （它们存在，但敲了只会失败；用户 2026-10-04："没权限就不需要"）
+        _cc_state=$(env_sudo_state 2>/dev/null || printf 'auto')
+        for _cc_c in $WTOOL_SUBCOMMANDS; do
+            case $_cc_c in "$_cc_cur"*) ;; *) continue ;; esac
+            if [ "$_cc_state" = none ]; then
+                case $_cc_c in sudo-*) continue ;; esac
+            fi
+            printf '%s\n' "$_cc_c"
+        done
+        return 0
+    fi
+    _cc_cmd=$1
+    wt_list_has "$_cc_cmd" "$WTOOL_SUBCOMMANDS" \
+        || return 0   # 不认识这个命令：什么都不补（让 shell 退回补文件名）
+    if [ "${_cc_state:-}" = none ]; then
+        case $_cc_cmd in sudo-*) return 0 ;; esac
+    fi
+    # 正在敲开关 → 只补开关
+    case $_cc_cur in
+        -*) _cc_flags=1 ;;
+        *)  _cc_flags=0 ;;
+    esac
+    if [ "$_cc_flags" = 0 ]; then
+        if wt_list_has "$_cc_cmd" "$WTOOL_PROJECT_CMDS"; then
+            # 已经给过项目了（第三个词往后）就不重复列项目
+            if [ $# -le 1 ]; then
+                    python3 "$PY" publish-list --root "$WTOOL_ROOT" 2>/dev/null | cut -f2 \
+                        | while IFS= read -r _cc_id; do
+                              case $_cc_id in "$_cc_cur"*) printf '%s\n' "$_cc_id" ;; esac
+                          done
+                    case $_cc_cmd in
+                        install|uninstall|sudo-install|sudo-uninstall) printf 'all\n' ;;
+                    esac
+                    printf '%s\n' --dry-run --force
+                    return 0
+            fi
+        fi
+    fi
+    wt_complete_flags "$_cc_cmd" | while IFS= read -r _cc_f; do
+        case $_cc_f in "$_cc_cur"*) printf '%s\n' "$_cc_f" ;; esac
+    done
+    return 0
+}
+
 cmd_doctor() {
     # --quiet/--json：只要环境变量那一批 export 行，别的什么都不印。
     # 这条路径要能直接 eval：
@@ -3853,6 +3977,7 @@ case $_cmd in
                wt_refresh_downloads ;;
     refresh-downloads) wt_refresh_downloads ;;
     init)      cmd_init "$@" ;;
+    _complete) cmd_complete "$@" ;;
     scaffold)  wt_die "scaffold 已删除（不是改名，是删掉）。新建项目用: wtool init <目录>" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;

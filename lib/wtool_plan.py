@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -1765,6 +1766,42 @@ def _layer_layouts(path):
     return n
 
 
+def sudo_state():
+    """这台机器上"能不能提权"——**每次渲染都现探**（用户 2026-10-04 要求：
+    权限可能刚加上，别缓存）。返回 root / nopass / askpass / none。
+
+    规则和 `install-env.sh` 的 `env_sudo_state()` **必须一致**（两处实现、
+    一个测试守着，见 ADR-0035）：
+      root     本来就是 root
+      nopass   `sudo -n true` 成立（免密、或凭证还在缓存里）
+      askpass  有 sudo，但要密码 —— 命令能跑（会问密码），所以表格里照样列
+      none     没有 sudo（或者 WTOOL_SUDO=never）—— 表格里就不列 sudo 那两列
+    """
+    if os.geteuid() == 0:
+        return "root"
+    _want = (os.environ.get("WTOOL_SUDO") or "auto").lower()
+    if _want in ("never", "no", "off"):
+        return "none"
+    # 强制"就当有 sudo"：给测试和特殊环境用（`WTOOL_SUDO=yes`）
+    if _want in ("yes", "always", "force", "on"):
+        return "nopass"
+    if not shutil.which("sudo"):
+        return "none"
+    def _run(args):
+        try:
+            return subprocess.run(args, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=5).returncode
+        except (OSError, subprocess.SubprocessError):
+            return 1
+    if _run(["sudo", "-n", "true"]) == 0:
+        return "nopass"
+    # `sudo -n -l` 不弹提示，能列出规则就说明"这个用户在 sudoers 里"
+    # （免密用户上面已经返回了；这一条抓的是"要密码但有权限"的人）
+    if _run(["sudo", "-n", "-l"]) == 0:
+        return "askpass"
+    return "none"
+
+
 def command_states(path, pub, st, state_dir):
     """看板第 1 段：**每个项目能跑哪些引擎命令、现在到哪一步**。
 
@@ -1820,10 +1857,13 @@ def command_states(path, pub, st, state_dir):
     else:
         out["uninstall"] = LBL_NOTINST
 
-    # sudo-install：清单里得有系统层声明（sysfile / source / task）
+    # sudo-install：清单里得有系统层声明（sysfile / source / task），
+    # 而且这台机器上得**真的能提权**（没有 sudo 就别装作能跑）
     _sudo_done = bool(st.get("provisioned") or os.path.isfile(
         os.path.join(state_dir, st["id"], "apt.tsv")))
     if not (kinds & {"sysfile", "source", "task"}):
+        out["sudo"] = LBL_NONE
+    elif st.get("no_sudo"):
         out["sudo"] = LBL_NONE
     elif _sudo_done:
         out["sudo"] = LBL_DONE
@@ -1831,7 +1871,7 @@ def command_states(path, pub, st, state_dir):
         out["sudo"] = LBL_CAN
 
     # sudo-uninstall：和 sudo-install 成对
-    if out["sudo"] == LBL_NONE:
+    if out["sudo"] == LBL_NONE or st.get("no_sudo"):
         out["sudo-uninstall"] = LBL_NONE
     elif _sudo_done:
         out["sudo-uninstall"] = LBL_CAN
@@ -1889,14 +1929,23 @@ def _hdr(title):
     return ["", bar, " " + title, bar]
 
 
+def _dash_cols(projects):
+    """这一屏要摆哪几列：没有 sudo 的机器上，`sudo` / `sudo-un` 两列直接不列
+    （省宽度，也不误导 —— 用户 2026-10-04 要求）。"""
+    if projects and all(p.get("no_sudo") for p in projects):
+        return [(k, h) for k, h in DASH_COLS if k not in ("sudo", "sudo-uninstall")]
+    return list(DASH_COLS)
+
+
 def _section_command_table(projects, color):
+    cols = _dash_cols(projects)
     rows = []
     for p in projects:
         cells = [p["id"], str(p["prio"])]
-        for key, _h in DASH_COLS:
+        for key, _h in cols:
             cells.append(p["cmds"][key])
         rows.append(cells)
-    headers = ["项目", "prio"] + [h for _k, h in DASH_COLS]
+    headers = ["项目", "prio"] + [h for _k, h in cols]
     plain = [[_strip_ansi(c) for c in r] for r in rows]
     colored = [r[:2] + [_state_cell(v, color) for v in r[2:]] for r in rows]
     widths = [_width(h) for h in headers]
@@ -1906,7 +1955,7 @@ def _section_command_table(projects, color):
     body = []
     for pr, cl in zip(plain, colored):
         body.append([cl[i] + " " * (widths[i] - _width(pr[i])) for i in range(len(cl))])
-    return _box(headers, body, aligns=["l", "r"] + ["c"] * len(DASH_COLS))
+    return _box(headers, body, aligns=["l", "r"] + ["c"] * len(cols))
 
 
 def _section_install(projects, verbose):
@@ -2049,12 +2098,18 @@ def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
     if color is None:
         color = sys.stdout.isatty()
 
+    # sudo 现探一次（每次跑 wtool 都探，用户可能刚被加进 sudoers）
+    _sudo = sudo_state()
+    no_sudo = _sudo == "none"
+
     projects = []
     for prio, pid, path, pub in scan_projects(root, manifests_only=True):
         st = project_state(path, state_dir, root=root)
         st["prio"] = prio
         st["path"] = path
         st["pub"] = pub
+        st["no_sudo"] = no_sudo
+        st["sudo_state"] = _sudo
         st["cmds"] = command_states(path, pub, st, state_dir)
         st["cells"] = pipeline_states(path, pub, st)
 
@@ -2084,11 +2139,20 @@ def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
     out += _section_command_table(projects, color)
     out.append("")
     # 列名就是引擎命令，**一条都不省**（用户 2026-10-04 要求：
-    # "这里不要省略 pull-layer 和 push-layer"）。
+    # "这里不要省略 pull-layer 和 push-layer"）。没有 sudo 的机器少两列 ——
+    # 那两列本来也跑不了（用户要求：没权限就别列）。
     out.append("  列名 = 引擎命令（逐项目的那些）：")
+    if no_sudo:
+        out.append("      ⚠️ 这台机器上没有 sudo → 少列了 sudo / sudo-un 两列。")
+        out.append("         拿到 sudo 权限之后重跑 wtool 就会自动出现（每次都会现探）。")
     out.append("      build            wtool build               install     wtool install")
-    out.append("      uninstall        wtool uninstall           sudo        wtool sudo-install")
-    out.append("      sudo-un          wtool sudo-uninstall      pack        wtool pack-release")
+    if no_sudo:
+        out.append("      uninstall        wtool uninstall")
+    else:
+        out.append("      uninstall        wtool uninstall           sudo        wtool sudo-install")
+        out.append("      sudo-un          wtool sudo-uninstall      pack        wtool pack-release")
+    if no_sudo:
+        out.append("      pack             wtool pack-release")
     out.append("      publish          wtool publish-release     download    wtool download-release")
     out.append("      layer            wtool unpack-layer / wtool push-layer / wtool pull-layer")
     out.append("                       （层是项目的资产：unpack 出安装产物、push/pull 走镜像仓库）")

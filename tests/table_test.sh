@@ -149,7 +149,9 @@ cat > "$WS/outer/inner/wtool.xml" <<'EOF'
 </wtool>
 EOF
 
-tbl() { env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S" "$@"; }
+# 表格有几列**取决于这台机器有没有 sudo**（ADR-0035）：测试默认按"有 sudo"跑
+# （大多数断言关心的是能力表本身），要测"没有 sudo"就 WTOOL_SUDO=never tbl
+tbl() { WTOOL_SUDO=${WTOOL_SUDO:-yes} env -u WTOOL_ROOT python3 "$PY" table --root "$WS" --state "$S" "$@"; }
 # 看板有好几张表，取列的时候只能看**第 1 张**（能力表），
 # 否则后面几段里同名的项目行会把 awk 匹配走。
 tbl1() { tbl "$@" | awk 'BEGIN{n=0} /^┌/{n++} n==1{print}'; }
@@ -331,6 +333,25 @@ done
 # 「未发布」「未安装」是两个新格子（本机 vs 别人那台机器 / 装了没）
 tbl --color=never | grep -q '未发布' && ok "有「未发布」这个格子" || bad "缺「未发布」格子"
 tbl --color=never | grep -q '未安装' && ok "有「未安装」这个格子" || bad "缺「未安装」格子"
+
+echo "== 9a2. 没有 sudo 的机器：那两列不出现（用户 2026-10-04）=="
+# ⚠️ 必须在**子 shell 里**导出：`VAR=x 函数` 在 dash 下会把赋值留在当前 shell，
+#    紧接着的对照组就会跟着"没有 sudo"，白测一条
+_ns=$( export WTOOL_SUDO=never; tbl --color=never )
+case $_ns in
+    *"│ sudo "*) bad "没有 sudo 时还列着 sudo 列" ;;
+    *) ok "没有 sudo 时不列 sudo / sudo-un 两列" ;;
+esac
+case $_ns in
+    *"没有 sudo"*) ok "图例说清了为什么少两列" ;;
+    *) bad "图例没说明少列原因" ;;
+esac
+# 有 sudo 时那两列必须在（对照组）。表头是居中的，别去匹配"│ sudo "这种空格形状
+_hdr2=$(tbl1 --color=never | sed -n 2p)   # tbl1 = 第 1 张表的表头那两行
+case $_hdr2 in
+    *sudo-un*) ok "有 sudo 时 sudo / sudo-un 两列都在" ;;
+    *) bad "有 sudo 时少了列" "$_hdr2" ;;
+esac
 
 echo "== 9b. 看板的后四段（install / sudo-install / bootstrap / sudo-bootstrap）=="
 DASH=$(tbl --color=never)

@@ -34,6 +34,98 @@ env_priv() {
     fi
 }
 
+# 当前这台机器上"能不能提权"的四种情况（用户 2026-10-04 要求：
+# **没有免密、甚至没有 sudo 的人也要能用 wtool**）：
+#
+#   root      本来就是 root                        → 直接用
+#   nopass    sudo 免密（`sudo -n true` 成立）      → 直接用，不打扰
+#   askpass   有 sudo，但要密码                    → **明确问一次**：说清要跑什么命令，
+#                                                    让用户决定给不给密码
+#   nosudo    根本没有 sudo（公司机器常见）        → **不做要 root 的事**，
+#                                                    只装 wtool 自己（那部分不需要 root）
+#
+# 分类结果放 $ENV_PRIV / $ENV_PRIV_MODE。`sudo -n` 这个前缀很重要：
+# 它保证装包过程中**绝不会**突然弹一个密码提示把脚本挂住。
+# **这条规则和引擎那边的 `wtool_plan.py: sudo_state()` 必须一致**
+# （两处实现、一个测试守着 —— 见 ADR-0035）：
+#   root / nopass / askpass / none
+env_sudo_state() {
+    if [ "$(id -u 2>/dev/null || echo 0)" = 0 ]; then printf 'root'; return 0; fi
+    case ${WTOOL_SUDO:-auto} in
+        never|no|off) printf 'none'; return 0 ;;
+        yes|always|force|on) printf 'nopass'; return 0 ;;
+    esac
+    command -v sudo >/dev/null 2>&1 || { printf 'none'; return 0; }
+    if sudo -n true 2>/dev/null; then printf 'nopass'; return 0; fi
+    # `sudo -n -l` 不弹提示：能列出规则 = 这个用户在 sudoers 里（只是要密码）
+    if sudo -n -l >/dev/null 2>&1; then printf 'askpass'; return 0; fi
+    printf 'none'
+}
+
+env_priv_refresh() {
+    case $(env_sudo_state) in
+        root)    ENV_PRIV="";          ENV_PRIV_MODE=root ;;
+        nopass)  ENV_PRIV="sudo -n ";  ENV_PRIV_MODE=nopass ;;
+        askpass) ENV_PRIV="";          ENV_PRIV_MODE=askpass ;;
+        *)       ENV_PRIV="";          ENV_PRIV_MODE=nosudo ;;
+    esac
+    export ENV_PRIV ENV_PRIV_MODE
+}
+
+# 要 root 的时候调一次：能提权返回 0，提不了返回 1（调用方自己决定怎么退）
+env_priv_ask() {   # <要做的事，用来告诉用户>
+    _pa_why=${1:-要装几个系统包}
+    # 没分类过就先分类（调用方忘了 env_priv_refresh 时也不会静默什么都不做）
+    [ -n "${ENV_PRIV_MODE:-}" ] || env_priv_refresh
+    case ${ENV_PRIV_MODE:-} in
+        root|nopass) return 0 ;;
+        nosudo)
+            env_warn "  没有 sudo，跳过要 root 的部分（$_pa_why）"
+            return 1 ;;
+        askpass)
+            env_say "  接下来要 root 权限：$_pa_why"
+            env_say "  会执行：sudo apt-get update && sudo apt-get install ..."
+            if [ ! -t 0 ]; then
+                env_warn "  这里没有终端可以问密码 —— 跳过要 root 的部分"
+                ENV_PRIV_MODE=nosudo
+                export ENV_PRIV_MODE
+                return 1
+            fi
+            printf '  请输入你的密码（只交给 sudo；直接回车 = 跳过，wtool 仍会装不需要 root 的部分）：' >&2
+            stty -echo 2>/dev/null || true
+            IFS= read -r _pa_pw || _pa_pw=""
+            stty echo 2>/dev/null || true
+            printf '\n' >&2
+            if [ -z "$_pa_pw" ]; then
+                env_warn "  没输密码 —— 跳过要 root 的部分"
+                ENV_PRIV_MODE=nosudo
+                export ENV_PRIV_MODE
+                return 1
+            fi
+            if printf '%s\n' "$_pa_pw" | sudo -S -p '' -v 2>/dev/null; then
+                _pa_pw=""   # 用完就丢，别留在变量里
+                ENV_PRIV="sudo -n "; ENV_PRIV_MODE=nopass
+                ENV_PRIV_CACHED=1
+                export ENV_PRIV ENV_PRIV_MODE ENV_PRIV_CACHED
+                env_say "  密码对，sudo 凭证已缓存（装完会 sudo -k 清掉）"
+                return 0
+            fi
+            _pa_pw=""
+            env_warn "  密码不对（或者这个用户其实没有 sudo 权限）—— 跳过要 root 的部分"
+            ENV_PRIV_MODE=nosudo
+            export ENV_PRIV_MODE
+            return 1 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 用完把缓存的 sudo 凭证清掉（用了密码那条路才需要）
+env_priv_done() {
+    [ "${ENV_PRIV_MODE:-}" = nopass ] || return 0
+    [ "${ENV_PRIV_CACHED:-}" = 1 ] || return 0
+    sudo -k 2>/dev/null || true
+}
+
 # ── 提权：普通用户跑 ./install.sh 时，apt 和 /etc/apt 的写都要 sudo ──────
 #
 # 2026-10-04 发现：这套脚本原来**只在 root 下能用** —— `env_prepare` 里算出了
@@ -44,10 +136,6 @@ env_priv() {
 # 规矩：**apt / /etc/apt 一律走下面这几个助手**，它们按 $ENV_PRIV 自动加 sudo：
 #   ENV_PRIV=""       （root，或者根本没有 sudo 可用）
 #   ENV_PRIV="sudo "  （普通用户 + 有 sudo）
-env_priv_refresh() {   # 用之前顺手刷新（可能刚装上 sudo）
-    ENV_PRIV=$(env_priv)
-    export ENV_PRIV
-}
 env_priv_mkdir() { ${ENV_PRIV:-}mkdir -p "$@" 2>/dev/null || true; }
 env_priv_rm()    { ${ENV_PRIV:-}rm -f -- "$@" 2>/dev/null || true; }
 env_priv_cp()    { ${ENV_PRIV:-}cp -a -- "$@" 2>/dev/null || true; }
@@ -481,7 +569,7 @@ env_install_first() {
     for _cand in "$@"; do
         # shellcheck disable=SC2086
         if DEBIAN_FRONTEND=noninteractive env_apt_try 3 \
-               ${ENV_PRIV:-}apt-get install -y -qq --no-install-recommends $_cand >/dev/null 2>&1; then
+               ${ENV_PRIV:-}apt-get install -y -q --no-install-recommends $_cand; then
             env_say "  $_desc ✓（包名 $_cand）"
             return 0
         fi
@@ -518,7 +606,23 @@ env_apt_try() {   # <次数> <命令...>
     _at_out=$(mktemp 2>/dev/null || echo /tmp/wtool-apt.$$)
     while :; do
         _at_i=$((_at_i + 1))
-        if "$@" >"$_at_out" 2>&1; then
+        # 后台跑 + 每 5 秒报一次"还在装"，顺手把 apt 最后一行贴出来。
+        # 为什么要这个心跳：apt 的输出被重定向进文件（要拿它判断"是不是在等锁"），
+        # 于是下载几十 MB 的那几分钟里**屏幕上什么都没有** —— 用户看到的现象
+        # 就是"卡住"（实测：11 MB/s 下着，人以为死了，把容器 Ctrl-C 了）。
+        "$@" >"$_at_out" 2>&1 &
+        _at_pid=$!
+        _at_ticks=0
+        while kill -0 "$_at_pid" 2>/dev/null; do
+            sleep 5
+            kill -0 "$_at_pid" 2>/dev/null || break
+            _at_ticks=$((_at_ticks + 5))
+            _at_last=$(tail -1 "$_at_out" 2>/dev/null | tr -d '\r' | cut -c1-70)
+            env_say "    还在装…（$_at_ticks 秒）${_at_last:+  · $_at_last}"
+        done
+        _at_rc=0
+        wait "$_at_pid" || _at_rc=$?
+        if [ "$_at_rc" = 0 ]; then
             rm -f "$_at_out"
             return 0
         fi
@@ -560,53 +664,76 @@ EOF
 
 env_prepare() {
     env_say "系统：$ENV_NAME"
-    env_apt_fastfail
-    env_need_root || true
-    _p=$(env_priv)
-
     command -v apt-get >/dev/null 2>&1 \
         || { env_warn "这个脚本只处理 apt 系发行版；请手动装 python3 / git / curl / ca-certificates"; return 1; }
 
-    env_apt_ready
-
-    # 基础四件套：缺任何一个 wtool 都跑不起来或跑不全
-    env_say "装 wtool 需要的运行环境"
-    # 装两遍：网络抖一下整批失败是常事（代理后面尤其），
-    # 而少一个 git 后面就全废。第二遍只补缺的，代价很小。
-    _try=0
-    while [ "$_try" -lt 2 ]; do
-        _try=$((_try + 1))
-        # shellcheck disable=SC2086
-        if DEBIAN_FRONTEND=noninteractive env_apt_try 3 \
-               ${_p}apt-get install -y -qq --no-install-recommends \
-               ca-certificates git python3 curl ${ENV_EXTRA_PKGS:-} >/dev/null 2>&1; then
-            env_say "  ca-certificates git python3 curl ✓"
-            break
-        fi
-        [ "$_try" -ge 2 ] && env_warn "  基础包装了两遍还是没全装上，看下面缺什么"
-        sleep 3
+    # ── 先判断这台机器上"要不要 root、能不能拿到 root" ──────────────────
+    # 用户 2026-10-04 的要求：**没有免密、甚至没有 sudo 的人也要能用 wtool**。
+    # 公司机器上通常就是这种：python3 / git 早就有了，装 wtool 自己
+    # （自举引擎 + 写 ~/.wtool + 建符号链接）**一个 root 都不需要**。
+    env_priv_refresh
+    _miss=""
+    for _c in python3 git curl; do
+        command -v "$_c" >/dev/null 2>&1 || _miss="$_miss $_c"
     done
 
-    # ansible 是可选的：只有 os/ubuntu 的 provision 用它。
-    # 装不上不影响 wtool 本体，所以失败只警告。
-    env_install_first "ansible（os/ubuntu 装系统包用）" $ENV_ANSIBLE || true
+    if [ -z "$_miss" ]; then
+        env_say "  运行环境已经在（python3 / git / curl 都有）—— 不需要 root"
+        ENV_SKIP_APT=1
+    else
+        env_say "  缺这些命令：$_miss"
+        if env_priv_ask "装这几个包：$_miss（另外还有 ca-certificates 和 ansible）"; then
+            env_apt_fastfail
+            env_apt_ready
+            env_say "装 wtool 需要的运行环境"
+            _try=0
+            while [ "$_try" -lt 2 ]; do
+                _try=$((_try + 1))
+                # shellcheck disable=SC2086
+                if DEBIAN_FRONTEND=noninteractive env_apt_try 3 \
+                       ${ENV_PRIV:-}apt-get install -y -q --no-install-recommends \
+                       ca-certificates git python3 curl ${ENV_EXTRA_PKGS:-}; then
+                    env_say "  ca-certificates git python3 curl ✓"
+                    break
+                fi
+                [ "$_try" -ge 2 ] && env_warn "  基础包装了两遍还是没全装上，看下面缺什么"
+                sleep 3
+            done
+            # ansible 是可选的：只有 os/ubuntu 的 provision 用它。
+            # 装不上不影响 wtool 本体，所以失败只警告。
+            env_say "  顺手装 ansible（os/ubuntu 的系统层要用；几十 MB，不要它也可以先 Ctrl-C）"
+            env_install_first "ansible（os/ubuntu 装系统包用）" $ENV_ANSIBLE || true
+        else
+            # 拿不到 root：把该说的话说全，然后**只做不需要 root 的部分**
+            env_warn "  跳过要 root 的那部分。你可以让管理员（或用自己别的路子）装："
+            env_warn "    apt-get update && apt-get install -y$_miss ca-certificates"
+            env_warn "  wtool 自己（引擎 + ~/.wtool + 软链）**不需要 root**，下面照装。"
+            env_warn "  将来要跑系统层（wtool sudo-bootstrap）时再要 root 也不迟。"
+        fi
+    fi
 
     # 装完复查，缺什么明说 —— 不要让用户在后面某一步才撞上
-    _miss=""
-    for c in python3 git; do command -v "$c" >/dev/null 2>&1 || _miss="$_miss $c"; done
-    if [ -n "$_miss" ]; then
-        env_warn "还缺:$_miss —— 请手动装：${_p}apt-get install -y$_miss"
+    _miss2=""
+    for c in python3 git; do command -v "$c" >/dev/null 2>&1 || _miss2="$_miss2 $c"; done
+    if [ -n "$_miss2" ]; then
+        env_warn "还缺:$_miss2 —— wtool 跑不起来（规划器要 python3，读仓库要 git）"
+        env_warn "  请先装上它们（管理员 / 自己装 / 换个有这些包的机器），再跑一次 ./install.sh"
         return 1
     fi
+    if ! command -v curl >/dev/null 2>&1; then
+        env_warn "  没有 curl —— wtool 本体能用，但 download-release / publish-release 会失败"
+    fi
+
     # 最后一件：让 git 接受这个仓库。
     #
-    # 容器里以 root 访问宿主目录时，git 会以 "dubious ownership" 拒绝工作。
-    # 这是**环境**问题不是项目问题，所以在这里解决掉 ——
-    # 否则用户会在下一步撞上一句看起来和"装 wtool"毫不相干的 git 报错，
-    # 然后去怀疑网络、怀疑仓库坏了。
+    # 容器里以 root 访问宿主目录时，git 会以 "dubious ownership" 拒绝工作；
+    # 普通用户 uid 和宿主不一致时同样。这是**环境**问题不是项目问题，
+    # 所以在这里解决掉 —— 否则用户会在下一步撞上一句看起来和"装 wtool"
+    # 毫不相干的 git 报错，然后去怀疑网络、怀疑仓库坏了。
     # **必须放在装 git 之后**：git 还没装上时这条命令根本不存在。
     env_git_ownership
 
+    env_priv_done   # 用了密码那条路的话，把缓存的 sudo 凭证清掉
     env_say "运行环境就绪"
 }
 

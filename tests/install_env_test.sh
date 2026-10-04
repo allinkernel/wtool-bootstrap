@@ -74,11 +74,48 @@ printf 'apt-get %s\n' "$*" >> "${ENV_APT_LOG:-/dev/null}"
 exit 0
 EOF
 chmod +x "$T/bin/apt-get"
-# 假 sudo：**原样执行**后面的命令（测试是在普通用户下跑的，install-env.sh 现在
-# 会给 apt 加上提权前缀 —— 真 sudo 会要密码，桩就把它吃掉）
+# 假 sudo：能模拟四种权限状态（用户 2026-10-04 要求 install.sh 区分它们）
+#   FAKE_SUDO=nopass   `sudo -n true` 成功；`sudo -n <cmd>` 原样执行
+#   FAKE_SUDO=askpass  `sudo -n true` 失败；`sudo -S -v` 要 stdin 给对的密码
+#   （PATH 里没有 sudo = nosudo）；FAKE_SUDO_PW 是"正确密码"（默认 root）
 cat > "$T/bin/sudo" <<'EOF'
 #!/bin/sh
-exec "$@"
+mode=${FAKE_SUDO:-nopass}
+pw_ok=${FAKE_SUDO_PW:-root}
+nflag=0; vflag=0; lflag=0; args=""; seen_cmd=0
+# ⚠️ 只有**命令之前**的才算 sudo 自己的开关：`sudo -n mkdir -p <目录>`
+#    里的 `-p` 是 mkdir 的，第一版当成 sudo 的 -p 吃掉了后面的目录，
+#    于是 mkdir 没参数、静默失败（测试里表现为 tee: No such file or directory）
+while [ $# -gt 0 ]; do
+    if [ "$seen_cmd" = 1 ]; then args="$args $1"; shift; continue; fi
+    case $1 in
+        -n) nflag=1 ;;
+        -S) ;;
+        -v) vflag=1 ;;
+        -l) lflag=1 ;;
+        -k) exit 0 ;;
+        -p) shift ;;
+        --) seen_cmd=1 ;;
+        -*) ;;
+        *) seen_cmd=1; args="$args $1" ;;
+    esac
+    shift
+done
+if [ "$lflag" = 1 ]; then
+    # `sudo -n -l`：能列规则 = 在 sudoers 里（askpass = 要密码但有权限）
+    [ "$mode" = askpass ] && exit 0
+    exit 1
+fi
+if [ "$vflag" = 1 ]; then
+    IFS= read -r _pw || _pw=""
+    [ "$_pw" = "$pw_ok" ] && exit 0
+    exit 1
+fi
+if [ "$nflag" = 1 ] && [ "$mode" != nopass ]; then
+    exit 1
+fi
+[ -z "$(printf '%s' "$args" | tr -d ' ')" ] && exit 0
+exec $args
 EOF
 chmod +x "$T/bin/sudo"
 
@@ -173,6 +210,54 @@ APT1B="$T/apt1b"; mk_aptdir "$APT1B"
 _out=$(run_env "$APT1B" WTOOL_STATE="$T/state" WTOOL_MIRROR=official env_apt_ready 2>&1)
 chk "选官方源时记 official（系统层就知道别换）" \
     "$(cut -f1 "$T/state/mirror.txt" 2>/dev/null)" "official"
+
+echo "== 2d. 提权：免密 / 要密码 / 没 sudo，三条路都要走通 =="
+#   用户 2026-10-04：公司机器通常不能 sudo，但用户一样要用 wtool 装 tmux / zsh。
+#   所以 install.sh 必须分清"要不要 root、能不能拿到 root"，并且**绝不挂住**。
+mkdir -p "$T/home" "$T/state-priv"
+_priv() {   # <FAKE_SUDO|-> <在 . install-env.sh 之后跑的 sh 片段>
+    _pm=$1; _snip=$2
+    if [ "$_pm" = "-" ]; then
+        PATH=$(printf '%s' "$T/bin:$PATH" | sed "s|$T/bin:||") \
+        HOME="$T/home" WTOOL_STATE="$T/state-priv" \
+            sh -c ". \"\$1\"; $_snip" sh "$ENV_SH" 2>&1
+    else
+        PATH="$T/bin:$PATH" FAKE_SUDO="$_pm" HOME="$T/home" WTOOL_STATE="$T/state-priv" \
+            sh -c ". \"\$1\"; $_snip" sh "$ENV_SH" 2>&1
+    fi
+}
+chk "sudo 免密 → nopass，前缀 sudo -n" \
+    "$(_priv nopass 'env_priv_refresh; printf "%s|%s" "$ENV_PRIV_MODE" "$ENV_PRIV"')" \
+    "nopass|sudo -n "
+chk "有 sudo 但要密码 → askpass" \
+    "$(_priv askpass 'env_priv_refresh; printf "%s" "$ENV_PRIV_MODE"')" "askpass"
+#   宿主上 /usr/bin/sudo 是存在的（而且会要密码 → 那就是 askpass）。
+#   "没有 sudo 的机器"用 WTOOL_SUDO=never 表达（这也是给用户的开关）
+chk "WTOOL_SUDO=never → nosudo（当没有 sudo 处理）" \
+    "$(WTOOL_SUDO=never _priv nopass 'env_priv_refresh; printf "%s" "$ENV_PRIV_MODE"')" "nosudo"
+_out=$(WTOOL_SUDO=never _priv nopass 'if env_priv_ask 测试; then echo "rc=0"; else echo "rc=$?"; fi')
+case $_out in
+    *"没有 sudo，跳过要 root 的部分"*"rc=1"*) ok "nosudo 时明确跳过（不试 sudo）" ;;
+    *) bad "nosudo 时的处理不对: $_out" ;;
+esac
+# 要密码 + 没有终端 → 必须**明确跳过**，不能挂住、也不能当成成功
+_out=$(_priv askpass 'if env_priv_ask 测试; then echo "rc=0"; else echo "rc=$?"; fi' < /dev/null)
+case $_out in
+    *"没有终端可以问密码"*"rc=1"*) ok "没有终端问密码 → 明确跳过（不挂住）" ;;
+    *) bad "没有终端时的处理不对: $_out" ;;
+esac
+# 没有 sudo + 环境已齐（python3/git/curl 都在）→ **一次 apt-get 都不调**
+: > "$T/apt-priv.log"
+WTOOL_SUDO=never _priv nopass 'ENV_NAME="Ubuntu 24.04 (noble)"; export ENV_NAME; env_prepare' \
+    > "$T/priv-prepare.log" 2>&1 || true
+grep -q "运行环境已经在" "$T/priv-prepare.log" \
+    && ok "环境齐时不碰 apt（不需要 root）" \
+    || bad "环境齐时没走'不需要 root'那条路: $(head -3 "$T/priv-prepare.log")"
+[ -s "$T/apt-priv.log" ] && bad "没有 root 却调了 apt-get" || ok "没有 root 时一次 apt-get 都没调"
+grep -q "运行环境就绪" "$T/priv-prepare.log" \
+    && ok "拿不到 root 也走完了第 0 步（wtool 自己能装）" \
+    || bad "拿不到 root 时第 0 步没走完: $(tail -3 "$T/priv-prepare.log")"
+rm -rf "$T/home" "$T/state-priv"
 
 echo "== 3. 换源：写 deb822 + 先备份原源 =="
 APT2="$T/apt2"; mk_aptdir "$APT2"
