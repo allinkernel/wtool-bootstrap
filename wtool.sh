@@ -976,7 +976,12 @@ wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--jobs=N
         printf '%s\n' "$_db_targets" | awk -F'\t' -v w="$_db_only" '$1==w{found=1} END{exit !found}' \
             || wt_die "$_db_pid 里没有目标 $_db_only（有 $(printf '%s\n' "$_db_targets" | cut -f1 | paste -sd, -)）"
     fi
-    _db_logroot="$WTOOL_STATE/$(printf '%s' "$_db_pid" | tr '/' '_')/build-logs"
+    # 日志根**保留项目 id 里的 `/`**（`$WTOOL_STATE/editor/astronvim_v5/build-logs/`）：
+    # 项目身份就是它的路径（ADR-0037），state 目录里所有别的东西（`artifacts.tsv`、
+    # `actions.tsv`、`meta.tsv`…）都是这个拼法。这里原来是 `tr '/' '_'`
+    # （`editor_astronvim_v5/`）—— 同一个项目在 state 下有两个家，是两套拼法，
+    # 找日志的人会先找错地方（ADR-0029 §3 的勘误段，B3）。
+    _db_logroot="$WTOOL_STATE/$_db_pid/build-logs"
 
     _db_n=0
     while IFS='	' read -r _db_t _db_base; do

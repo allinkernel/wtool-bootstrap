@@ -182,7 +182,9 @@ PATH="$T/bin:$PATH"; export PATH
 export DOCKER_LOG="$T/docker.log" DOCKER_IMAGES="$T/images.txt" DOCKER_PS="$T/ps.txt"
 export DOCKER_FIX="$T/fix" DOCKER_DIFF="$T/diff" DOCKER_PROJ="$P" DOCKER_TAR="$T/save.tar"
 export WTOOL_TEST_SLOW="${WTOOL_TEST_SLOW:-}"
-export LOG_DIR="$T/state/editor_demo/build-logs/ubuntu_24.04" DOCKER_TIMELINE="$T/timeline.tsv"
+# 日志落点：项目 id 里的 `/` **保留**（和 artifacts.tsv / actions.tsv 同一个拼法，
+# B3 之前这里是 `editor_demo` —— 同一个项目在 state 下有两个家）
+export LOG_DIR="$T/state/editor/demo/build-logs/ubuntu_24.04" DOCKER_TIMELINE="$T/timeline.tsv"
 # 桩是子进程，只认导出的变量 —— $T 是测试里的局部变量，桩里读不到（踩过：路径变成 /fake…）
 export DOCKER_TMP="$T"
 export WTOOL_TEST_ROOT="$T/fakeroot"
@@ -613,6 +615,19 @@ chk "失败之后行数还是 6（整表重写：不丢好层、不追加坏层�
     || ok "失败的那层没有残骸（B1 那条同一条路）"
 cp "$T/layers.bak3" "$P/build/layers.tsv"
 rm -f "$P/scripts/ok.sh" "$P/scripts/bad.sh"
+
+
+echo "== 14. B3：构建日志落在 <state>/<项目路径>/build-logs/（保留 /） =="
+#   项目身份 = 路径（ADR-0037）：state 下别的东西（artifacts.tsv / actions.tsv…）
+#   都是 `$WTOOL_STATE/editor/demo/…`，日志不能另起一个 `editor_demo` 的家。
+[ -d "$WTOOL_STATE/editor/demo/build-logs/ubuntu_24.04" ] \
+    && ok "★日志目录保留项目 id 里的 /（和账本同一个家）" \
+    || bad "日志没落在 \$WTOOL_STATE/editor/demo/build-logs/ 下" \
+           "$(ls -d "$WTOOL_STATE"/*/ 2>/dev/null | paste -sd' ' -)"
+[ -e "$WTOOL_STATE/editor_demo" ] && bad "state 里还有 editor_demo 这种另起的拼法" \
+    || ok "没有 editor_demo（/ → _）那种拼法了"
+[ -f "$WTOOL_STATE/editor/demo/build-logs/ubuntu_24.04/plan.tsv" ] \
+    && ok "plan.tsv 也在同一个家（看日志不用猜路径）" || bad "plan.tsv 不在"
 
 
 # --------------------------------------------------------------------------

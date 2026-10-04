@@ -119,6 +119,10 @@ wtool doctor
 容器里跑的命令）、`build/export.filter`（导出丢什么），引擎负责起容器、`commit`、
 落 `__layer/<target>/`、导出 `__output/<target>/<层>/` —— **一层镜像对一层 output**，
 每步都能跳过（重跑接着走，`docker` 存储被清也能从 `__layer/` 装回来）。
+`--rebuild` 就是"三条跳过判据全都绕过、强制重编"（改了 `layers.tsv` 的命令、
+或者怀疑某一层是旧的时用）。构建日志在 `$WTOOL_STATE/<项目 id>/build-logs/<target>/`；
+宿主的 `HTTP(S)_PROXY` / `NO_PROXY` 会带进容器（`--network=host`，代理才指得到宿主），
+本地镜像目录（`WTOOL_MIRROR_DIR`，默认 `~/self/mirror`）存在时只读挂进 `/mirror`。
 
 ## 当前状态
 

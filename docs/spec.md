@@ -159,8 +159,15 @@ $WTOOL_STATE/                       默认 ~/.local/state/wtool
     ├── env.zsh / env.bash          这个项目的环境变量块（汇总文件的原料）
     ├── system.tsv                  系统层：/etc 写过的账（sudo-uninstall 的还原依据）
     ├── apt.tsv                     系统层：这次新装进来的 apt 包（快照差集）
+    ├── artifacts.tsv               产物账本：当前磁盘上的产物是谁产出的（ADR-0036）
+    ├── build-logs/<target>/        引擎驱动构建（kind=docker）的每层日志 / plan / 指纹
     └── provisioned/<marker>        系统层：幂等标记
 ```
+
+**`<project-id>` 里的 `/` 原样保留**（`$WTOOL_STATE/editor/astronvim_v5/…`）——
+项目身份就是它的路径（ADR-0037），state 下所有东西（账本、日志、journal）都这一个拼法。
+构建日志以前写成 `$WTOOL_STATE/editor_astronvim_v5/build-logs/`（`/` → `_`），
+2026-10-04 统一掉了（ADR-0029 §3 的实现勘误）。
 
 ---
 
@@ -738,6 +745,13 @@ apt-get update && apt-get install -y --no-install-recommends \
 先解到 `__output/<target>/.<层名>.export.<pid>/`，`wt_owned_scan` 校验通过才
 `mv` 成 `__output/<target>/<层>/`。失败（例如层里有指向包外的软链）时**一个残骸都不留** ——
 否则下一轮会被判据 ③ 当成"已经导出好了"，静默 rc=0（还要给账本记一行背书）。
+
+**每层的日志**在 `$WTOOL_STATE/<项目 id>/build-logs/<target>/`：`<层>.log`（容器里的输出）、
+`<层>.wtool.log`（引擎这一侧这一层的全过程）、`<层>.fingerprint.json`、`plan.tsv`。
+容器用 `--network=host` 起（代理要它），宿主的 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`
+（大小写都认）原样传进去，日志里会写一行 `代理 : <值>` 或 `代理 : 直连`；
+宿主有本地镜像目录（`WTOOL_MIRROR_DIR`，默认 `~/self/mirror`）时**只读**挂进 `/mirror`
+（目录不存在就不挂 —— 挂了 docker 会自己建一个空的），日志里写 `本地镜像: <路径> → /mirror:ro`。
 
 契约文件分两半（ADR-026 §4）：
 
