@@ -804,6 +804,15 @@ case " $_cmds " in
     *" _layer-save "*) bad "内部命令 _layer-save 不该进补全" ;;
     *) ok "内部命令不进补全（和 --help 口径一致）" ;;
 esac
+# `wtool status` 两种形态（用户 2026-10-04 定：就这样共存）
+case "$("$WT" status 2>&1)" in
+    *"登记的软链"*|*"没有登记的软链"*) ok "status 无参 = 老的登记表 + 软链检查" ;;
+    *) bad "status 无参不是老的登记表检查" ;;
+esac
+case "$("$WT" status boot 2>&1)" in
+    *"依据"*|*"找不到项目"*) ok "status <项目> = 新的逐列状态 + 依据" ;;
+    *) bad "status <项目> 不是新的逐列查询" ;;
+esac
 chk "补 s 开头 → status + sudo-*" "status sudo-install sudo-uninstall sudo-bootstrap" \
     "$(WTOOL_SUDO=yes "$WT" _complete "s" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 # 没有 sudo 的机器：连补全也不提 sudo-*（和看板一个口径）
