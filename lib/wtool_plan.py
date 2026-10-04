@@ -3981,6 +3981,11 @@ def build_parser():
     dp = sub.add_parser("docker-plan")
     dp.add_argument("project_dir")
     dp.add_argument("--target", default="")
+    # --rebuild：计划**内容不变**（还是这份层清单），它改的是执行期对着 docker /
+    # __layer/ / __output/ 三条"已经好了"判据时要不要跳过。计划侧必须认这个 flag ——
+    # 不认的话 `wtool build --rebuild` 走到这里就是 argparse 报错，
+    # 表现成"加了开关但动作被静默丢弃"（AGENTS.md 那条：新增动作要同时改两边）。
+    dp.add_argument("--rebuild", action="store_true")
 
     rj = sub.add_parser("release-json")
     rj.add_argument("--release-dir", required=True)

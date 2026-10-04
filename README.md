@@ -14,7 +14,8 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh sudo-bootstrap              # 所有项目的 sudo-install
 
 # 产物与发布（release 四条边：pack/unpack 本地一对，publish/download 远端一对）
-./wtool.sh build          <项目>|all   # 跑项目自己的 scripts/build.sh → __output/
+./wtool.sh build          <项目>|all   # 跑项目自己的 scripts/build.sh，或引擎驱动容器 → __output/
+                                      #   --rebuild：无视"已经编好了"的三条判据，强制重编
 ./wtool.sh pack-release   <项目>       # __output/ → __release/（源码.zip / release.zip / 分卷 / dist.json）
 ./wtool.sh publish-release [<项目>]    # __release/ → GitHub（**只上传**），成功后写 scripts/release.json
 ./wtool.sh download-release <项目>|all # 读提交在项目里的 scripts/release.json → __release/（**只下载**）

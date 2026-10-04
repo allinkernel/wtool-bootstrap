@@ -204,7 +204,9 @@ python3 "$PY" docker-plan "$P" --target=nope >/dev/null 2>&1 && bad "没声明�
     || ok "没声明的目标被拒"
 
 echo "== 2. build：起容器 → commit → __layer/ → __output/ =="
-"$WT" build editor/demo > "$T/build1.log" 2>&1 || bad "build（引擎驱动 docker）" "$(cat "$T/build1.log")"
+# --jobs=1：`/wtool-layer/layer.json` 是**每层各写一份、最后一份在最上面**，
+# 并行跑时"谁是最后一个"不确定（实测这条断言会随机红）。并行本身由第 2c 节专门量。
+"$WT" build editor/demo --jobs=1 > "$T/build1.log" 2>&1 || bad "build（引擎驱动 docker）" "$(cat "$T/build1.log")"
 chk "四层都 commit 了（占位层不起容器）" \
     "$(tr '\n' ' ' < "$DOCKER_IMAGES" | sed 's/ $//')" \
     "demo/one:ubuntu_24.04 demo/two:ubuntu_24.04 demo/three:ubuntu_24.04 demo/other:ubuntu_24.04"
@@ -425,6 +427,92 @@ rm -f "$AF" "$AP"
 chk "按项目 id 分开：两份账本各自来源正确（谁也不覆盖谁）" \
     "$(cut -f3 "$AF" | sort -u | paste -sd, -)|$(cut -f3 "$AP")" \
     "build:ubuntu_24.04|build:plain"
+
+echo "== 10. --rebuild：无视三条跳过判据，强制重编（A1）=="
+#   三条跳过判据各自独立，全都得绕过：
+#     ① docker 里已经有这个镜像  ② __layer/<target>/ 里有这一层  ③ __output/ 里有 OWNED.tsv
+#   前置状态正好是"三样都齐、什么都不用重做"（第 8/9 节刚编过）。
+: > "$DOCKER_LOG"
+"$WT" build editor/demo --target=ubuntu_24.04 --rebuild > "$T/rb1.log" 2>&1 \
+    || bad "--rebuild 重编" "$(cat "$T/rb1.log")"
+chk "★① 镜像在 docker 里也重起容器（4 个非占位层）" "4" \
+    "$(grep -c '^run -d' "$DOCKER_LOG" || true)"
+chk "★② __layer/ 里已有这一层也重存（4 次 docker save）" "4" \
+    "$(grep -c '^save ' "$DOCKER_LOG" || true)"
+# ①③ 的提示打在**那一层自己的日志**里：wt_docker_layer 在后台子 shell 里跑
+# （并行调度），输出进 <state>/<项目>/build-logs/<target>/<层>.wtool.log，不进主日志。
+grep -q '无视 docker 里已有的镜像' "$LOG_DIR"/*.wtool.log && ok "说了它在无视①" || bad "没提①"
+grep -q '无视 __output/ 里的旧产物' "$LOG_DIR"/*.wtool.log && ok "说了它在无视③" || bad "没提③"
+# ③ 旧产物是**换掉**不是叠在上面：塞一个标记文件，重导之后它必须没了
+: > "$P/__output/ubuntu_24.04/one/STALE-MARKER"
+"$WT" build editor/demo --target=ubuntu_24.04 --rebuild > "$T/rb2.log" 2>&1 \
+    || bad "第二次 --rebuild" "$(cat "$T/rb2.log")"
+[ -e "$P/__output/ubuntu_24.04/one/STALE-MARKER" ] && bad "旧产物还在（叠上去了）" \
+    || ok "★③ 旧产物被换掉（重导真的重来一遍）"
+# __layer/ 里同一个层名只能有一个条目 —— 重建之后不能变成两个
+chk "★重存之后 layout 里的条目数不变（没堆出重复的）" "4" \
+    "$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+print(len(d["manifests"]))' "$P/__layer/ubuntu_24.04/index.json")"
+chk "★层名不重复（重建 = 换掉旧条目，不是并排留着）" "0" \
+    "$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+names=[(m.get("annotations") or {}).get("io.wtool.layer") for m in d["manifests"]]
+print(sum(1 for n in set(names) if names.count(n) > 1))' "$P/__layer/ubuntu_24.04/index.json")"
+# 三条判据各自独立：只缺 __output/ 时，不带 --rebuild 只补导出、不重编
+rm -rf "$P/__output/ubuntu_24.04/one"
+: > "$DOCKER_LOG"
+"$WT" build editor/demo --target=ubuntu_24.04 > "$T/rb3.log" 2>&1 \
+    || bad "缺一层 output 时续跑" "$(cat "$T/rb3.log")"
+chk "不带 --rebuild：仍然复用镜像（一次容器都不起）" "0" \
+    "$(grep -c '^run -d' "$DOCKER_LOG" || true)"
+[ -f "$P/__output/ubuntu_24.04/one/OWNED.tsv" ] && ok "缺的那层按③补了导出" \
+    || bad "缺的那层没补回来"
+# 计划侧也要认这个 flag（不认 = argparse 报错 = 动作被静默丢弃）
+chk "★计划侧 docker-plan --rebuild 认这个 flag（计划内容不变）" \
+    "$(python3 "$PY" docker-plan "$P" --target=ubuntu_24.04 --rebuild | cut -f1 | paste -sd' ' -)" \
+    "one two three other empty"
+# dry-run --rebuild：一个字节都不写，但要说清"会重跑"
+: > "$DOCKER_LOG"
+"$WT" build editor/demo --target=ubuntu_24.04 --rebuild --dry-run > "$T/rbdry.log" 2>&1 \
+    || bad "dry-run --rebuild" "$(cat "$T/rbdry.log")"
+chk "dry-run --rebuild 不碰 docker" \
+    "$(grep -c '^run \|^commit \|^save ' "$DOCKER_LOG" || true)" "0"
+grep -q '重跑容器' "$T/rbdry.log" && ok "dry-run --rebuild 说了会重跑每一层" \
+    || bad "dry-run 没说 --rebuild" "$(cat "$T/rbdry.log")"
+
+echo "== 11. 代理与本地镜像目录（构建容器的环境）=="
+#   容器里 127.0.0.1 是容器自己 → 代理只有 --network=host 时才指得到宿主（这台机器实测：
+#   WSL mirrored + Clash fake-IP，不带代理的 git clone 会"连上但不传数据"，卡到超时）
+# ⚠️ "代理 : …" / "本地镜像: …" 是 wt_docker_layer 打的，落在**那一层自己的日志**里
+# （wtool.log），主日志里看不到 —— 断言要对着 $LOG_DIR/*.wtool.log。
+# 宿主**没有**那个目录时不许挂（挂了 docker 会自己建一个空目录 = 假前提）——
+# 用 WTOOL_MIRROR_DIR 指一个不存在的路径来量，别依赖开发机上 ~/self/mirror 在不在。
+: > "$DOCKER_LOG"
+WTOOL_MIRROR_DIR="$T/nope" "$WT" build editor/demo --target=ubuntu_24.04 --rebuild \
+    > "$T/nomir.log" 2>&1 || bad "WTOOL_MIRROR_DIR 不存在时重编" "$(cat "$T/nomir.log")"
+_runline=$(grep -m1 '^run -d' "$DOCKER_LOG")
+case $_runline in *--network=host*) ok "★容器用 host 网络" ;; *) bad "没有 --network=host" ;; esac
+case $_runline in *'-e HTTP_PROXY'*) ok "传了 HTTP_PROXY（宿主同名变量）" ;; *) bad "没传 HTTP_PROXY" ;; esac
+case $_runline in *'-e HTTPS_PROXY'*) ok "传了 HTTPS_PROXY" ;; *) bad "没传 HTTPS_PROXY" ;; esac
+case $_runline in *'-e NO_PROXY'*) ok "传了 NO_PROXY（不走代理的域名要能带进去）" ;; *) bad "没传 NO_PROXY" ;; esac
+case $_runline in *'-e ALL_PROXY'*) ok "传了 ALL_PROXY" ;; *) bad "没传 ALL_PROXY" ;; esac
+chk "宿主没有那个目录时不挂 /mirror" "0" \
+    "$(printf '%s\n' "$_runline" | grep -c '/mirror:ro' || true)"
+grep -q '本地镜像: 无' "$LOG_DIR"/*.wtool.log && ok "日志说了没挂本地镜像" \
+    || bad "日志没说不挂" "$(grep -m2 '本地镜像' "$LOG_DIR"/*.wtool.log)"
+grep -q '代理 : ' "$LOG_DIR"/*.wtool.log && ok "日志说了这次构建用的代理" \
+    || bad "日志没说代理" "$(grep -m2 '代理' "$LOG_DIR"/*.wtool.log)"
+mkdir -p "$T/mirror/github"
+: > "$DOCKER_LOG"
+WTOOL_MIRROR_DIR="$T/mirror" "$WT" build editor/demo --target=ubuntu_24.04 --rebuild \
+    > "$T/mir.log" 2>&1 || bad "带 WTOOL_MIRROR_DIR 重编" "$(cat "$T/mir.log")"
+_mirline=$(grep -m1 '^run -d' "$DOCKER_LOG")
+case $_mirline in *"-v $T/mirror:/mirror:ro"*) ok "★本地镜像目录只读挂进 /mirror" ;;
+    *) bad "没有挂 /mirror" "$_mirline" ;; esac
+grep -q "本地镜像: $T/mirror → /mirror:ro" "$LOG_DIR"/*.wtool.log && ok "日志里说了挂了什么" \
+    || bad "日志没说本地镜像" "$(grep -m2 '本地镜像' "$LOG_DIR"/*.wtool.log)"
+
 
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'

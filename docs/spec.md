@@ -50,7 +50,8 @@
   wtool sudo-bootstrap [--dry-run] [--force]
 
 产物与发布（release 四条边：本地一对 pack/unpack，远端一对 publish/download）
-  wtool build          [<项目>...|all] [--dry-run]       源码 → __output/（跑 scripts/build.sh）
+  wtool build          [<项目>...|all] [--dry-run] [--target=<目标系统>] [--jobs=N] [--rebuild]
+                                                       源码 → __output/（跑 scripts/build.sh 或引擎驱动容器；--rebuild = 无视"已经编好了"的三条判据）
   wtool pack-release   <项目>... [--tag=T] [--repo=owner/repo] [--volume-size=32M]
                                                          __output/ → __release/（**不联网**）
   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
@@ -699,6 +700,25 @@ apt-get update && apt-get install -y --no-install-recommends \
 引擎对每一层：**没有镜像就起容器 commit → 存进 `__layer/<target>/` → 从顶层 blob 导出
 `__output/<target>/<层>/`**。三步的判据都是"磁盘上有没有"，所以重跑 `wtool build`
 **接着走、不重编**；`docker` 存储被 prune 掉也能从 `__layer/` 装回来。
+
+**`--rebuild`：无视这三条判据，强制重编**。三条各自独立（① docker 里有这个镜像、
+② `__layer/<target>/` 里有这一层、③ `__output/<target>/<层>/OWNED.tsv` 在），
+`--rebuild` 要**三条都绕过**：
+
+| | 不带 `--rebuild` | 带 `--rebuild` |
+|---|---|---|
+| ① 镜像是现成的 | 跳过构建（`✓ X（docker 里已有，跳过）`） | **重跑容器**（`commit` 出新镜像） |
+| ② `__layer/` 里已有这一层 | 不再 `docker save` | **重存**（同一层名的旧条目被**换掉**，不是并排留着） |
+| ③ `__output/` 里有 `OWNED.tsv` | 跳过导出 | **重导**（旧产物整个换掉） |
+
+占位层（镜像名 `-`）没有镜像可编，`--rebuild` 对它是"清掉旧的空产物、重建一个空的"。
+不带 `--layer=`：`wtool build <项目> --target=<t> --rebuild` 重编这个目标的**每一层**
+（按父层顺序，父层先编完子层才有出发点）。
+不做 `--rebuild` 时的续跑语义、以及"哪一层失败就从哪一层接着走"都不变。
+
+> `--rebuild` 让"编过了"不再等于"编的是现在这份源码" —— 改了 `layers.tsv` 的命令、
+> 或者怀疑某一层是旧的，就用它，别去手工 `docker rmi` + 删 `__layer/` + 删 `__output/`
+> 三件套（漏掉任何一件都会被对应的那条判据跳过）。
 
 契约文件分两半（ADR-026 §4）：
 

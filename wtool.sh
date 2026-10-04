@@ -21,10 +21,13 @@
 #   wtool sudo-bootstrap [--dry-run]      所有项目的 sudo-install
 #
 #   ── 产物与发布 ─────────────────────────────────────────────
-#   wtool build     [<项目>...|all] [--dry-run] [--target=<目标系统>]
+#   wtool build     [<项目>...|all] [--dry-run] [--target=<目标系统>] [--jobs=N] [--rebuild]
 #                       有 build/layers.tsv 的 kind="docker" 项目由**引擎驱动容器**
 #                       （ADR-0029：起容器 / commit / 落 __layer/ / 导 __output/），
 #                       其余项目跑自己的 scripts/build.sh
+#                       --rebuild：无视三条"已经编好了"的跳过判据（镜像在 docker 里 /
+#                         __layer/<target>/ 里有这一层 / __output/ 里有 OWNED.tsv），
+#                         强制从父层重跑一遍容器并重存、重导
 #   wtool download-release [<项目>...|all] [--dry-run]
 #                       读**项目里提交的** scripts/release.json → 下到 <项目>/__release/
 #                       只下载 + 校验，**不解包**（解包是 unpack-release）
@@ -101,6 +104,10 @@ WTOOL_SRC=${WTOOL_SRC:-$WTOOL_HOME/.wtool/src}
 WTOOL_PREFIX=${WTOOL_PREFIX:-$WTOOL_HOME/.wtool/usr}
 WTOOL_FORCE=0
 WTOOL_DRY_RUN=0
+# --rebuild：无视"已经编好了"的跳过判据（只对 kind=docker 的引擎驱动构建有意义，
+# 见 cmd_build / wt_docker_layer）。和 WTOOL_FORCE 分工不同：--force 是"环境不达标也
+# 硬上"，--rebuild 是"编过了也重编"。
+WTOOL_REBUILD=0
 # 注意：`--with-system` 已经删掉（sudo-install 本来就是系统层），
 # 所以这里没有 WTOOL_WITH_SYSTEM 这个开关了。
 
@@ -521,9 +528,19 @@ wt_docker_layer() {
     # （指纹本身是上一次跑留下的，还在 state 里）
     _dl_fp="$_dl_logdir/$(wt_docker_slug "$_dl_layer").fingerprint.json"
     _dl_exported=0
+    # --rebuild：无视三条跳过判据（镜像在 docker 里 / __layer/ 里有这一层 /
+    # __output/ 里有 OWNED.tsv），这一层**从父层重跑一遍容器**。
+    # 三条各自独立，所以下面三处都要认它 —— 只认一处 = 还能被另外两条跳过。
+    _dl_rebuild=${WTOOL_REBUILD:-0}
 
     # 占位层（没有镜像）：只留一个空的 output 层，形状和别的层一样
     if [ "$_dl_ref" = "-" ]; then
+        # --rebuild 对占位层就是"清空重来"：它本来没有镜像可编，但产物目录照
+        # "跳过判据"的逻辑也该被重建一次（否则 --rebuild 在这层上是空话）。
+        if [ "$_dl_rebuild" = 1 ] && [ -d "$_dl_out" ]; then
+            wt_step "$_dl_layer：--rebuild → 清掉旧的占位层产物"
+            wt_run rm -rf -- "$_dl_out"
+        fi
         wt_run mkdir -p -- "$_dl_out/payload"
         [ -f "$_dl_out/OWNED.tsv" ] || : > "$_dl_out/OWNED.tsv"
         wt_step "$_dl_layer：占位层（清单里镜像名是 -），留空"
@@ -532,10 +549,16 @@ wt_docker_layer() {
 
     _dl_have=0
     "$(wt_docker)" image inspect "$_dl_ref" >/dev/null 2>&1 && _dl_have=1
+    if [ "$_dl_rebuild" = 1 ]; then
+        [ "$_dl_have" = 1 ] \
+            && wt_info "  $_dl_layer：--rebuild → 无视 docker 里已有的镜像，重编"
+        _dl_have=0
+    fi
     # docker 里没有，但 **__layer/ 里有** → 装回来（ADR-024 §7/§8：构建状态全在
     # committed 的镜像里，docker 存储只是缓存、__layer/ 才是项目的资产）。
     # 这一条是"删掉镜像之后接着走"的关键：不先试它，就会把已经编好的层重编一遍。
-    if [ "$_dl_have" = 0 ] && [ -f "$_dl_lay/index.json" ]; then
+    # --rebuild 时**不走这条路**：那正是"拿归档的旧镜像顶替重建"的跳过判据。
+    if [ "$_dl_have" = 0 ] && [ "$_dl_rebuild" != 1 ] && [ -f "$_dl_lay/index.json" ]; then
         _dl_inlay=$(wt_layer_entries "$_dl_lay" 2>/dev/null \
                     | awk -F'\t' -v l="$_dl_layer" '$1==l{print "yes"; exit}')
         if [ "$_dl_inlay" = yes ]; then
@@ -578,13 +601,37 @@ wt_docker_layer() {
         : > "$_dl_log"
 
         wt_info "  $_dl_layer ← $_dl_from（日志 $_dl_log）"
+        # 代理：容器里 `127.0.0.1` 是**容器自己**，所以只有 `--network=host` 时
+        # 宿主那个 `http://127.0.0.1:7897` 才指得到（这台机器的实测：
+        # WSL mirrored 网络 + Clash fake-IP，不带代理的 `git clone` 会"连上但不传数据"，
+        # 卡到超时；显式走宿主代理才稳 —— 见 harness/docs/hazards.md）。
+        # 传的是**宿主同名变量**（没设就不传），容器里的构建因此和宿主同一条路。
+        _dl_proxy="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
+        if [ -n "$_dl_proxy" ]; then
+            wt_info "  代理 : $_dl_proxy（--network=host，容器里的 127.0.0.1 才是宿主）"
+        else
+            wt_info "  代理 : 直连（宿主没设 HTTP(S)_PROXY）"
+        fi
+        # 本地镜像目录（`~/self/mirror`，见它自己的 AGENTS.md）：项目脚本可以用它做
+        # `git clone --reference-if-able /mirror/github/<owner>/<repo>`，本地有就不走网络。
+        # **目录不存在就不挂** —— 否则 docker 会自己建一个空的宿主目录（那是假前提）。
+        _dl_mirror=${WTOOL_MIRROR_DIR:-$HOME/self/mirror}
+        _dl_mirror_mount=""
+        if [ -n "$_dl_mirror" ] && [ -d "$_dl_mirror" ]; then
+            _dl_mirror_mount="$_dl_mirror:/mirror:ro"
+            wt_info "  本地镜像: $_dl_mirror → /mirror:ro"
+        else
+            wt_info "  本地镜像: 无（$_dl_mirror 不存在，不挂 /mirror）"
+        fi
         "$(wt_docker)" volume create "wtool-build-cache-$(wt_docker_slug "$(basename -- "$_dl_dir")")-$_dl_t" \
             >/dev/null 2>&1 || true
         wt_run "$(wt_docker)" rm -f "$_dl_cname" >/dev/null 2>&1 || true
         # shellcheck disable=SC2086
         "$(wt_docker)" run -d --name "$_dl_cname" --network=host \
             -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \
+            -e ALL_PROXY -e all_proxy -e NO_PROXY -e no_proxy \
             -v "$_dl_dir:/proj:ro" -v "$_dl_logdir:/log" \
+            ${_dl_mirror_mount:+-v} ${_dl_mirror_mount:+"$_dl_mirror_mount"} \
             -v "wtool-build-cache-$(wt_docker_slug "$(basename -- "$_dl_dir")")-$_dl_t:/root/.cache" \
             "$_dl_from" sleep infinity >/dev/null \
             || wt_die "起容器失败（$_dl_from）"
@@ -626,17 +673,22 @@ wt_docker_layer() {
     fi
 
     # ② 存进 __layer/<target>/（已经存过就不重复 save —— GB 级的 I/O）
+    # --rebuild 时必须重存：__layer/ 里那份是**上一次**的镜像，不覆盖它，
+    # 后面 unpack-layer / push-layer 拿到的还是旧的（"重编了但推出去的还是老层"）。
     _dl_inlay=$(wt_layer_entries "$_dl_lay" 2>/dev/null \
                 | awk -F'\t' -v l="$_dl_layer" '$1==l{print "yes"; exit}')
-    if [ "$_dl_inlay" != yes ]; then
+    if [ "$_dl_inlay" != yes ] || [ "$_dl_rebuild" = 1 ]; then
         wt_layer_import "$_dl_dir" "$_dl_t" "$_dl_ref" "$_dl_layer" \
             || wt_die "存不进 __layer/$_dl_t/（$_dl_ref）"
     fi
 
     # ③ 导出成 __output/<target>/<层>/ —— 每层只导自己的增量（ADR-025 第 4 条）
-    if [ -f "$_dl_out/OWNED.tsv" ]; then
+    # --rebuild 时强制重导（忽略 OWNED.tsv 这条跳过判据）。
+    if [ "$_dl_rebuild" != 1 ] && [ -f "$_dl_out/OWNED.tsv" ]; then
         wt_step "$_dl_layer：__output/ 里已经有了，跳过导出"
     else
+        [ "$_dl_rebuild" = 1 ] && [ -f "$_dl_out/OWNED.tsv" ] \
+            && wt_step "$_dl_layer：--rebuild → 无视 __output/ 里的旧产物，重导"
         wt_layer_export "$_dl_dir" "$_dl_t" "$_dl_layer" "$_dl_dir/__output/$_dl_t" \
             "$(wt_docker_export_filter "$_dl_dir")" >/dev/null \
             || wt_die "$_dl_layer 导出失败"
@@ -931,10 +983,13 @@ wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--jobs=N
         [ -n "$_db_t" ] || continue
         [ -z "$_db_only" ] || [ "$_db_t" = "$_db_only" ] || continue
         wt_info "── $_db_pid  目标 $_db_t（基础镜像 $_db_base）"
-        _db_plan=$(python3 "$PY" docker-plan "$_db_dir" --target="$_db_t") \
+        _db_plan=$(python3 "$PY" docker-plan "$_db_dir" --target="$_db_t" \
+                       $([ "${WTOOL_REBUILD:-0}" = 1 ] && echo --rebuild)) \
             || wt_die "$_db_pid 的 build/layers.tsv 有问题（上面写了）"
         _db_out="$_db_dir/__output/$_db_t"
         if wt_dry; then
+            [ "${WTOOL_REBUILD:-0}" = 1 ] \
+                && wt_step "[dry-run] --rebuild：下面每一层都会重跑容器（无视已编好的判据）"
             printf '%s\n' "$_db_plan" | while IFS='	' read -r _l _p _r _c; do
                 [ -n "$_l" ] || continue
                 if [ "$_r" = "-" ]; then
@@ -979,6 +1034,7 @@ cmd_build() {
         case $arg in
             --dry-run)  WTOOL_DRY_RUN=1 ;;
             --force)    WTOOL_FORCE=1 ;;
+            --rebuild)  WTOOL_REBUILD=1 ;;
             --target=*) _build_target=${arg#--target=} ;;
             --jobs=*)   _build_jobs=${arg#--jobs=} ;;
             -*)         wt_die "未知参数: $arg" ;;
@@ -2729,7 +2785,7 @@ wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列
         uninstall)          printf '%s\n' --dry-run --force --no-script ;;
         move)               printf '%s\n' --dry-run --force --no-script ;;
         bootstrap)          printf '%s\n' --dry-run --force --prune ;;
-        build)              printf '%s\n' --dry-run --force --jobs= --target= ;;
+        build)              printf '%s\n' --dry-run --force --jobs= --target= --rebuild ;;
         pack-release)       printf '%s\n' --dry-run --force --tag= --volume-size= --repo= ;;
         publish-release)    printf '%s\n' --dry-run --force --tag= --allow-foreign --out= ;;
         download-release)   printf '%s\n' --dry-run ;;
@@ -3754,6 +3810,19 @@ def load(p):
     except Exception:
         return []
 entries = load(cur_p)
+# ‼️ 同一个**层名**在布局里只能有一个条目（重建 / 重新 save 时是"换掉"，不是并排留着）。
+#    并排的后果：`wt_layer_last_blob --layer=X` 见到多个条目直接拒绝（"layout 里有多个层"），
+#    push-layer 还会把**旧的那份**也推出去 —— 表现就是"重编了，但推出去的还是老层"。
+#    换掉之后旧 blob 留在 blobs/sha256/ 里没有引用（内容寻址，不占新空间也不会被 push）。
+_keep = [e for e in entries
+         if not ((e.get("annotations") or {}).get("io.wtool.layer") == layer
+                 and (e.get("annotations") or {}).get("io.wtool.target") == target)]
+if len(_keep) != len(entries):
+    print("  __layer/：换掉 %d 个旧的 %s 条目（这一层重存过）"
+          % (len(entries) - len(_keep), layer), file=sys.stderr)
+entries = _keep
+# have 要在**换掉之后**算：重建出来的镜像可能和老的一模一样（同样的 digest）——
+# 那时不能因为"digest 已经有了"就跳过，否则这一层直接从布局里消失。
 have = {e.get("digest") for e in entries}
 for e in load(new_p):
     if e.get("digest") in have:
