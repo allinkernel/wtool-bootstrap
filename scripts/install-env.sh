@@ -57,7 +57,12 @@ env_sudo_state() {
     esac
     command -v sudo >/dev/null 2>&1 || { printf 'none'; return 0; }
     if sudo -n true 2>/dev/null; then printf 'nopass'; return 0; fi
-    # `sudo -n -l` 不弹提示：能列出规则 = 这个用户在 sudoers 里（只是要密码）
+    # 要密码的那些人：**先看组**（标准配置就是靠组给权限）。
+    #   ⚠️ 别指望 `sudo -n -l`：标准 Ubuntu 上它直接 "sudo: a password is required"，
+    #   于是在 sudo 组、但要密码的人会被误判成没有 sudo（实测踩过）。
+    case " $(id -nG 2>/dev/null) " in
+        *" sudo "*|*" wheel "*) printf 'askpass'; return 0 ;;
+    esac
     if sudo -n -l >/dev/null 2>&1; then printf 'askpass'; return 0; fi
     printf 'none'
 }

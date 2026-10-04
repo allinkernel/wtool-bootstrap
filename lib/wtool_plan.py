@@ -1795,8 +1795,18 @@ def sudo_state():
             return 1
     if _run(["sudo", "-n", "true"]) == 0:
         return "nopass"
-    # `sudo -n -l` 不弹提示，能列出规则就说明"这个用户在 sudoers 里"
-    # （免密用户上面已经返回了；这一条抓的是"要密码但有权限"的人）
+    # 要密码的那些人：**先看组**（标准配置就是靠组给权限）。
+    #   ⚠️ 别指望 `sudo -n -l`：标准 Ubuntu 上它直接 `sudo: a password is required`，
+    #   于是"在 sudo 组、但要密码"的人会被误判成没有 sudo（实测踩过）。
+    try:
+        _groups = subprocess.run(["id", "-nG"], stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, timeout=5,
+                                 text=True).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        _groups = []
+    if "sudo" in _groups or "wheel" in _groups:
+        return "askpass"
+    # 组里没有，但有些配置允许 `sudo -l` 直接列出规则 —— 那也算有
     if _run(["sudo", "-n", "-l"]) == 0:
         return "askpass"
     return "none"

@@ -853,6 +853,19 @@ print("none" if wtool_plan.sudo_state() == "none" else "yes")'
 _sh_state() {   # <WTOOL_SUDO> → none / yes（install-env.sh 和 wtool.sh 两处都要一致）
     WTOOL_SUDO=$1 sh -c '. "$1"; env_sudo_state' sh "$boot/scripts/install-env.sh" 2>/dev/null
 }
+# 在 sudo 组、但要密码（标准 Ubuntu）= askpass —— 两处都得认出来，别误判成"没有 sudo"
+if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx 'sudo\|wheel'; then
+    chk "在 sudo 组 → python 判 askpass（不是 none）" "_py_askpass" \
+        "$(BOOT="$boot" python3 -c '
+import sys, os
+sys.path.insert(0, os.environ["BOOT"] + "/lib")
+import wtool_plan
+print("_py_askpass" if wtool_plan.sudo_state() == "askpass" else wtool_plan.sudo_state())')"
+    chk "在 sudo 组 → install.sh 判 askpass（不是 none）" "askpass" \
+        "$(sh -c '. "$1"; env_sudo_state' sh "$boot/scripts/install-env.sh" 2>/dev/null)"
+else
+    ok "当前用户不在 sudo 组，跳过 askpass 那条"
+fi
 for v in never auto yes; do
     _py=$(_py_state "$v"); _sh=$(_sh_state "$v")
     _sh_bool=yes; [ "$_sh" = none ] && _sh_bool=none
