@@ -32,12 +32,12 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 10 组 / 794 条断言
+./tests/run_all.sh                    # 10 组 / 849 条断言
                                       # pairing 35 / sudo-install 40 / publish 124 / table 94
-                                      # release-copy 17 / release 63 / contract 221 / layer 46 / install-env 67
+                                      # release-copy 17 / release 71 / contract 250 / layer 50 / install-env 67
                                       # （run_all.sh 文件头那几行逐组条数是手写的，会过期；
                                       #   对不上时先数它跑出来的 PASS 行，再回来改这里）
-                                      # docker-build 58（kind=docker 的引擎驱动构建）
+                                      # docker-build 101（kind=docker 的引擎驱动构建）
 ```
 
 ---
