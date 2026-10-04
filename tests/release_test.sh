@@ -225,12 +225,52 @@ PY
 cp "$T/oldpkg/dist.json" "$T/oldpkg/源码.zip" "$T/oldpkg/release.zip" "$P2b/__release/"
 "$WT" unpack-release "$P2b" > "$T/unpack2b.log" 2>&1 \
     || bad "unpack-release 跑旧布局的包" "$(cat "$T/unpack2b.log")"
-grep -q '请 mv release __output' "$T/unpack2b.log" \
+grep -q 'mv release __output' "$T/unpack2b.log" \
     && ok "旧布局的包解开后提示 mv release __output（不然下一步只会说 __output/ 是空的）" \
     || bad "解旧布局的包没给迁移提示" "$(tail -3 "$T/unpack2b.log")"
 [ -f "$P2b/release/ubuntu_24.04/bin/tmux" ] \
     && ok "旧包确实解成了 release/<target>/（提示的前提成立）" \
     || bad "旧包的布局没按原样解开"
+
+# --------------------------------------------------------------------------
+printf '\n== 2c：源码包必须排除**新旧六个**产物目录（ADR-0033）==\n'
+#   为什么单独守这条：老工作区的磁盘上还躺着 output/ release/ layer/（GB 级），
+#   而"没有 git 时"走的是引擎自己的 walk —— 那张忽略表少一个名字，
+#   就能把一个 1GB 的产物目录打进源码包。
+P2c="$T/ws2c/packdemo"; mkdir -p "$P2c"
+cd "$P2c" || exit 1
+git init -q .; git -C "$P2c" remote add origin https://github.com/fake/packdemo.git
+printf 'keep\n' > keep.txt
+for d in __output __release __layer output release layer; do
+    mkdir -p "$P2c/$d"; printf 'BIG\n' > "$P2c/$d/junk.bin"
+done
+printf '/__output/\n/__release/\n/__layer/\n' > "$P2c/.gitignore"
+mkdir -p "$P2c/scripts"
+printf '#!/bin/sh\ntrue\n' > "$P2c/scripts/build.sh"
+cat > "$P2c/wtool.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="terminal/packdemo" priority="50">
+</wtool>
+XML
+git -C "$P2c" add -A; git -C "$P2c" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" pack-release "$P2c" --tag=v1 > "$T/pack2c.log" 2>&1 \
+    || bad "pack-release 跑不动" "$(cat "$T/pack2c.log")"
+_SRC=$(ls "$P2c"/__release/源码.zip "$P2c"/__release/*source*.zip 2>/dev/null | head -1)
+if [ -n "$_SRC" ]; then
+    _bad=$(python3 - "$_SRC" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    print(" ".join(n for n in z.namelist()
+                   if any(("/%s/" % d) in n for d in
+                          ("__output", "__release", "__layer", "output", "release", "layer"))))
+PY
+)
+    [ -z "$_bad" ] && ok "六个产物目录（新三名 + 旧三名）都没进源码包" \
+        || bad "源码包里混进了产物目录: $_bad"
+else
+    bad "没找到源码包（场景 2c 的 fixture 有问题）"
+fi
+cd "$here" || exit 1
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 3：卷坏了 / 缺卷 → 拒绝解开 ==\n'

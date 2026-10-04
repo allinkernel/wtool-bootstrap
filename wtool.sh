@@ -2150,9 +2150,9 @@ cmd_unpack_release() {
         else
             wt_unpack_release "$_path" "$_scratch"
         fi
-        # 改名（2026-09，__release/ → __output/）之前打的包，解开后顶层是 __release/<target>/。
+        # 改名之前打的包，解开后顶层是旧的目录名（2026-09 那次是 release/<target>/）。
         # 这里顺手提示一句 —— 不然下一步 `wtool install` 只会说"__output/ 是空的"，
-        # 人会去重下几百兆，而其实只要 mv 一下。
+        # 人会去重下几百兆，而其实只要 mv 一下。提示的四种旧名字见 wt_check_old_dir_names。
         wt_check_old_dir_names "$_pid" "$_path"
         _done=$((_done + 1))
     done
@@ -2167,6 +2167,15 @@ cmd_unpack_release() {
 # 旧 release/ 靠**形状**认：里面是 <os>_<ver>/<层>/；新的 __output/ 也是这样，
 # 所以这条只对"名字还没改、里面已经是新产出"的老机器有用（提示他搬）。
 wt_check_old_dir_names() {   # <项目 id> <项目目录>（都为空 = 工作区里全部项目）
+    # 两次改名叠在一起，所以一共要认**五个**旧名字：
+    #   ① 2026-09  publish/  → release/       （打包发布产出）
+    #   ② 2026-09  release/  → output/        （构建产出；靠形状认）
+    #   ③ 2026-10  output/   → __output/      （加下划线前缀，ADR-0033）
+    #   ④ 2026-10  layer/    → __layer/
+    #   ⑤ 2026-10  （release/ 这个名字在 ② 之后只可能是 ① 之前的旧包，
+    #               所以 ② 和 ③ 共用一条提示：mv release __output）
+    # **只 detect + 提示，不自动 mv**：目录名是用户的决定，而且现在可能有进程正在
+    # 往里写（build/download 跑一半），什么时候搬只有人知道。
     _od_id=$1; _od_path=$2
     if [ -n "$_od_path" ]; then
         printf '%s\t%s\n' "${_od_id:-$_od_path}" "$_od_path"
@@ -2187,15 +2196,32 @@ wt_check_old_dir_names() {   # <项目 id> <项目目录>（都为空 = 工作�
                     _od_old_rel=1; break ;;
             esac
         done
+        # ③④：上一版的名字（output/ layer/），只在**新名字还没有**的时候提示 ——
+        # 两边都在说明用户已经搬过一半，再喊只会烦人。
+        _od_old_out=0; _od_old_lay=0
+        [ -d "$_od_dir/output" ] && [ ! -e "$_od_dir/__output" ] && _od_old_out=1
+        [ -d "$_od_dir/layer" ]  && [ ! -e "$_od_dir/__layer" ]  && _od_old_lay=1
+
+        if [ "$_od_old_out" = 1 ] || [ "$_od_old_lay" = 1 ] \
+           || [ "$_od_old_pub" = 1 ] || [ "$_od_old_rel" = 1 ]; then
+            wt_warn "[$_od_pid] 有旧名字的产物目录（2026-10 起都带 __ 前缀，ADR-0033）。搬一下："
+        fi
+        # ⚠️ 写成 if 而不是 `[ ] && cmd`：条件为假时那条命令返回 1，
+        #    在 `set -e` 下会把整个 check 干掉（这段在管道里的 while 里跑）。
+        if [ "$_od_old_out" = 1 ]; then
+            wt_warn "  cd $_od_dir && mv output __output"
+        fi
+        if [ "$_od_old_lay" = 1 ]; then
+            wt_warn "  cd $_od_dir && mv layer __layer"
+        fi
         if [ "$_od_old_pub" = 1 ] && [ "$_od_old_rel" = 1 ]; then
             # 两个都在：**顺序不能反**，反了 mv publish release 会把 publish/ 塞进
             # 还是旧构建产出的 release/ 里，第二步再整个搬去 __output/ —— 变成 __output/publish/。
-            wt_warn "[$_od_pid] 两个旧目录都在，按这个顺序搬（反了会把 publish/ 塞进 release/ 里）："
-            wt_warn "  cd $_od_dir && mv release __output && mv publish __release"
+            wt_warn "  cd $_od_dir && mv release __output && mv publish __release   # 顺序别反"
         elif [ "$_od_old_pub" = 1 ]; then
-            wt_warn "[$_od_pid] 旧目录名：publish/ 现在叫 __release/，请 mv publish __release"
+            wt_warn "  cd $_od_dir && mv publish __release"
         elif [ "$_od_old_rel" = 1 ]; then
-            wt_warn "[$_od_pid] 这看起来是旧名字的构建产出，请 mv release __output"
+            wt_warn "  cd $_od_dir && mv release __output"
         fi
     done
 }

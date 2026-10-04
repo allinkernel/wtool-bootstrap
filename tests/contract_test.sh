@@ -217,15 +217,37 @@ chk "迁移提示不影响 check 的退出码" "$_rc" "0"
 rm -rf "$P2/release"
 _out=$("$WT" check "$P2" 2>&1) || true
 case $_out in
-    *"请 mv publish __release"*) ok "只有旧 publish/：提示改名" ;;
+    *"mv publish __release"*) ok "只有旧 publish/：提示改名" ;;
     *) bad "只有旧 publish/ 时没提示" "$_out" ;;
 esac
 rm -rf "$P2/publish"; mkdir -p "$P2/release/ubuntu_24.04/main/payload"
 _out=$("$WT" check "$P2" 2>&1) || true
 case $_out in
-    *"请 mv release __output"*) ok "只有旧形状 release/：提示改名" ;;
+    *"mv release __output"*) ok "只有旧形状 release/：提示改名" ;;
     *) bad "只有旧 release/ 时没提示" "$_out" ;;
 esac
+# 2026-10 的上一版名字：output/ 和 layer/（ADR-0033）—— 也要提示，同样只提示。
+#   ⚠️ 先挪走 __output：前面场景已经把它建出来了，而"新名字在就不提示"是**故意**的
+rm -rf "$P2/__output"
+mkdir -p "$P2/output/ubuntu_24.04/main/payload" "$P2/layer/ubuntu_24.04"
+_out=$("$WT" check "$P2" 2>&1) || true
+case $_out in
+    *"mv output __output"*) ok "上一版的 output/ → 提示 mv output __output" ;;
+    *) bad "output/ 没提示" "$_out" ;;
+esac
+case $_out in
+    *"mv layer __layer"*) ok "上一版的 layer/ → 提示 mv layer __layer" ;;
+    *) bad "layer/ 没提示" "$_out" ;;
+esac
+# 新名字已经在的时候**不再喊**（用户搬了一半，别再烦他）
+mkdir -p "$P2/__output" "$P2/__layer"
+_out=$("$WT" check "$P2" 2>&1) || true
+case $_out in
+    *"mv output __output"*) bad "新名字已经在了还喊 mv output" "$_out" ;;
+    *) ok "新名字在了就不再提示（不烦人）" ;;
+esac
+rm -rf "$P2/output" "$P2/layer" "$P2/__output" "$P2/__layer"
+
 # 新形状的 __release/（dist.json + 分卷）不该被误报
 rm -rf "$P2/release"; mkdir -p "$P2/__release"
 printf '{}\n' > "$P2/__release/dist.json"; printf 'z\n' > "$P2/__release/release.zip"

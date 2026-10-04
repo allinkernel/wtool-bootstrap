@@ -2799,8 +2799,8 @@ DIR_OUT = "__output"
 DIR_REL = "__release"
 DIR_LAYER = "__layer"
 
-ALWAYS_IGNORED_DIRS = (DIR_OUT, DIR_REL, DIR_LAYER,
-                       "__output", "__release", "__layer",
+ALWAYS_IGNORED_DIRS = (DIR_OUT, DIR_REL, DIR_LAYER,      # 新名字
+                       "output", "release", "layer",      # 旧名字：老工作区里还在，GB 级
                        ".git", "__pycache__",
                        ".mypy_cache", ".pytest_cache", ".ruff_cache")
 
