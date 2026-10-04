@@ -412,6 +412,24 @@ wt_sysfile_apply() {
     _slug=$(wt_sysfile_slug "$_dest")
     _b3="$WTOOL_STATE/$WTOOL_PROJECT_ID/system/$_slug/original"
 
+    # dedup：清掉**我们自己**生成的重复镜像源。
+    #
+    # 场景（2026-10-04 实测）：install.sh 第 0 步已经按用户挑的镜像配好了一份
+    # （/etc/apt/sources.list.d/wtool-mirror.sources），而项目清单里的
+    # <sudo-install kind="apt-mirror" mirror="auto"/> 以前会再写一份 ubuntu.sources
+    # —— 同一批 target 配两遍，apt 警告 "configured multiple times"，ansible 的
+    # 装包任务会因此失败。现在 planner 认出"已经换过"就发这条 dedup，不再写第二份。
+    #
+    # 只删 head 里有"由 wtool 生成"的那种：机器**原来的**文件一个字节都不动。
+    # 不记账（不进 system.tsv）：它本来就是我们生成的临时产物，还原它没有意义。
+    if [ "$_mode" = dedup ]; then
+        if [ -f "$_dest" ] && head -1 -- "$_dest" 2>/dev/null | grep -q '由 wtool 生成'; then
+            wt_run rm -f -- "$_dest"
+            wt_info "  已清掉重复的镜像源: $_dest（install.sh 那份才是当前的）"
+        fi
+        return 0
+    fi
+
     if [ "$_mode" = disable ]; then
         if [ ! -e "$_dest" ]; then
             wt_warn "disable 的目标不存在，跳过: $_dest"
@@ -589,6 +607,38 @@ wt_source_sync() {
 }
 
 # 执行一个 provision 任务（ansible 或 shell），带幂等 marker
+# 跑之前先把"这一步要装什么"说清楚（用户 2026-10-04 要求）。
+#
+# 背景：ansible 默认只在每个 task 开头打一行 `TASK [1/7 基础工具]`，
+# 中间那几分钟（下载 + dpkg）完全看不到东西 —— 用户的原话是"只能感受到等待"。
+# 这里补三件：包的数量、模拟出来的下载量、以及跑完之后"新装了几个"（进 apt.tsv 时也打）。
+wt_task_plan_report() {   # <playbook 路径>
+    _tp_src=$1
+    _tp_pkgs=$(python3 "$PY" provision-packages "$_tp_src" 2>/dev/null || true)
+    _tp_n=$(printf '%s\n' "$_tp_pkgs" | grep -c . 2>/dev/null || echo 0)
+    [ "${_tp_n:-0}" -gt 0 ] || return 0
+    _tp_tasks=$(grep -cE '^[[:space:]]+- name:' "$_tp_src" 2>/dev/null || echo "?")
+    # `-s` 是 simulate：只问 apt"会装几个、升级几个"，不装不写（不需要 root）
+    _tp_sim=$(LC_ALL=C apt-get -s install $_tp_pkgs 2>/dev/null \
+              | sed -n 's/^\([0-9][0-9]* upgraded.*\)$/\1/p' | head -1)
+    _tp_new=$(printf '%s' "$_tp_sim" | sed -n 's/.*, \([0-9][0-9]*\) newly installed.*/\1/p')
+    _tp_upg=$(printf '%s' "$_tp_sim" | sed -n 's/^\([0-9][0-9]*\) upgraded.*/\1/p')
+    if [ -n "$_tp_new" ] || [ -n "$_tp_upg" ]; then
+        wt_info "  这一步：${_tp_n} 个包、${_tp_tasks} 个 task（apt 说：新装 ${_tp_new:-?}、升级 ${_tp_upg:-?}）"
+    else
+        wt_info "  这一步：${_tp_n} 个包、${_tp_tasks} 个 task"
+    fi
+    # 要下多少：`--print-uris` 把每个包的 URL 和大小打出来，加一下就是下载量。
+    # 只读（--print-uris 不下载）。取不到就少说一句 —— 宁可不说，不要瞎报数字。
+    # 注意两个坑（都踩过）：`split(x, a, " ")` 里**单个空格**是"按空白切、去掉首尾"，
+    # 所以 a[1] 是文件名、a[2] 才是字节数（不是 a[3]，那是 MD5Sum）；
+    # 行首那个单引号也别用 `.` 去配（`^.http` 能歪打正着，读的人却以为配的是 h）。
+    _tp_sum=$(LC_ALL=C apt-get --print-uris -y install $_tp_pkgs 2>/dev/null \
+              | awk -F"'" 'index($0, "http") == 2 {split($3, a, " "); s += a[2]; n++}
+                           END {if (n) printf "%.1f MB（%d 个文件）", s/1048576, n}')
+    [ -n "$_tp_sum" ] && wt_info "  要下载：$_tp_sum"
+}
+
 wt_task_run() {
     _runner=$1; _src=$2; _marker=$3; _desc=$4; _cwd=$5
     _mfile="$WTOOL_STATE/$WTOOL_PROJECT_ID/provisioned/$_marker"
@@ -637,6 +687,21 @@ wt_task_run() {
 请手动执行（包名逐版本不同，22.04+ 是 ansible-core，20.04 是 ansible）：
   $(wt_priv)apt-get install -y --no-install-recommends ansible-core
   $(wt_priv)apt-get install -y --no-install-recommends ansible"
+                # profile_tasks：每个 task 跑完打一行耗时，最后给一张表 ——
+                # "看得见进度"里最省事的那一半（另一半在 wt_task_plan_report）。
+                #
+                # ⚠️ 先确认它真的在：各发行版的 ansible 打包不一样，24.04 的
+                # ansible-core 里**没有**这个插件，写死会得到一句
+                # "[WARNING]: Skipping callback plugin 'profile_tasks', unable to load"
+                # （实测）。有就用，没有就算了 —— 我们自己的"用时"那行是兜底。
+                if [ -z "${ANSIBLE_CALLBACKS_ENABLED:-}" ]; then
+                    _cb_dir=$(python3 -c 'import ansible.plugins.callback as c, os
+print(os.path.dirname(c.__file__))' 2>/dev/null || true)
+                    if [ -n "$_cb_dir" ] && [ -f "$_cb_dir/profile_tasks.py" ]; then
+                        ANSIBLE_CALLBACKS_ENABLED=profile_tasks
+                        export ANSIBLE_CALLBACKS_ENABLED
+                    fi
+                fi
                 ansible-playbook -i localhost, -c local "$_src"
                 ;;
             *)
@@ -1299,6 +1364,11 @@ wt_apt_record_new() {   # <项目id> <before文件> <after文件>
         printf '%s\t%s\n' "$_ar_p" "$(date +%Y-%m-%dT%H:%M:%S%z)"
     done >> "$WTOOL_STATE/$_ar_id/apt.tsv" 2>/dev/null || true
     wt_info "记账：本次新装了 $(printf '%s\n' "$_ar_new" | awk 'END{print NR}') 个包（sudo-uninstall 会卸掉它们）"
+    # 顺手把名字列出来（最多 12 个）：只说个数的话，用户还是不知道装了什么
+    printf '%s\n' "$_ar_new" | head -12 | tr '\n' ' ' | sed 's/^/        /' >&2
+    _ar_rest=$(printf '%s\n' "$_ar_new" | awk 'END{print NR-12}')
+    [ "${_ar_rest:-0}" -gt 0 ] && printf '        …（还有 %s 个）\n' "$_ar_rest" >&2
+    printf '\n' >&2
 }
 
 wt_apt_remove_recorded() {   # <项目id>

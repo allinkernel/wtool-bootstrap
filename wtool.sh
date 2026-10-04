@@ -1765,8 +1765,17 @@ wt_sudo_install_one() {   # <项目目录> <项目 id> [--dry-run] [--force]
                 continue
             fi
             wt_info "task[$_runner]: $_desc"
+            # 跑之前先说清楚这一步要装什么、大概要下多少；跑完报耗时。
+            # 用户 2026-10-04 的反馈：ansible 中间那几分钟只看得到"在等"，
+            # 看不到"装了几个、还剩几个、下多快"。
+            if [ "$_runner" = ansible ]; then
+                wt_task_plan_report "$_src"
+            fi
+            _tk_t0=$(date +%s)
             wt_task_run "$_runner" "$_src" "$_marker" "$_desc" \
                 "${WTOOL_SOURCE_DIR:-$WTOOL_PROJECT_ROOT}"
+            _tk_t1=$(date +%s)
+            wt_info "  ↑ 这一步用时 $((_tk_t1 - _tk_t0))s"
         done < "$_scratch/tasks.tsv"
     fi
 

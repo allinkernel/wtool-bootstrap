@@ -18,6 +18,10 @@
 #   ansible        os/ubuntu 用它装系统包（provision 那一步）
 set -eu
 
+# 测试用的三个钩子（真环境里就是默认值）：
+#   ENV_APT_HELPER  apt-helper 的路径 —— 测速靠它下载；测试里换成打桩的
+#   ENV_APT_DIR     写源/备份的地方 —— 测试里指向临时目录，别动真的 /etc/apt
+#   ENV_CODENAME    发行版代号 —— 不设就从 /etc/os-release 读
 env_say()  { printf 'wtool-install: %s\n' "$*"; }
 env_warn() { printf 'wtool-install: 警告: %s\n' "$*" >&2; }
 
@@ -45,15 +49,26 @@ env_need_root() {
 # 需要的时候（比如容器里走代理 502）用环境变量打开：
 #     WTOOL_MIRROR=mirrors.ustc.edu.cn ./install.sh
 env_use_mirror() {
-    [ -n "${ENV_MIRROR:-}" ] || return 0
-    env_say "换 apt 源 → $ENV_MIRROR"
+    _um_host=${1:-${ENV_MIRROR:-}}
+    [ -n "$_um_host" ] || return 0
+    ENV_MIRROR=$_um_host
+    env_say "换 apt 源 → $_um_host"
+    # 先把**原来的**源文件备份一份：万一这个镜像不好用，得有路回去。
+    # （以前是直接删掉原源 —— 换源失败就没退路了。）
+    _um_dir=${ENV_APT_DIR:-/etc/apt}
+    if [ ! -d "$_um_dir/wtool-sources.bak" ]; then
+        mkdir -p "$_um_dir/wtool-sources.bak" 2>/dev/null || true
+        cp -a "$_um_dir/sources.list" "$_um_dir/wtool-sources.bak/" 2>/dev/null || true
+        mkdir -p "$_um_dir/wtool-sources.bak/sources.list.d" 2>/dev/null || true
+        cp -a "$_um_dir/sources.list.d/." "$_um_dir/wtool-sources.bak/sources.list.d/" 2>/dev/null || true
+    fi
     . /etc/os-release 2>/dev/null || true
     [ -n "${VERSION_CODENAME:-}" ] || { env_warn "读不出 VERSION_CODENAME，跳过换源"; return 0; }
 
-    mkdir -p /etc/apt/sources.list.d
+    mkdir -p "$_um_dir/sources.list.d"
     # deb822（.sources）在 apt 1.1 就有了，20.04 的 apt 2.0 也认。
     # 曾经误以为 focal 不认，走了弯路 —— 见 harness/docs/hazards.md。
-    cat > /etc/apt/sources.list.d/wtool-mirror.sources <<EOF
+    cat > "$_um_dir/sources.list.d/wtool-mirror.sources" <<EOF
 Types: deb
 URIs: http://$ENV_MIRROR/ubuntu/
 Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports $VERSION_CODENAME-security
@@ -62,8 +77,8 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
     # 原来的源文件要清掉，否则它还指着官方源，换源等于没换。
     # 20.04 是 /etc/apt/sources.list，24.04 是 sources.list.d/ubuntu.sources —— 两种都清。
-    rm -f /etc/apt/sources.list 2>/dev/null || true
-    for _f in /etc/apt/sources.list.d/*; do
+    rm -f "$_um_dir/sources.list" 2>/dev/null || true
+    for _f in "$_um_dir"/sources.list.d/*; do
         case $_f in
             */wtool-mirror.sources) ;;
             *) rm -f -- "$_f" 2>/dev/null || true ;;
@@ -71,40 +86,301 @@ EOF
     done
 }
 
+# 把这次的选择记到状态目录：`<代号>\t<主机名|->\t<来源>\t<时间>`。
+#
+# 为什么记：**系统层也要换源**（项目清单里的
+# `<sudo-install kind="apt-mirror" mirror="auto"/>`）。它得知道"这台机器上已经
+# 换过了、换成哪个" —— 否则两处各写一份源文件，apt 会警告
+# "Target Packages ... is configured multiple times"，装包任务会失败
+# （2026-10-04 实测，见 harness/docs/hazards.md H20）。
+# 引擎读的就是这个文件（`lib/wtool_plan.py` 的 `_recorded_mirror`）。
+env_mirror_record() {   # <代号> [主机名]
+    _mr_code=$1; _mr_host=${2:--}
+    _mr_state=${WTOOL_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/wtool}
+    mkdir -p "$_mr_state" 2>/dev/null || return 0
+    printf '%s\t%s\tinstall.sh\t%s\n' "$_mr_code" "$_mr_host" \
+        "$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || echo -)" \
+        > "$_mr_state/mirror.txt" 2>/dev/null || true
+}
+
+# ── 镜像：测速 → 让用户挑（用户 2026-10-04 要求）──────────────────────
+#
+# 以前是"系统自带的源能用就不动它"。那条规矩来自一次教训（换源之后 apt 卡死
+# 500 秒，而系统源 153 秒能跑完）—— **能跑通的路径不该为了"可能更快"去动它**。
+# 但它有个前提：系统源和国内镜像**速度差不多**。实测不是这样（2026-10-04，
+# 同一个文件 dists/noble/main/binary-amd64/Packages.gz 的 1.4 MB）：
+#
+#     mirrors.tuna.tsinghua.edu.cn   0.17s
+#     mirrors.huaweicloud.com        0.25s
+#     mirrors.aliyun.com             0.35s
+#     mirrors.163.com                0.35s
+#     mirrors.ustc.edu.cn            0.39s
+#     archive.ubuntu.com（官方）      2.66s     ← 慢 15 倍
+#
+# 官方源那 2.66 秒摊到 python3+git+curl（几十 MB）上就是好几分钟，
+# 用户在容器里就是这么被卡住的。所以现在**先测速、再让用户挑**，
+# 但保留原来的教训：测不通/挑错了要有退路（见 env_apt_ready 的兜底）。
+
+# 一行一个候选：<代号> <主机名> <给人看的名字>
+# 代号就是 `WTOOL_MIRROR=<代号>` 能用的那个；主机名要能在 /ubuntu/ 下找到发行版目录。
+env_mirror_list() {
+    cat <<'EOF'
+tuna mirrors.tuna.tsinghua.edu.cn 清华
+huawei mirrors.huaweicloud.com 华为云
+aliyun mirrors.aliyun.com 阿里云
+netease mirrors.163.com 网易
+ustc mirrors.ustc.edu.cn 中科大
+tencent mirrors.cloud.tencent.com 腾讯云
+official archive.ubuntu.com 官方
+EOF
+}
+
+# 候选镜像里发行版目录叫什么：x86 是 ubuntu/，arm 那几家在 ubuntu-ports/
+env_mirror_dir() {
+    case ${WTOOL_ARCH:-$(uname -m 2>/dev/null || echo x86_64)} in
+        aarch64|arm64|armv7l|armhf|riscv64) printf 'ubuntu-ports' ;;
+        *) printf 'ubuntu' ;;
+    esac
+}
+
+# 测一个镜像：下载它的 Packages.gz（约 1.4 MB），**最多 3 秒**。
+# 打印 "<字节> <毫秒>"；连不上（一个字节都没下来）返回 1。
+#
+# 为什么用 /usr/lib/apt/apt-helper 而不是 curl：这一步**还没装 curl**
+# （正在装的就是它）。apt-helper 是 apt 自带的，任何 Ubuntu 上都有；
+# 而且它走的是 apt 自己的下载路径，量出来的速度就是 apt 装包时的速度。
+# 为什么"3 秒掐断也能算速度"：慢镜像下不满 3 秒下的字节数/用时就是它的真实速率；
+# 快镜像会在 3 秒内下完，那个数就是它的真实速率。两边都可比。
+env_mirror_probe() {   # <主机名> <发行版代号>
+    _pb_host=$1; _pb_code=$2
+    _pb_dir=$(env_mirror_dir)
+    _pb_url="http://$_pb_host/$_pb_dir/dists/$_pb_code/main/binary-amd64/Packages.gz"
+    _pb_helper=${ENV_APT_HELPER:-/usr/lib/apt/apt-helper}
+    _pb_out=/tmp/wtool-mirror-probe.$$
+    rm -f -- "$_pb_out" 2>/dev/null || true
+    _pb_t0=$(date +%s%N 2>/dev/null || echo 0)
+    # DIRECT：测的就是"直连这个镜像"——换源之后 apt 也是直连（见 env_apt_bypass_proxy）。
+    # 走代理测会把代理的速度算到镜像头上，选出来的"最快"就是假的。
+    timeout 3 "$_pb_helper" download-file \
+        -o "Acquire::http::Proxy::$_pb_host=DIRECT" \
+        "$_pb_url" "$_pb_out" >/dev/null 2>&1 || true
+    _pb_t1=$(date +%s%N 2>/dev/null || echo 0)
+    _pb_bytes=$(stat -c%s "$_pb_out" 2>/dev/null || echo 0)
+    rm -f -- "$_pb_out" 2>/dev/null || true
+    _pb_ms=$(( (_pb_t1 - _pb_t0) / 1000000 ))
+    [ "${_pb_ms:-0}" -gt 0 ] || _pb_ms=1
+    [ "${_pb_bytes:-0}" -gt 0 ] || return 1
+    printf '%s %s\n' "$_pb_bytes" "$_pb_ms"
+}
+
+# 把 "<字节> <毫秒>" 说成人话：6.83 MB/s / 171 KB/s
+env_mirror_rate() {   # <字节> <毫秒>
+    _rt_kbps=$(( $1 / $2 ))          # 字节/毫秒 == KB/s
+    if [ "$_rt_kbps" -ge 1024 ]; then
+        printf '%d.%02d MB/s' "$((_rt_kbps / 1024))" "$(( (_rt_kbps % 1024) * 100 / 1024 ))"
+    elif [ "$_rt_kbps" -ge 1 ]; then
+        printf '%d KB/s' "$_rt_kbps"
+    else
+        printf '%d B/s' "$(( $1 * 1000 / $2 ))"
+    fi
+}
+
+env_mirror_secs() {   # <毫秒>
+    printf '%d.%02ds' "$(( $1 / 1000 ))" "$(( ($1 % 1000) / 10 ))"
+}
+
+# 测速 → 画表 → 问用户 → 打印选中的 "<代号> <主机名>"
+#
+# 非交互（没有终端可问）时**自动选最快的**并说明 —— 脚本里跑的命令绝不该卡在等输入上
+# （和 publish-release 那条规矩一致）。
+env_mirror_pick() {
+    . /etc/os-release 2>/dev/null || true
+    _pk_code=${ENV_CODENAME:-${VERSION_CODENAME:-}}
+    [ -n "$_pk_code" ] || { env_warn "读不出 VERSION_CODENAME，跳过测速"; return 1; }
+
+    # 这一段全是**给人看的**：表格、提示、问话都走 stderr。
+    # 为什么：函数用 stdout 返回"选中的镜像"，调用方是 `$(...)` 捕获 ——
+    # 提示打到 stdout 就会被当成返回值（实测把 "wtool-install:" 当成了代号）。
+    env_say "  测速（各站点直连取 dists/$_pk_code/main/binary-amd64/Packages.gz，最多 3 秒）" >&2
+    _pk_tmp=$(mktemp 2>/dev/null || echo /tmp/wtool-mirror.$$)
+    : > "$_pk_tmp"
+    _pk_i=0
+    env_mirror_list | while read -r _c _h _n; do
+        [ -n "${_h:-}" ] || continue
+        _pk_i=$((_pk_i + 1))
+        if _r=$(env_mirror_probe "$_h" "$_pk_code"); then
+            printf '%s\t%s\t%s\t%s\t%s\n' "$_pk_i" "$_c" "$_h" "$_n" "$_r" >> "$_pk_tmp"
+        else
+            printf '%s\t%s\t%s\t%s\t-\n' "$_pk_i" "$_c" "$_h" "$_n" >> "$_pk_tmp"
+        fi
+    done
+
+    # 按速度排（失败的排最后），最快的在第一行。
+    # ⚠️ 这里踩过一次：一开始写的是"把速度取负、再按字符串升序" ——
+    #    `-0000000000005240.0000` 和 `-0000000000000080.0000` 按**字符串**比，
+    #    慢的那个反而排在前面（负号后第一位 '0' < '5'），于是表里最慢的成了 #1、
+    #    默认选项就是官方源。改成 `sort -rn` 按数值降序，别再自己造排序。
+    _pk_sorted=$(mktemp 2>/dev/null || echo /tmp/wtool-mirror-s.$$)
+    awk -F'\t' '{
+        if ($5 == "-") { kbps = -1 }
+        else { split($5, a, " "); kbps = a[1] / a[2] }
+        printf "%.4f\t%s\n", kbps, $0
+    }' "$_pk_tmp" | LC_ALL=C sort -rn | cut -f2- > "$_pk_sorted"
+
+    # 画表（宽度写死，数据行都是 ASCII，不存在 CJK 对不齐的问题）
+    # 宽度写死；数据行必须是**纯 ASCII** —— printf 的 %-10s 按字节补空格，
+    # 中文（如"连不上"）会算错宽度，表格立刻歪（实测过）。
+    printf '  ┌────┬──────────────────────────────┬────────────┬────────┐\n' >&2
+    printf '  │  # │ 镜像                         │ 速度       │ 用时   │\n' >&2
+    printf '  ├────┼──────────────────────────────┼────────────┼────────┤\n' >&2
+    _pk_n=0
+    while IFS='	' read -r _i _c _h _n _r; do
+        [ -n "${_h:-}" ] || continue
+        _pk_n=$((_pk_n + 1))
+        if [ "$_r" = "-" ]; then
+            printf '  │ %2s │ %-28s │ %-10s │ %-6s │\n' "$_pk_n" "$_h" "n/a" "-" >&2
+        else
+            _b=${_r%% *}; _ms=${_r##* }
+            printf '  │ %2s │ %-28s │ %-10s │ %-6s │\n' "$_pk_n" "$_h" \
+                "$(env_mirror_rate "$_b" "$_ms")" "$(env_mirror_secs "$_ms")" >&2
+        fi
+    done < "$_pk_sorted"
+    printf '  └────┴──────────────────────────────┴────────────┴────────┘\n' >&2
+
+    _pk_first=$(sed -n '1p' "$_pk_sorted")
+    _pk_first_host=$(printf '%s\n' "$_pk_first" | cut -f3)
+    _pk_first_code=$(printf '%s\n' "$_pk_first" | cut -f2)
+    _pk_first_rate=$(printf '%s\n' "$_pk_first" | cut -f5)
+    if [ "$_pk_first_rate" = "-" ]; then
+        rm -f -- "$_pk_tmp" "$_pk_sorted"
+        env_warn "  所有镜像都连不上（是不是要走代理？）—— 保持系统自带的源"
+        return 1
+    fi
+
+    _pk_choice=""
+    if [ -t 0 ]; then
+        printf '  选一个 [1-%s]（回车 = 1，最快的是 %s）：' "$_pk_n" "$_pk_first_host" >&2
+        _pk_try=0
+        while [ "$_pk_try" -lt 3 ]; do
+            _pk_try=$((_pk_try + 1))
+            read -r _ans || _ans=""
+            case $_ans in
+                "") _pk_choice="1"; break ;;
+                *[!0-9]*) printf '  请输入 1-%s 之间的数字：' "$_pk_n" >&2 ;;
+                *) if [ "$_ans" -ge 1 ] && [ "$_ans" -le "$_pk_n" ]; then _pk_choice=$_ans; break
+                   else printf '  请输入 1-%s 之间的数字：' "$_pk_n" >&2; fi ;;
+            esac
+        done
+        [ -n "$_pk_choice" ] || { _pk_choice=1; env_warn "  没选，用最快的那个"; }
+    else
+        _pk_choice=1
+        env_say "  非交互环境：自动选最快的 #1（$_pk_first_host）" >&2
+    fi
+
+    _pk_row=$(sed -n "${_pk_choice}p" "$_pk_sorted")
+    rm -f -- "$_pk_tmp" "$_pk_sorted"
+    printf '%s %s\n' "$(printf '%s' "$_pk_row" | cut -f2)" "$(printf '%s' "$_pk_row" | cut -f3)"
+    return 0
+}
+
 # 挑一个能用的 apt 源。先试系统自带的，实在不行再换国内镜像。
 env_apt_ready() {
     env_say "检查 apt 源"
 
-    # **先试系统自带的源，能用就不动它。**
+    # ── 用户显式指定：不测速，直接用 ────────────────────────────────
+    #   WTOOL_MIRROR=ustc        按代号（见 env_mirror_list）
+    #   WTOOL_MIRROR=mirrors.aliyun.com   直接给主机名
+    #   WTOOL_MIRROR=official    保持系统自带的源（不换）
+    if [ -n "${WTOOL_MIRROR:-}" ]; then
+        case $WTOOL_MIRROR in
+            official|system|no|off|"")
+                # ⚠️ 这里必须 return —— 少写一个 return 就会**继续往下走**
+                # 去测速、然后把用户明确要用的系统源换掉（测试抓到过：
+                # "official = 不换源" 通过了，但它其实换了，只是没打印）
+                env_say "  按 WTOOL_MIRROR=$WTOOL_MIRROR：保持系统自带的源"
+                env_mirror_record official
+                env_apt_try 2 apt-get update -qq >/dev/null 2>&1 \
+                    || env_warn "  系统自带的源更新不了 —— 网络问题，下面的装包大概率会失败"
+                return 0 ;;
+            *)
+                _wm_host=$WTOOL_MIRROR
+                case $WTOOL_MIRROR in
+                    *.*) ;;   # 已经是主机名
+                    *) _wm_host=$(env_mirror_list | awk -v c="$WTOOL_MIRROR" '$1 == c {print $2; exit}') ;;
+                esac
+                if [ -n "$_wm_host" ]; then
+                    env_say "  按 WTOOL_MIRROR 指定：$_wm_host"
+                    env_mirror_record "${WTOOL_MIRROR}" "$_wm_host"
+                    env_apt_bypass_proxy "$_wm_host"
+                    env_use_mirror "$_wm_host"
+                    if env_apt_try 2 apt-get update -qq >/dev/null 2>&1; then
+                        env_say "  换源后可用"
+                    else
+                        env_warn "  指定的源不好用，放回原来的源"
+                        env_apt_restore_sources
+                        env_apt_try 2 apt-get update -qq >/dev/null 2>&1 || true
+                    fi
+                    return 0
+                fi
+                env_warn "  WTOOL_MIRROR=$WTOOL_MIRROR 不认识（用代号或主机名），改成测速" ;;
+        esac
+    fi
+
+    # ── 测速 → 让用户挑（用户 2026-10-04 要求）─────────────────────
     #
-    # 我一度改成"检测到代理就直接换国内镜像"，理由是 apt 走代理又慢又容易 502。
-    # 那次改动**引入了新的失败模式**：换源之后的 apt-get update 直接卡死
-    # （500 秒没动静），而原来"先试系统源"的路子实测 153 秒就能跑完。
+    # 为什么不"系统源能用就先用"：能用 ≠ 快。实测官方源比国内镜像慢 15 倍
+    # （同一个 1.4 MB 的文件：官方 2.66s，清华 0.17s），而这一步要装
+    # python3 + git + curl 几十 MB —— 差的就是好几分钟。
     #
-    # 教训：**能跑通的路径不要为了"可能更快"去动它。**
-    # 慢是缺点，卡死是故障，两者不是一个量级。真想优化也得先有测量，
-    # 而不是拿一个没验证过的改动去替换一个验证过的。
-    #
-    # 代理相关的正确做法在下面那条分支里：**只在系统源真的失败时**，
-    # 换国内镜像并给它开 DIRECT（`env_apt_bypass_proxy`）。
-    if apt-get update -qq >/dev/null 2>&1; then
-        env_say "  系统自带的源可用"
+    # ⚠️ 保留上一版的教训：**换源是"可能卡死"的那条路**（曾经 500 秒没动静），
+    # 所以这里三道保险：① 只在测速有结果时才换 ② 换完 apt-get update 不过就
+    # ③ 把原源放回去。任何一道失败都退回"系统自带的源"。
+    _picked=$(env_mirror_pick) || _picked=""
+    _pick_code=${_picked%% *}
+    _pick_host=${_picked##* }
+    if [ -z "$_pick_code" ] || [ "$_pick_code" = "official" ]; then
+        env_say "  用系统自带的源"
+        env_mirror_record official
+        env_apt_try 2 apt-get update -qq >/dev/null 2>&1 \
+            || env_warn "  系统自带的源更新不了 —— 网络问题，下面的装包大概率会失败"
         return 0
     fi
-    _m=${ENV_MIRROR:-mirrors.ustc.edu.cn}
-    env_warn "  系统自带的源不可用，换 $_m"
-    ENV_MIRROR=$_m
-    # 关键：换源之后**不要让 apt 再走代理**。
-    # 容器里 HTTP_PROXY 是设着的（container-proxy.sh 接的宿主代理），
-    # apt 默认对所有 http 都走它 —— 于是"换国内镜像"只是换了个域名，
-    # 路还是同一条，照样 502。国内镜像直连最快，绕代理纯属自找。
-    env_apt_bypass_proxy "$_m"
-    env_use_mirror
-    apt-get update -qq >/dev/null 2>&1 || {
-        env_warn "  换源后还是不行 —— 网络问题，下面的装包大概率会失败"
+
+    env_say "  用 $_pick_host（$_pick_code）"
+    env_mirror_record "$_pick_code" "$_pick_host"
+    # 关键：换源之后**不要让 apt 再走代理**。容器里 HTTP_PROXY 是设着的
+    # （container-proxy.sh 接的宿主代理），apt 默认对所有 http 都走它 ——
+    # 于是"换国内镜像"只是换了个域名，路还是同一条。国内镜像直连最快。
+    # 测速那一步量的也是直连（DIRECT），这里对得上。
+    env_apt_bypass_proxy "$_pick_host"
+    env_use_mirror "$_pick_host"
+    if env_apt_try 2 apt-get update -qq >/dev/null 2>&1; then
+        env_say "  换源后可用"
         return 0
-    }
-    env_say "  换源后可用"
+    fi
+
+    # 挑的那个不好用 → 退回原来的源（这才是"能用就别乱动"那句话真正要的保护）
+    env_warn "  $_pick_host 更新不了，把原来的源放回去"
+    env_apt_restore_sources
+    if env_apt_try 2 apt-get update -qq >/dev/null 2>&1; then
+        env_say "  原来的源可用"
+    else
+        env_warn "  两条路都不行 —— 网络问题，下面的装包大概率会失败"
+    fi
+}
+
+# 换源失败时的退路：把备份的原源放回去。
+env_apt_restore_sources() {
+    _rs_dir=${ENV_APT_DIR:-/etc/apt}
+    [ -d "$_rs_dir/wtool-sources.bak" ] || return 0
+    for _f in "$_rs_dir"/sources.list.d/*; do
+        case $_f in
+            */wtool-mirror.sources) rm -f -- "$_f" 2>/dev/null || true ;;
+        esac
+    done
+    cp -a "$_rs_dir/wtool-sources.bak/sources.list" "$_rs_dir/sources.list" 2>/dev/null || true
+    cp -a "$_rs_dir/wtool-sources.bak/sources.list.d/." "$_rs_dir/sources.list.d/" 2>/dev/null || true
+    env_say "  已把原来的 apt 源放回去"
 }
 
 # 让 apt 访问某个主机时**不走代理**。
@@ -121,9 +397,9 @@ env_apt_bypass_proxy() {
             *) export "$_v=${_cur:+$_cur,}$_h" ;;
         esac
     done
-    mkdir -p /etc/apt/apt.conf.d 2>/dev/null || return 0
+    mkdir -p "${ENV_APT_DIR:-/etc/apt}/apt.conf.d" 2>/dev/null || return 0
     printf 'Acquire::http::Proxy::%s "DIRECT";\n' "$_h" \
-        > /etc/apt/apt.conf.d/99wtool-noproxy 2>/dev/null || true
+        > "${ENV_APT_DIR:-/etc/apt}/apt.conf.d/99wtool-noproxy" 2>/dev/null || true
 }
 
 # 装一个包，**按候选名依次试**。

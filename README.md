@@ -31,9 +31,9 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 ./wtool.sh bootstrap                  # 所有项目 install（不做系统层、不联网）
 ./wtool.sh check|repair [<项目>]      # 声明/日志/磁盘三者对比；只重建不删除
 ./wtool.sh status | doctor | validate | init | kill-self-forever
-./tests/run_all.sh                    # 9 组 / 550 条断言
-                                      # pairing 35 / sudo-install 24 / publish 124 / table 74
-                                      # release-copy 17 / release 62 / contract 124 / layer 46
+./tests/run_all.sh                    # 10 组 / 593 条断言
+                                      # pairing 35 / sudo-install 36 / publish 124 / table 74
+                                      # release-copy 17 / release 62 / contract 124 / layer 46 / install-env 31
                                       # docker-build 44（kind=docker 的引擎驱动构建）
 ```
 
@@ -51,7 +51,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 | `lib/wtool_plan.py` | 规划器：解析 `wtool.xml`、校验、算 rc 新内容、算发布文件表（只写 scratch） |
 | `lib/wtool_fs.sh` | 执行器：软链、原子写、journal、registry、打包/解包（**受管**写入都走这里） |
 | `lib/wtool_zip.py` | 打包工具：zip 的读写（中文名要 UTF-8 标志，系统的 zip 不设） |
-| `tests/` | 9 组断言：pairing / sudo-install / publish / table / release-copy / release / contract / docker-build / layer |
+| `tests/` | 10 组断言：pairing / sudo-install / publish / table / release-copy / release / contract / docker-build / layer / install-env |
 | `docs/spec.md` | **接口契约**（改代码前先看） |
 | `docs/manifest-schema.md` | `wtool.xml` 完整字段表 |
 | `docs/roadmap.md` | 只剩一个指针 —— 内容已并入 `harness/BACKLOG.md` |

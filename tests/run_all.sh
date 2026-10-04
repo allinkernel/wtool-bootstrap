@@ -8,7 +8,8 @@
 #   tests/release_test.sh     pack-release / unpack-release / download-release（62 条）
 #   tests/contract_test.sh    新契约：新标签、两跳软链、执行顺序、check/repair、kill（69 条）
 #   tests/layer_test.sh       layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（39 条）
-#   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）（42 条）
+#   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）（44 条）
+#   tests/install_env_test.sh install.sh 第 0 步：镜像测速 / 挑源 / 换源与退路（打桩，不联网）（27 条）
 #   tests/docker_build_real.sh 同一件事的**真 docker** 冒烟测试（人工跑，见文件头）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）
 #   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）
@@ -16,22 +17,24 @@
 set -eu
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 
-printf '########## 1/9 pairing（install/uninstall）##########\n'
+printf '########## 1/10 pairing（install/uninstall）##########\n'
 sh "$here/pairing_test.sh"
-printf '\n########## 2/9 sudo-install（系统文件/source/task）##########\n'
+printf '\n########## 2/10 sudo-install（系统文件/source/task）##########\n'
 sh "$here/provision_test.sh"
-printf '\n########## 3/9 publish-release（只上传 + release.json）##########\n'
+printf '\n########## 3/10 publish-release（只上传 + release.json）##########\n'
 sh "$here/publish_test.sh"
-printf '\n########## 4/9 table（能力表格）##########\n'
+printf '\n########## 4/10 table（能力表格）##########\n'
 sh "$here/table_test.sh"
-printf '\n########## 5/9 release-copy（解压出来的工作区）##########\n'
+printf '\n########## 5/10 release-copy（解压出来的工作区）##########\n'
 sh "$here/release_copy_test.sh"
-printf '\n########## 6/9 pack-release / unpack-release / download-release ##########\n'
+printf '\n########## 6/10 pack-release / unpack-release / download-release ##########\n'
 sh "$here/release_test.sh"
-printf '\n########## 7/9 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
+printf '\n########## 7/10 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
 sh "$here/contract_test.sh"
-printf '\n########## 8/9 layer/（OCI 镜像目录）##########\n'
+printf '\n########## 8/10 layer/（OCI 镜像目录）##########\n'
 sh "$here/layer_test.sh"
-printf '\n########## 9/9 引擎驱动容器构建（kind=docker）##########\n'
+printf '\n########## 9/10 引擎驱动容器构建（kind=docker）##########\n'
 sh "$here/docker_build_test.sh"
+printf '\n########## 10/10 install.sh 第 0 步（镜像测速 / 挑源 / 换源与退路）##########\n'
+sh "$here/install_env_test.sh"
 printf '\n全部通过。\n'

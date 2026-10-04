@@ -251,6 +251,120 @@ check "debian 上跳过" "actions   : 0 sysfile, 0 source, 0 task" "$got"
 rm -rf "$H"
 
 # --------------------------------------------------------------------------
+printf '\n== 场景 9：换源只有一处逻辑（mirror="auto" 跟随 install.sh）==\n'
+#   用户 2026-10-04 的要求：install.sh 第 0 步测速挑过镜像之后，系统层
+#   （<sudo-install kind="apt-mirror"/>）不该再按清单里写死的镜像换一次 ——
+#   两处各写一份源文件，apt 会警告 "configured multiple times"，装包任务会失败。
+#   所以把 mirror 写成 "auto"：有记录就跳过（并清掉会重复的那份）。
+newenv
+p="$H/proj9"; mkrepo "$p"
+cat > "$p/wtool.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="os/mirror" priority="5">
+  <sudo-install kind="apt-mirror" mirror="auto" dest="auto" mode="replace"
+                backup="true" when="os:ubuntu" desc="换源（跟随 install.sh）"/>
+</wtool>
+XML
+commit "$p"
+plan() {   # <scratch>
+    python3 "$boot/lib/wtool_plan.py" plan-provision "$p" --home "$H/home" \
+        --state "$H/state" --scratch "$H/$1" --os-id ubuntu --os-codename noble \
+        --arch x86_64 --src-root "$H/src" 2>&1
+}
+
+# ① 没有记录（老机器 / 没跑过 install.sh）→ 照老默认：写 ustc
+out=$(plan sc9a)
+check "没有记录时按默认 ustc 写一份" "1 sysfile" \
+      "$(printf '%s\n' "$out" | sed -n 's/^actions   : \([0-9]* sysfile\).*/\1/p')"
+check "写的是 /etc/apt/sources.list.d/ubuntu.sources" \
+      "/etc/apt/sources.list.d/ubuntu.sources" "$(cut -f2 "$H/sc9a/sysfiles.tsv")"
+
+# ② install.sh 挑过 ustc → 跳过换源，只发一条 dedup（清重复的那份）
+mkdir -p "$H/state"
+printf 'ustc\tmirrors.ustc.edu.cn\tinstall.sh\t2026-10-04T12:00:00+0800\n' \
+    > "$H/state/mirror.txt"
+out=$(plan sc9b)
+case $out in
+    *"已经换过源"*"mirrors.ustc.edu.cn"*) ok "认出 install.sh 已经换过（并说清是谁）" ;;
+    *) bad "没认出已换过" "$out" ;;
+esac
+check "跳过时不再写源文件（只发 dedup）" "dedup" "$(cut -f1 "$H/sc9b/sysfiles.tsv")"
+check "dedup 指向那个会重复的文件" "/etc/apt/sources.list.d/ubuntu.sources" \
+      "$(cut -f2 "$H/sc9b/sysfiles.tsv")"
+
+# ③ install.sh 里选了官方源 → 也跳过（不要把用户的选择改掉）
+printf 'official\t-\tinstall.sh\t2026-10-04T12:00:00+0800\n' > "$H/state/mirror.txt"
+out=$(plan sc9c)
+case $out in
+    *"选了官方源"*"跳过换源"*) ok "install.sh 选官方源时也跳过" ;;
+    *) bad "没跳过（会把用户选的官方源改掉）" "$out" ;;
+esac
+
+# ④ 清单里写死镜像（不是 auto）→ 仍然照写（项目明确要求，这是有意的）
+cat > "$p/wtool.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="os/mirror" priority="5">
+  <sudo-install kind="apt-mirror" mirror="tuna" dest="auto" mode="replace"
+                backup="true" when="os:ubuntu" desc="固定用 tuna"/>
+</wtool>
+XML
+commit "$p"
+out=$(plan sc9d)
+check "写死 mirror= 时照样出 replace" "replace" "$(cut -f1 "$H/sc9d/sysfiles.tsv")"
+grep -q 'tuna' "$H/sc9d/sysfile.0" && ok "内容用的是清单里写的那个镜像" \
+    || bad "内容没用清单里的镜像"
+
+# ⑤ dedup 那个动作：只删"由 wtool 生成"的，机器原来的文件不动
+printf '# 由 wtool 生成（kind=apt-mirror mirror=ustc）\nTypes: deb\n' > "$H/dup.sources"
+printf '# 机器原来的源\nTypes: deb\n' > "$H/orig.sources"
+( . "$boot/lib/wtool_fs.sh"
+  WTOOL_PROJECT_ID=os/mirror; export WTOOL_PROJECT_ID
+  wt_sysfile_apply dedup "$H/dup.sources" "" "" no "test" ) >/dev/null 2>&1
+[ -f "$H/dup.sources" ] && bad "wtool 生成的重复源没被清掉" || ok "wtool 生成的重复源清掉了"
+( . "$boot/lib/wtool_fs.sh"
+  WTOOL_PROJECT_ID=os/mirror; export WTOOL_PROJECT_ID
+  wt_sysfile_apply dedup "$H/orig.sources" "" "" no "test" ) >/dev/null 2>&1
+[ -f "$H/orig.sources" ] && ok "★机器原来的源文件一个字节都没动" \
+    || bad "dedup 把机器原来的源删了（那是不可逆的错）"
+rm -rf "$H"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 10：provision-packages —— 从 playbook 报出"这一步装几个包" ==\n'
+#   用户 2026-10-04 的反馈：ansible 跑起来只看得到"在等"，看不到装了什么。
+#   引擎先用它数包、问 apt 要下多少（见 wt_task_plan_report）。
+#   解析是**够用就行**的：这些 playbook 是我们自己的，不上 YAML 库
+#   （ansible 可能还没装，依赖 PyYAML 会让这一步直接崩）。
+newenv
+cat > "$H/pb.yaml" <<'YAML'
+---
+- name: 演示
+  hosts: localhost
+  tasks:
+    - name: 1/2 基础
+      ansible.builtin.package:
+        state: present
+        name:
+          - tree          # 行尾注释
+          - git
+          # 整行注释不算
+          - bat
+
+    - name: 2/2 内联写法
+      ansible.builtin.package:
+        name: [zsh, tmux]
+
+    - name: 3/3 不是装包的任务
+      ansible.builtin.command:
+        cmd: echo hi
+YAML
+got=$(python3 "$boot/lib/wtool_plan.py" provision-packages "$H/pb.yaml" | tr '\n' ' ')
+check "抠出全部包名（列表 + 内联两种写法、跳过注释）" "tree git bat zsh tmux " "$got"
+printf '' > "$H/empty.yaml"
+check "没有包就什么都不打印（不瞎猜）" "" \
+      "$(python3 "$boot/lib/wtool_plan.py" provision-packages "$H/empty.yaml")"
+rm -rf "$H"
+
+# --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 printf 'PASS: %d   FAIL: %d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

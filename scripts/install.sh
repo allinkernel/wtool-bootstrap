@@ -83,6 +83,12 @@ fi
 # ==========================================================================
 # 第 0 步：准备运行环境（发行版不同，做法不同）
 #
+# 这一步会**先给国内几个镜像站测速**（各下一个约 1.4 MB 的索引、最多 3 秒），
+# 把结果画成表让你挑，然后才装包 —— "源能用"不等于"源快"：实测官方源比国内
+# 镜像慢 15 倍，而这一步要下几十 MB（python3 + git + curl）。
+# 不想挑：WTOOL_MIRROR=official 保持系统源，WTOOL_MIRROR=<代号|主机名> 直接指定；
+# 没有终端可问时（脚本里跑）自动选最快的那个。细节见 scripts/install-env.sh 顶部。
+#
 # wtool 要能跑，最少需要 python3（规划器）和 git（读项目的 HEAD）。
 # 最小化的 docker 镜像里这两个都没有，所以要先把它们装上 ——
 # 否则下一步自举出来的东西一调用就报"缺少依赖"。
@@ -111,7 +117,8 @@ export WTOOL_WS_DIR
 if [ -n "$_env_profile" ]; then
     say "  用环境脚本：$(basename -- "$_env_profile")"
     if [ "$DRY_RUN" = 1 ]; then
-        say "  [dry-run] 会装 python3 / git / ca-certificates / curl（+ ansible）"
+        say "  [dry-run] 会先给国内几个镜像站测速、让你挑一个（WTOOL_MIRROR=official 可跳过）"
+        say "  [dry-run] 然后装 python3 / git / ca-certificates / curl（+ ansible）"
     else
         # 先加载共用逻辑，再由 profile 声明"自己不一样的地方"并调用 env_prepare。
         # profile 里不重复写装包换源那些 —— 那些所有发行版都一样。

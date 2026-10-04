@@ -205,7 +205,7 @@ env.bash 的内容 ──► ~/.wtool/.bashrc  ──► ~/.bashrc 里一个 loa
 | `src` | 全部 | 相对路径。有 `dest` 时是"要写的内容"，否则是"要跑的脚本" |
 | `dest` | 系统文件 | 绝对路径；`auto` 只和 `kind` 一起用（由引擎算） |
 | `kind` | 系统文件 | `apt-mirror` / `yum-mirror` / `distro-mirror` |
-| `mirror` | 系统文件 | `ustc`（默认）/ `tuna` / `aliyun` |
+| `mirror` | 系统文件 | `auto`（**推荐**）/ `ustc`（没记录时的默认）/ `tuna` / `aliyun` / `huawei` / `netease` / `tencent`。<br>`auto` = 跟着 `install.sh` 第 0 步挑的那个镜像走（记在 `<state>/mirror.txt`）：有记录就**跳过换源**，没有才用 `ustc` —— 见 ADR-0032 |
 | `mode` | 系统文件 | `replace`（备份后覆盖）/ `add`（不存在才建）/ `disable`（原文件改名禁用） |
 | `backup` | 系统文件 | 默认 `replace` 时为 `true` |
 | `marker` | 任务 | 幂等标记；成功后写 `$WTOOL_STATE/<id>/provisioned/<marker>` |

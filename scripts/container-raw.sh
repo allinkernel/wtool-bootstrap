@@ -85,6 +85,8 @@ cat <<'TIP'
       wtool bootstrap               # 装不需要你决策的项目
 
   第一条会自动认系统、认缺什么包、认要不要接代理 —— 不用你操心。
+  它还会**先给国内几个镜像站测速**（各下一个索引、最多 3 秒），画成表让你挑一个，
+  然后才装包 —— 官方源在容器里通常比国内镜像慢十几倍。不想挑就 WTOOL_MIRROR=official。
   想看它到底干了什么：./install.sh --dry-run
 
   ⚠️ apt 的锁：**别同时开两个都用这个 apt 卷的容器**（`-v wtool-apt-cache:/var/cache/apt`），

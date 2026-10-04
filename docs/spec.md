@@ -381,7 +381,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | 组 | 文件 | 条数 | 守什么 |
 |---|---|---|---|
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
-| sudo-install | `tests/provision_test.sh` | 24 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
+| sudo-install | `tests/provision_test.sh` | 36 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
 | publish | `tests/publish_test.sh` | 124 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行） |
 | table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
@@ -390,10 +390,10 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 46 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **519** 条断言：
+共 **593** 条断言：
 
 ```sh
-./tests/run_all.sh            # 9 组全跑
+./tests/run_all.sh            # 10 组全跑
 ./tests/contract_test.sh      # 只跑这一组
 ```
 
@@ -428,6 +428,26 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 
 **`WTOOL_PREFIX` 的语义**：编译安装的唯一前缀，`wsw.sh` 只准往这里写。
 卸载 = 删掉 `$WTOOL_PREFIX` 下对应文件（不需要 journal）。
+
+---
+
+## 10.5 换源：`install.sh` 挑一次，系统层跟着走（ADR-0032）
+
+`./install.sh` 的**第 0 步**会先给国内几个镜像站测速，画一张表让用户挑
+（非交互时自动选最快的），再换源装包。原因：`apt-get update` 在官方源上实测
+374 KB/s，而国内镜像同一个文件快十几倍 —— 而这一步要下几十 MB。
+
+| 谁 | 写什么 | 依据 |
+|---|---|---|
+| `install.sh`（`install-env.sh`） | `/etc/apt/sources.list.d/wtool-mirror.sources` | 测速 + 用户挑的；结果记进 `<state>/mirror.txt` |
+| 项目的 `<sudo-install kind="apt-mirror" mirror="auto"/>` | 一般**什么都不写** | 读 `<state>/mirror.txt`：有记录就跳过（有 `official` 也跳过），没有才按老默认 `ustc` 写 |
+
+跳过时 planner 会发一条 `dedup`，让 shell 把**以前 wtool 生成的那份**重复源文件删掉
+（机器原来的文件一个字节都不动，也不进 `system.tsv`）。
+两处各写一份的后果实测过：apt 报 `configured multiple times`，ansible 装包任务失败
+（见 `harness/docs/hazards.md` H20）。
+
+`WTOOL_MIRROR=<代号|主机名|official>` 可以跳过测速直接指定；`official` = 不换源。
 
 ---
 

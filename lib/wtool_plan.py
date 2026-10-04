@@ -636,21 +636,73 @@ def _bool_attr(node, name, default=False):
 # --------------------------------------------------------------------------
 # 镜像源生成（kind="apt-mirror" / "yum-mirror"）
 # --------------------------------------------------------------------------
+# 镜像表：**和 install.sh 的候选表要对得上**（`bootstrap/scripts/install-env.sh`
+# 的 env_mirror_list）。install.sh 挑完之后会把选择记在 <state>/mirror.txt，
+# 系统层（项目的 <sudo-install kind="apt-mirror" mirror="auto"/>）照着它来 ——
+# 两处各换一次就会出现两份源文件，apt 会警告 "configured multiple times"
+# （2026-10-04 实测，见 harness/docs/hazards.md H20）。
 APT_MIRRORS = {
     "ustc": "https://mirrors.ustc.edu.cn/ubuntu/",
     "tuna": "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/",
     "aliyun": "https://mirrors.aliyun.com/ubuntu/",
+    "huawei": "https://mirrors.huaweicloud.com/ubuntu/",
+    "netease": "https://mirrors.163.com/ubuntu/",
+    "tencent": "https://mirrors.cloud.tencent.com/ubuntu/",
 }
 DEB_MIRRORS = {
     "ustc": "https://mirrors.ustc.edu.cn/debian/",
     "tuna": "https://mirrors.tuna.tsinghua.edu.cn/debian/",
     "aliyun": "https://mirrors.aliyun.com/debian/",
+    "huawei": "https://mirrors.huaweicloud.com/debian/",
+    "netease": "https://mirrors.163.com/debian/",
+    "tencent": "https://mirrors.cloud.tencent.com/debian/",
 }
 YUM_MIRRORS = {
     "ustc": "https://mirrors.ustc.edu.cn",
     "tuna": "https://mirrors.tuna.tsinghua.edu.cn",
     "aliyun": "https://mirrors.aliyun.com",
 }
+
+
+def _recorded_mirror(state_dir):
+    """install.sh 第 0 步挑过的镜像（`<state>/mirror.txt`，写它的是 install-env.sh）。
+
+    返回 (code, host)：没记录 → ("", "")；选了官方源 → ("official", "")。
+    格式：`<代号>\t<主机名|->\t<来源>\t<时间>`。
+    """
+    text = read_text(os.path.join(state_dir, "mirror.txt"))
+    if not text:
+        return "", ""
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        code = (parts[0] if parts else "").strip()
+        host = (parts[1] if len(parts) > 1 else "").strip()
+        if host in ("-", ""):
+            host = ""
+        return code, host
+    return "", ""
+
+
+def mirror_dest_hint(kind, os_id):
+    """换源会写到哪个文件（不渲染内容时也要知道，见 plan_provision 的跳过分支）。"""
+    if kind in ("apt-mirror", "distro-mirror") and os_id in ("ubuntu", "debian"):
+        return ("/etc/apt/sources.list.d/ubuntu.sources" if os_id == "ubuntu"
+                else "/etc/apt/sources.list.d/debian.sources")
+    return ""
+
+
+def mirror_code_of_host(os_id, host):
+    """给定主机名，反查它在我们表里的代号（不是我们认得的镜像 → ""）。"""
+    if not host:
+        return ""
+    table = APT_MIRRORS if os_id == "ubuntu" else (
+        DEB_MIRRORS if os_id == "debian" else {})
+    for code, uri in table.items():
+        if host in uri:
+            return code
+    return ""
 
 
 def render_distro_mirror(kind, os_id, codename, mirror, errors):
@@ -1208,6 +1260,56 @@ def when_matches(when, os_id, arch):
     return True
 
 
+def provision_packages(args):
+    """从 playbook 里把包名抠出来（一行一个）。
+
+    为什么不上 YAML 库：这一步可能在 **ansible 还没装**的时候跑（规划 / 打印
+    "这一步要装几个包"），不能依赖 PyYAML。这些 playbook 是我们自己的，
+    结构就是 `name:` 下面一串 `- 包名`；解析不出来就少说一句，绝不猜。
+    """
+    names, seen, in_list = [], set(), False
+    try:
+        with open(args.playbook, encoding="utf-8", errors="surrogateescape") as fh:
+            lines = fh.readlines()
+    except OSError as exc:
+        raise SystemExit("读不了 %s: %s" % (args.playbook, exc))
+
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if line.lstrip().startswith("#"):
+            continue
+        # 行尾注释要去掉再匹配：`- tree   # 说明` 这种，不去掉就既不匹配
+        # "一个包名"、又把 in_list 关掉，后面那一串包全丢（测试抓到过）
+        line = re.sub(r"\s+#.*$", "", line)
+        stripped = line.strip()
+        m = re.match(r"^\s*name:\s*(.*)$", line)
+        if m and not stripped.startswith("- name:"):
+            rest = m.group(1).strip()
+            if rest in ("", "|", ">"):
+                in_list = True
+                continue
+            in_list = False
+            if rest.startswith("["):          # name: [a, b, c]
+                for item in rest.strip("[]").split(","):
+                    item = item.strip().strip("'\"")
+                    if item and item not in seen:
+                        seen.add(item)
+                        names.append(item)
+            continue
+        if in_list:
+            m2 = re.match(r"^\s*-\s+(\S+)\s*$", line)
+            if m2:
+                item = m2.group(1).strip("'\"")
+                if item and item not in seen:
+                    seen.add(item)
+                    names.append(item)
+                continue
+            if stripped:
+                in_list = False
+    for name in names:
+        print(name)
+
+
 def plan_provision(args, scratch):
     """规划 provision：system-file → source → task 三个阶段。"""
     project_root = os.path.abspath(args.project)
@@ -1250,8 +1352,36 @@ def plan_provision(args, scratch):
                     continue
                 content = read_text(abs_src)
             else:
+                # `mirror="auto"` = **听 install.sh 的**（用户 2026-10-04 要求：
+                # 换源只有一处逻辑，换过一次就不再换）。
+                #
+                # 为什么必须这样：install.sh 第 0 步已经测速换过一次源（写
+                # /etc/apt/sources.list.d/wtool-mirror.sources 并把选择记在
+                # <state>/mirror.txt）。系统层再按清单里写死的 mirror="ustc"
+                # 写一份 ubuntu.sources，机器上就有两份源文件 —— apt 会警告
+                # "Target Packages ... is configured multiple times"，
+                # 而且 ansible 的装包任务会因此失败（实测）。
+                _mirror = (entry.mirror or "ustc").lower()
+                if _mirror == "auto":
+                    _rec_code, _rec_host = _recorded_mirror(state_dir)
+                    _hint = mirror_dest_hint(entry.sf_kind, args.os_id)
+                    if _rec_code == "official":
+                        warnings.append(
+                            "install.sh 里选了官方源 → 跳过换源（%s）" % (entry.desc or entry.dest))
+                        if _hint and entry.dest == "auto":
+                            sysfile_rows.append(("dedup", _hint, "", "", "no", entry.desc))
+                        continue
+                    _rec_mirror = mirror_code_of_host(args.os_id, _rec_host)
+                    if _rec_mirror:
+                        warnings.append(
+                            "这台机器已经换过源（install.sh 选了 %s）→ 跳过换源，"
+                            "顺手清掉会重复的那份" % _rec_host)
+                        if _hint and entry.dest == "auto":
+                            sysfile_rows.append(("dedup", _hint, "", "", "no", entry.desc))
+                        continue
+                    _mirror = "ustc"      # install.sh 没说过 → 用老默认
                 content, dest_hint = render_distro_mirror(
-                    entry.sf_kind, args.os_id, args.os_codename, entry.mirror, errors)
+                    entry.sf_kind, args.os_id, args.os_codename, _mirror, errors)
                 if content is None:
                     continue
                 if entry.dest == "auto":
@@ -3480,6 +3610,9 @@ def build_parser():
     ud.add_argument("--doc", required=True)
     ud.add_argument("--rows", required=True)
 
+    ppk = sub.add_parser("provision-packages")
+    ppk.add_argument("playbook")
+
     tb = sub.add_parser("table")
     tb.add_argument("--root", required=True)
     tb.add_argument("--state", required=True)
@@ -3524,6 +3657,8 @@ def main(argv):
             print("project   : %s" % res["project_id"])
             print("actions   : %d sysfile, %d source, %d task"
                   % (len(res["sysfiles"]), len(res["sources"]), len(res["tasks"])))
+        elif args.cmd == "provision-packages":
+            provision_packages(args)
         elif args.cmd == "list-projects":
             list_projects(args.root)
         elif args.cmd == "sudo-list":
