@@ -57,7 +57,7 @@
 #   wtool                 裸跑 = 项目表（一行一个项目、一列一个能力）
 #   wtool check   [<项目>]        声明 / 日志 / 磁盘 三者对比，只报不改
 #   wtool repair  [<项目>|all]    修 check 报出来的（只重建、不删除）
-#   wtool status  [<项目目录>]    登记表 + 软链检查
+#   wtool status  [<项目>]        无参：登记表 + 软链检查；给了项目：逐列状态 + 依据
 #   wtool doctor                  环境诊断（含环境变量与项目表）
 #   wtool validate <项目目录>     检查 wtool.xml 写得对不对
 #   wtool init    <目录> [--id ID] [--priority N] [--all]
@@ -2413,7 +2413,7 @@ cmd_kill_self_forever() {
     wt_info "（sudo 装的那些还在，要撤：wtool sudo-uninstall all）"
 }
 
-cmd_status() {
+cmd_status_registry() {
     if [ $# -gt 0 ]; then
         _id=$(python3 "$PY" validate "$1" --home "$WTOOL_HOME" --state "$WTOOL_STATE" \
               >/dev/null 2>&1 && echo ok || echo fail)
@@ -3983,14 +3983,15 @@ case $_cmd in
     check)     cmd_check "$@" ;;
     repair)    wt_run_locked cmd_repair "$@" ;;
     kill-self-forever) wt_run_locked cmd_kill_self_forever "$@" ;;
-    status)    cmd_status "$@" ;;
+    status)    # 无参 = 老的"登记表 + 软链检查"；给了项目 = 新的逐列状态查询
+               #   （这里已经 shift 过了，$@ 就是剩下的参数）
+               if [ $# -eq 0 ]; then cmd_status_registry; else cmd_status "$@"; fi ;;
     doctor)    cmd_doctor "$@" ;;
     docs)      shift; [ "${1:-}" = "refresh" ] && shift
                wt_refresh_downloads ;;
     refresh-downloads) wt_refresh_downloads ;;
     init)      cmd_init "$@" ;;
     _complete) cmd_complete "$@" ;;
-    status)    shift; cmd_status "$@" ;;
     scaffold)  wt_die "scaffold 已删除（不是改名，是删掉）。新建项目用: wtool init <目录>" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;
