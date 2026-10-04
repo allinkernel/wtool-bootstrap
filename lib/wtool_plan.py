@@ -1971,17 +1971,18 @@ WT_CMD_OF = {"build": "wtool build", "install": "wtool install",
              "unpack-layer": "wtool unpack-layer", "push-layer": "wtool push-layer",
              "pull-layer": "wtool pull-layer"}
 
-DASH_COLS = [("build", ["build"]),
-             ("install", ["install"]),
-             ("uninstall", ["un", "install"]),
-             ("sudo", ["sudo"]),
-             ("sudo-uninstall", ["sudo", "-un"]),
-             ("pack", ["pack"]),
-             ("publish", ["publish"]),
-             ("download", ["down", "load"]),
-             ("unpack-layer", ["unpack", "layer"]),
-             ("push-layer", ["push", "layer"]),
-             ("pull-layer", ["pull", "layer"])]
+# 表头用**中文**，具体命令写在表格下边的对照里（用户 2026-10-04 给的对照表）。
+DASH_COLS = [("build", ["构建"]),
+             ("install", ["安装"]),
+             ("uninstall", ["卸载"]),
+             ("sudo", ["sudo安装"]),
+             ("sudo-uninstall", ["sudo卸载"]),
+             ("pack", ["做gz包"]),
+             ("publish", ["发布包"]),
+             ("download", ["下gz包"]),
+             ("unpack-layer", ["解容器层"]),
+             ("push-layer", ["推容器层"]),
+             ("pull-layer", ["拉容器层"])]
 
 
 def _hdr(title):
@@ -2062,7 +2063,7 @@ def project_status(root, state_dir, ident):
     rows = []
     for key, hdr in _dash_cols([st]):
         # 列名用 key（折起来读是 uninstall，摊开还是 uninstall）；命令单独一列
-        rows.append([key, cmds[key], WT_CMD_OF.get(key, "-"), ev.get(key, "")])
+        rows.append([hdr[0], cmds[key], WT_CMD_OF.get(key, "-"), ev.get(key, "")])
     out = ["", "项目 %s（prio %s）  %s" % (pid, prio, path),
            "  一列一个命令；状态就是看板里那一格，依据 = 「这一格是怎么看出来的」。", ""]
     out += _box([["列"], ["状态"], ["对应命令"], ["依据（这一格是怎么看出来的）"]], rows,
@@ -2279,23 +2280,17 @@ def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
     # 列名就是引擎命令，**一条都不省**（用户 2026-10-04 要求：
     # "这里不要省略 pull-layer 和 push-layer"）。没有 sudo 的机器少两列 ——
     # 那两列本来也跑不了（用户要求：没权限就别列）。
-    out.append("  列名 = 引擎命令（逐项目的那些）：")
+    out.append("  列名 → 对应的命令（表格里的中文名，下边都写着它到底是哪条）：")
     if no_sudo:
         out.append("      ⚠️ 这台机器上没有 sudo → 少列了 sudo / sudo-un 两列。")
         out.append("         拿到 sudo 权限之后重跑 wtool 就会自动出现（每次都会现探）。")
-    out.append("      build            wtool build               install     wtool install")
-    if no_sudo:
-        out.append("      uninstall        wtool uninstall")
-    else:
-        out.append("      uninstall        wtool uninstall           sudo        wtool sudo-install")
-        out.append("      sudo-un          wtool sudo-uninstall      pack        wtool pack-release")
-    if no_sudo:
-        out.append("      pack             wtool pack-release")
-    out.append("      publish          wtool publish-release     download    wtool download-release")
-    out.append("      unpack-layer     wtool unpack-layer        push-layer  wtool push-layer")
-    out.append("      pull-layer       wtool pull-layer")
-    out.append("                       （层是项目的资产：unpack 把层解成安装产物，")
-    out.append("                         push 推到镜像仓库、pull 从镜像仓库拉；三条各自一列）")
+    for _key, _hlines in DASH_COLS:
+        if no_sudo and _key in ("sudo", "sudo-uninstall"):
+            continue
+        _lbl = _hlines[0]
+        _pad = " " * max(0, 16 - _width(_lbl))
+        out.append("      %s%s%s" % (_lbl, _pad, WT_CMD_OF[_key]))
+    out.append("      解gz包        wtool unpack-release     （装东西那条路上的一步：__release/ → __output/）")
     out.append("  想知道某一格**是怎么算出来的**：wtool status <项目>（逐列给状态 + 依据 + 该敲哪条命令）")
     out.append("  格子：%s 这个项目没这项能力   %s 现在就能跑   %s 要先产出 __output/   %s 跑过了   %s 还没发布过   %s 还没装（撤不了）"
                % (LBL_NONE, LBL_CAN, LBL_TODO, LBL_DONE, LBL_UNPUB, LBL_NOTINST))
