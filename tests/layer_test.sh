@@ -222,6 +222,23 @@ _rc=0
 [ "$_rc" != 0 ] && ok "指到包外面的软链让它失败了" || bad "居然装上了（换台机器必定悬空）"
 grep -q '悬空' "$T/bad.log" && ok "说清了为什么不能要" || bad "没说清原因" "$(cat "$T/bad.log")"
 
+printf '\n== 7b. B1：被拒之后重跑 —— 不许留下"已经导出好了"的残骸 ==\n'
+#   bug 的形状（2026-10-04 复现）：wt_owned_scan 先把 OWNED.tsv 写进 __output/，
+#   再去检查包外软链、然后 return 1。于是"失败"留下了一个**成功标记** ——
+#   重跑时跳过判据 `[ -f …/OWNED.tsv ]` 把它当成"已经导出好了"：
+#   静默 rc=0（wtool build 还会照记账）。判据：失败不留残骸 + 重跑仍然失败。
+[ -e "$P/__output/ubuntu_24.04/bad" ] \
+    && bad "被拒之后 __output/ 里留了残骸（重跑会被骗成成功）" \
+    || ok "★被拒之后不留残骸（没有 bad/ 这个目录）"
+chk "★也没有留下导出的临时目录" "0" \
+    "$(find "$P/__output" -maxdepth 2 -name '.bad.export.*' 2>/dev/null | wc -l | tr -d ' ')"
+_rc=0
+"$WT" unpack-layer terminal/demo --layer=bad > "$T/bad2.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "★重跑仍然失败（没有被当成已经导出好了）" \
+    || bad "重跑报成功了（B1 的假成功：失败被当成已导出）"
+[ -e "$P/__output/ubuntu_24.04/bad" ] && bad "重跑之后又留了残骸" || ok "重跑也不留残骸"
+
+
 printf '\n== 8. push-layer：__layer/<target>/ → 镜像仓库（docker tag + docker push）==\n'
 #   第 7 节往 index.json 里塞了一个没有 io.wtool.image 的条目（手造的）——
 #   推到最后会撞上它，正好验"半截不推"。

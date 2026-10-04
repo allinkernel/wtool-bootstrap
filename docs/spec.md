@@ -720,6 +720,11 @@ apt-get update && apt-get install -y --no-install-recommends \
 > 或者怀疑某一层是旧的，就用它，别去手工 `docker rmi` + 删 `__layer/` + 删 `__output/`
 > 三件套（漏掉任何一件都会被对应的那条判据跳过）。
 
+**导出是"先做在临时目录、校验通过才 rename 落位"**（2026-10-04 修）：`wt_layer_export`
+先解到 `__output/<target>/.<层名>.export.<pid>/`，`wt_owned_scan` 校验通过才
+`mv` 成 `__output/<target>/<层>/`。失败（例如层里有指向包外的软链）时**一个残骸都不留** ——
+否则下一轮会被判据 ③ 当成"已经导出好了"，静默 rc=0（还要给账本记一行背书）。
+
 契约文件分两半（ADR-026 §4）：
 
 | | 放哪 | 内容 |
@@ -938,7 +943,7 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 |---|---|---|---|
 | `_layer-save` | `docker` → `__layer/<target>/` | `docker` | `docker save <镜像> \| tar -x -C __layer/<target>/`（**tar 只当管道，不落盘**）；`index.json` 要**合并**（直接解第二个 `save` 会覆盖第一个的条目）；annotation 记 `io.wtool.layer` / `io.wtool.target` / `io.wtool.image` |
 | `_layer-load` | `__layer/<target>/` → `docker` | `docker` | `tar -c -C __layer/<target>/ . \| docker load`，装回来是**同一个 image ID** |
-| `unpack-layer` | `__layer/<target>/` → `__output/<target>/<层>/` | 什么都不用 | 顺着 `index.json → manifest → layers[-1]` 找到**顶层 blob**，直接解（`--strip-components=2` 剥掉 `root/.wtool`，丢掉 `.wh.` 白障），再扫一遍生成 `OWNED.tsv`。**不联网、不要 docker** |
+| `unpack-layer` | `__layer/<target>/` → `__output/<target>/<层>/` | 什么都不用 | 顺着 `index.json → manifest → layers[-1]` 找到**顶层 blob**，直接解（`--strip-components=2` 剥掉 `root/.wtool`，丢掉 `.wh.` 白障），再扫一遍生成 `OWNED.tsv`。**不联网、不要 docker**；**解在临时目录、校验通过才 rename 落位** —— 被拒（层里有指向包外的软链）时 `__output/` 里不留残骸 |
 | `push-layer` | `__layer/<target>/` → 镜像仓库 | **`docker`**（构建机上） | tag 是 `<层名（/ 换成 -）>-<target>`；先 `docker load` 整棵布局再 `docker push` —— **不是** `crane push`（它把整个 blob 塞进一个 PATCH，大层会被服务器 reset，且重试从 offset 0 重来） |
 | `pull-layer` | 镜像仓库 → `__layer/<target>/` | **`skopeo`** | **目标机不需要 docker**；`skopeo copy --all docker://… oci:__layer/<target>:<tag>` —— skopeo 写布局时会**合并** `index.json`、blob 去重；拉完由引擎补上 `io.wtool.layer` / `io.wtool.target` annotation。缺 skopeo 直接 die 并告诉你 `apt install skopeo` |
 

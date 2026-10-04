@@ -3951,6 +3951,10 @@ INNER_PY
 #    把"目标的内容"记成"这个文件的内容"（2026-09-26 实测踩过：
 #    发布出去的包在干净机器上因此根本装不上）。
 # ⚠️ 指向 payload **外面**的软链换台机器必然是断的 —— 这一层不能用，直接失败。
+# ⚠️ **OWNED.tsv 只在"这一层确认能用"之后才落位**（B1，2026-08-04/2026-10-04 两次踩过）：
+#    先写 OWNED.tsv 再检查软链，等于把"失败"这件事写成了一个**成功标记** ——
+#    重跑时 `[ -f …/OWNED.tsv ]` 那条跳过判据会把这层当成"已经导出好了"，
+#    于是**静默 rc=0**，账本还给这一层记一行背书。所以：写临时文件 → 校验 → mv 落位。
 wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径> [允许指向的系统路径文件]
     _os_pay=$1; _os_name=$2; _os_out=$3; _os_allow=${4:-}
     # ‼️ 这个临时文件必须放在 **payload 外面**：放在里面的话，下面那条 find 会把
@@ -3959,6 +3963,9 @@ wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径> [允许指向
     #    install.sh 会拿它去校验，直接报 "FAILED open or read" 装不上。
     #    （2026-09-28 用真 astronvim 的层彩排时现的原形：每层都正好多 1 条。）
     _os_esc=$(mktemp "${TMPDIR:-/tmp}/wtool-esc.XXXXXX")
+    # 也在 payload **外面**（同一条理由），写完校验过才 mv 成 OWNED.tsv
+    _os_tmp="$_os_out.tmp.$$"
+    rm -f -- "$_os_tmp"
     ( cd -- "$_os_pay" && find . -type f -o -type l | sed 's|^\./||' | LC_ALL=C sort ) \
     | while IFS= read -r _os_f; do
         _os_p="$_os_pay/$_os_f"
@@ -3991,17 +3998,20 @@ wt_owned_scan() {   # <payload 目录> <层名> <OWNED.tsv 路径> [允许指向
             _os_h=$(sha256sum -- "$_os_p" 2>/dev/null | cut -d' ' -f1)
             printf '%s\t%s\t%s\n' "$_os_f" "${_os_h:--}" "$_os_name"
         fi
-    done > "$_os_out" 2>/dev/null || true
+    done > "$_os_tmp" 2>/dev/null || true
     if [ -s "$_os_esc" ]; then
         {
             echo "错误: $_os_name 这一层里有指向包**外面**的软链 —— 换台机器必然悬空:"
             sed 's/^/    /' -- "$_os_esc"
             echo "  指向系统包（apt 装出来的）的，要么把真身拷进 \$PREFIX，要么别建这条链。"
         } >&2
-        rm -f -- "$_os_esc"
+        rm -f -- "$_os_esc" "$_os_tmp"
         return 1
     fi
     rm -f -- "$_os_esc"
+    # 校验通过 → 落位（同一个目录内 mv，原子）。失败路径上一行就 return 了，
+    # OWNED.tsv **不会**出现 —— "文件在 = 这一层好了"这个约定才成立。
+    mv -f -- "$_os_tmp" "$_os_out" || return 1
     return 0
 }
 
@@ -4196,6 +4206,12 @@ cmd_push_layer() {
 #   $5=过滤清单（可选，tar --exclude-from 的形状；空=只用默认的 .wh. 过滤）
 # 三个消费者：unpack-layer（人来解一层）、push/pull 之后的验证、**kind=docker 的 build**
 # （每编完一层立刻导出 —— 这就是 ADR-025 第 4 条"一层镜像对一层 __output"）。
+#
+# ‼️ 导出是**先在临时目录里做完整、校验通过才 rename 落位**（B1）。
+#    直接往 $_le_dst 里解、失败时再删，中间态就已经含 OWNED.tsv 了 ——
+#    而跳过判据是 `[ -f $_dl_out/OWNED.tsv ]`（wt_docker_layer 的 ③），
+#    于是"上一次失败"被当成"已经导出好了"：静默 rc=0 + 账本记一行背书。
+#    临时目录放在**同一个父目录**下，rename 才是原子的（不跨文件系统）。
 wt_layer_export() {
     _le_dir=$1; _le_t=$2; _le_layer=$3; _le_root=$4; _le_filter=${5:-}
     _le_lay=$(wt_layer_dir "$_le_dir" "$_le_t")
@@ -4207,11 +4223,14 @@ wt_layer_export() {
     [ -n "$_le_name" ] || _le_name=$(basename -- "$_le_blob")
     _le_dst="$_le_root/$_le_name"
     [ -f "$_le_blob" ] || wt_die "blob 不在: $_le_blob"
-    wt_run rm -rf -- "$_le_dst"
-    wt_run mkdir -p -- "$_le_dst/payload"
+    # 临时目录名要 slug（层名可以带 `/`），以 `.` 开头：它不是一层
+    _le_stage="$_le_root/.$(wt_docker_slug "$_le_name").export.$$"
+    _le_pay="$_le_stage/payload"
+    wt_run rm -rf -- "$_le_stage"
+    wt_run mkdir -p -- "$_le_pay"
     # 层里的形状是容器内绝对路径（root/.wtool/…），payload 要的是**相对影子 $HOME**
     # 的形状 —— 剥掉前两节。剥不干净就是"装上去路径全错"（症状：装完了敲命令找不到）。
-    chmod +x "$_le_dst/payload" 2>/dev/null || true
+    chmod +x "$_le_pay" 2>/dev/null || true
     # 项目自己的导出过滤（build/export.filter）：决定"什么会被发到别人机器上"，
     # 所以它必须是显式文件，不能藏在脚本的 find | grep -v 里（ADR-025 §5）。
     _le_ex=""
@@ -4220,17 +4239,26 @@ wt_layer_export() {
         grep -v '^[[:space:]]*#' "$_le_filter" 2>/dev/null | grep -v '^[[:space:]]*$' > "$_le_ex" || true
     fi
     if [ -n "$_le_ex" ]; then
-        tar -xf "$_le_blob" -C "$_le_dst/payload" --strip-components=2 \
+        tar -xf "$_le_blob" -C "$_le_pay" --strip-components=2 \
             --wildcards 'root/.wtool/*' --exclude='*/.wh.*' --exclude-from="$_le_ex" 2>/dev/null || true
         rm -f -- "$_le_ex"
     else
-        tar -xf "$_le_blob" -C "$_le_dst/payload" --strip-components=2 \
+        tar -xf "$_le_blob" -C "$_le_pay" --strip-components=2 \
             --wildcards 'root/.wtool/*' --exclude='*/.wh.*' 2>/dev/null || true
     fi
-    chmod -R a+rX "$_le_dst/payload" 2>/dev/null || true
-    wt_owned_scan "$_le_dst/payload" "$_le_name" "$_le_dst/OWNED.tsv" \
-        "$_le_dir/build/system-paths" \
-        || wt_die "$_le_name 这一层不能用（上面列了原因）"
+    chmod -R a+rX "$_le_pay" 2>/dev/null || true
+    if ! wt_owned_scan "$_le_pay" "$_le_name" "$_le_stage/OWNED.tsv" \
+            "$_le_dir/build/system-paths"; then
+        # 校验没过 → 连临时目录一起删掉：$_le_dst 一个字节都不动
+        # （它要是还在，那是上一次**成功**的导出，这次失败不该把它毁掉）
+        wt_run rm -rf -- "$_le_stage"
+        wt_die "$_le_name 这一层不能用（上面列了原因）"
+    fi
+    # 校验通过 → 落位。先删旧的再换整个目录（不做增量覆盖）：免得上一轮的残file
+    # 混进这一轮 —— "导出"说的是"这一层当前的真实形状"。
+    wt_run rm -rf -- "$_le_dst"
+    wt_run mkdir -p -- "$(dirname -- "$_le_dst")"
+    wt_run mv -f -- "$_le_stage" "$_le_dst"
     printf '%s\n' "$_le_dst"
 }
 

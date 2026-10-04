@@ -519,6 +519,52 @@ grep -q "本地镜像: $T/mirror → /mirror:ro" "$LOG_DIR"/*.wtool.log && ok "�
     || bad "日志没说本地镜像" "$(grep -m2 '本地镜像' "$LOG_DIR"/*.wtool.log)"
 
 
+echo "== 12. B1：导出被拒的层，不许被下一轮当成『已经导出好了』 =="
+#   假成功 bug 的形状：失败的那一轮在 __output/<t>/<层>/ 里留下了 OWNED.tsv →
+#   下一次 wtool build 的跳过判据 ③ 命中 → **静默 rc=0**（还往账本记一行背书）。
+#   这里用一层真的会产出"指向包外的软链"来量（wt_owned_scan 拒收它）。
+cat > "$P/scripts/esc.sh" <<'EOF'
+#!/bin/sh
+set -e
+D="$WTOOL_TEST_ROOT/root/.wtool/usr/share/esc"
+mkdir -p "$D"
+printf 'x\n' > "$D/file.txt"
+ln -sf /etc/hostname "$D/escape"     # 指向包外 → 这一层不能用
+EOF
+chmod +x "$P/scripts/esc.sh"
+cp "$P/build/layers.tsv" "$T/layers.bak2"
+printf 'esc\ttwo\tdemo/esc\tsh /proj/scripts/esc.sh\n' >> "$P/build/layers.tsv"
+rm -rf "$P/__output/ubuntu_24.04/esc"
+_rc=0
+"$WT" build editor/demo --target=ubuntu_24.04 > "$T/b1a.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "指向包外的软链让 build 失败（rc≠0）" \
+    || bad "居然报成功了（B1 的假成功）" "$(cat "$T/b1a.log")"
+[ -e "$P/__output/ubuntu_24.04/esc" ] \
+    && bad "被拒之后 __output/ 里留了残骸" \
+    || ok "★被拒之后不留残骸（连 payload/ 都没有）"
+grep -q '悬空' "$LOG_DIR/esc.wtool.log" && ok "说清了原因（换台机器必然悬空）" \
+    || bad "没说原因" "$(tail -4 "$LOG_DIR/esc.wtool.log" 2>/dev/null)"
+# 镜像已经 commit 进 __layer/ 了（这是"构建成功、导出失败"的正常形状）——
+# 留着它下一轮只重试导出，不用重编（③ 才是这里的关键判据）
+chk "这一层在 __layer/ 里有（commit 成功了，失败的是导出）" "esc" \
+    "$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+print([(m.get("annotations") or {}).get("io.wtool.layer") for m in d["manifests"]
+       if (m.get("annotations") or {}).get("io.wtool.layer")=="esc"][0])' \
+       "$P/__layer/ubuntu_24.04/index.json" 2>/dev/null || echo "-")"
+# ★ 重跑：必须还是失败 —— bug 的形状是这里变成 rc=0 并说"就绪"
+_rc=0
+"$WT" build editor/demo --target=ubuntu_24.04 > "$T/b1b.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "★重跑仍然失败（没有被当成已经导出好了）" \
+    || bad "重跑报成功了（B1 的假成功：失败被当成已导出）" "$(cat "$T/b1b.log")"
+[ -e "$P/__output/ubuntu_24.04/esc" ] && bad "重跑之后留了残骸" || ok "重跑也不留残骸"
+grep -q '个目标就绪' "$T/b1b.log" && bad "重跑说了『就绪』（撒谎）" || ok "重跑不说『就绪』"
+grep -q 'esc' "$AF" 2>/dev/null && bad "账本给失败的层记了一行背书" \
+    || ok "账本没有给失败的层背书"
+cp "$T/layers.bak2" "$P/build/layers.tsv"
+rm -f "$P/scripts/esc.sh"
+
+
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 printf 'docker_build_test: PASS %d  FAIL %d\n' "$pass" "$fail"
