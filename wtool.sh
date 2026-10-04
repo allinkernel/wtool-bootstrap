@@ -1100,14 +1100,18 @@ EOF
             fi
             wt_record_action "$_pid" build
             if wt_docker_build "$_path" "$_pid" "$_build_target" "$_build_jobs"; then
-                # 产物账本：这条路里**没有项目脚本**（起容器/commit/导出都是引擎干的），
-                # 所以"这批产物是本机编的"只能由引擎记 —— 项目自己的 build.sh 够不着
-                # （ADR-0036）。写表的是 wt_record_artifacts（只写不算那一半）。
-                wt_record_artifacts "$_pid" "$_path" build
                 _done=$((_done + 1))
             else
                 _failed=$((_failed + 1))
             fi
+            # 产物账本：这条路里**没有项目脚本**（起容器/commit/导出都是引擎干的），
+            # 所以"这批产物是本机编的"只能由引擎记 —— 项目自己的 build.sh 够不着
+            # （ADR-0036）。写表的是 wt_record_artifacts（只写不算那一半）。
+            # ‼️ **成功和失败都要重写**：账本说的是"**当前磁盘上**的产物是谁产出的"，
+            #    失败之后磁盘上可能只剩一半（有的层导出成功、有的没有）——
+            #    只在成功时写 = 账本停在上一次"全都好了"，替已经不存在的层背书。
+            #    （ADR-0036 §四写的是"成功之后"，这一条按勘误段实现。）
+            wt_record_artifacts "$_pid" "$_path" build
             continue
         fi
 

@@ -498,6 +498,20 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 **`WTOOL_PREFIX` 的语义**：编译安装的唯一前缀，`wsw.sh` 只准往这里写。
 卸载 = 删掉 `$WTOOL_PREFIX` 下对应文件（不需要 journal）。
 
+**账本的格式**（ADR-0036，4 列 TAB，**一行一个层目录**）：
+
+```
+kind <TAB> 相对项目根的路径 <TAB> 来源 <TAB> 时间
+payload	__output/ubuntu_22.04/main	build:ubuntu_22.04	2026-10-04T21:30:12+0800
+payload	__output/ubuntu_22.04/lang/lua	build:ubuntu_22.04	2026-10-04T21:30:12+0800
+```
+
+层目录的判据是"**哪个目录里有 `OWNED.tsv`**"，不是"目录树的第几层" —— 层名可以带 `/`
+（astronvim 的 `lang/lua`、`lang/python`…），按深度遍历会把它们压成一行 `lang`。
+**整表重写**（先写临时文件再 `mv`，读的人不会撞见写了一半的表），而且
+**成功和失败都重写**：账本说的是"当前磁盘上的产物是谁产出的"，一轮构建失败之后
+磁盘上可能只剩一半 —— 只在成功时写 = 账本替已经不存在的层背书。
+
 ---
 
 ## 10.5 换源：`install.sh` 挑一次，系统层跟着走（ADR-0032）

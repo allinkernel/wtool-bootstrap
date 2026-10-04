@@ -990,17 +990,27 @@ wt_record_artifacts() {   # <项目 id> <项目目录> <来源前缀>
     # 截断重写：这张表说的是"当前磁盘上"的产物（读的人取第一条）——
     # 追加会让上一轮的来源永远压住新的（先 build 后 download 就显示不出已完成），
     # 而且每跑一轮都会堆长。截断重写还天然幂等。别改成 `>>` 追加。
-    : > "$_wa_f" 2>/dev/null || return 0
-    for _wa_t in "$_wa_out"/*/; do
-        [ -d "$_wa_t" ] || continue
-        _wa_target=$(basename -- "$_wa_t")
-        for _wa_l in "$_wa_t"*/; do
-            [ -d "$_wa_l" ] || continue
-            printf 'payload\t%s\t%s\t%s\n' \
-                "__output/$_wa_target/$(basename -- "$_wa_l")" \
-                "$_wa_src:$_wa_target" "$_wa_ts" >> "$_wa_f" 2>/dev/null || true
-        done
-    done
+    # 写法是"先写临时文件再 mv"：内容与截断重写逐字节相同，但读的人**不会**
+    # 撞见一个写了一半的表（并行构建 / 看门狗轮询时都可能正好读它）。
+    _wa_tmp="$_wa_f.tmp.$$"
+    # 一行一个**层目录**（ADR-0036 §二）：判据是"哪个目录里有 OWNED.tsv"
+    # （导出一层就给一层写一份，见 wtool.sh 的 wt_layer_export），**不是**"第几层"。
+    # 层名可以带 `/`（`lang/lua`、`lang/python`…）—— 按目录深度遍历会把它压成
+    # 一行 `lang`：那既不是一层，也让读表的人以为只有一层语言层（ADR-0036 的
+    # 例子里就是 `__output/ubuntu_22.04/lang/lua`）。
+    # payload 子树剪掉：那是这一层的内容，不是层目录。
+    ( cd -- "$_wa_out" 2>/dev/null && find . -mindepth 1 \
+          \( -name payload -type d -prune \) -o -name OWNED.tsv -type f -print ) 2>/dev/null \
+    | while IFS= read -r _wa_hit; do
+        _wa_rel=${_wa_hit#./}
+        _wa_rel=${_wa_rel%/OWNED.tsv}
+        [ -n "$_wa_rel" ] || continue
+        printf 'payload\t%s\t%s:%s\t%s\n' \
+            "__output/$_wa_rel" "$_wa_src" "${_wa_rel%%/*}" "$_wa_ts"
+    done | LC_ALL=C sort > "$_wa_tmp" 2>/dev/null
+    if [ -f "$_wa_tmp" ]; then
+        mv -f -- "$_wa_tmp" "$_wa_f" 2>/dev/null || rm -f -- "$_wa_tmp"
+    fi
     return 0
 }
 

@@ -565,6 +565,56 @@ cp "$T/layers.bak2" "$P/build/layers.tsv"
 rm -f "$P/scripts/esc.sh"
 
 
+echo "== 13. 账本（B2）：一行一个层目录（lang/x 各一行）+ 失败路径也要重写 =="
+#   ① 行粒度按 ADR-0036：`__output/<target>/<层目录>` 一行，层名可以带 `/`
+#      （astronvim 的层就叫 `lang/lua`、`lang/python`…）—— 按目录深度遍历会把它们
+#      压成一行 `lang`（那既不是一层，也让人以为只有一层语言层）。
+#   ② 失败路径也要重写：不写的话账本停在上一次"全都好了"，替磁盘上已经没有的层背书。
+cp "$P/build/layers.tsv" "$T/layers.bak3"
+cat > "$P/scripts/ok.sh" <<'EOF'
+#!/bin/sh
+set -e
+D="$WTOOL_TEST_ROOT/root/.wtool/usr/share/lang-ok"
+mkdir -p "$D"
+printf 'ok\n' > "$D/file.txt"
+EOF
+cat > "$P/scripts/bad.sh" <<'EOF'
+#!/bin/sh
+set -e
+D="$WTOOL_TEST_ROOT/root/.wtool/usr/share/lang-bad"
+mkdir -p "$D"
+printf 'bad\n' > "$D/file.txt"
+ln -sf /etc/hostname "$D/escape"     # 指向包外 → 这一层导出时被拒
+EOF
+chmod +x "$P/scripts/ok.sh" "$P/scripts/bad.sh"
+printf 'lang/ok\ttwo\tdemo/lang-ok\tsh /proj/scripts/ok.sh\n' >> "$P/build/layers.tsv"
+"$WT" build editor/demo --target=ubuntu_24.04 > "$T/b2a.log" 2>&1 \
+    || bad "带嵌套层名（lang/ok）的 build" "$(cat "$T/b2a.log")"
+chk "★lang/ok 自己一行（不是被压成 lang）" "1" \
+    "$(awk -F'\t' '$2=="__output/ubuntu_24.04/lang/ok"' "$AF" | wc -l | tr -d ' ')"
+chk "★没有 __output/ubuntu_24.04/lang 这种"中间目录"行" "0" \
+    "$(awk -F'\t' '$2=="__output/ubuntu_24.04/lang"' "$AF" | wc -l | tr -d ' ')"
+chk "六个层目录六行（含占位层 empty；来源都带 target）" "6|build:ubuntu_24.04" \
+    "$(wc -l < "$AF" | tr -d ' ')|$(cut -f3 "$AF" | sort -u | paste -sd, -)"
+# ② 失败路径：先往账本里塞一行"谎言"（磁盘上根本没有 lang/bad），再让这一轮失败 ——
+#    重写之后谎言必须消失，而**确实在磁盘上**的那些层仍然要被记着。
+printf 'payload\t__output/ubuntu_24.04/lang/bad\tbuild:ubuntu_24.04\t2026-10-04T00:00:00+0800\n' >> "$AF"
+printf 'lang/bad\ttwo\tdemo/lang-bad\tsh /proj/scripts/bad.sh\n' >> "$P/build/layers.tsv"
+_rc=0
+"$WT" build editor/demo --target=ubuntu_24.04 > "$T/b2b.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "加了必失败的层之后这一轮按预期失败" || bad "这一轮居然成功了"
+chk "★失败之后账本被重写过（塞进去的那行『谎言』没了）" "0" \
+    "$(awk -F'\t' '$2=="__output/ubuntu_24.04/lang/bad"' "$AF" | wc -l | tr -d ' ')"
+chk "★失败之后仍然如实记着磁盘上好着的层（lang/ok 还在）" "1" \
+    "$(awk -F'\t' '$2=="__output/ubuntu_24.04/lang/ok"' "$AF" | wc -l | tr -d ' ')"
+chk "失败之后行数还是 6（整表重写：不丢好层、不追加坏层）" "6" \
+    "$(wc -l < "$AF" | tr -d ' ')"
+[ -e "$P/__output/ubuntu_24.04/lang/bad" ] && bad "失败的那层留了残骸" \
+    || ok "失败的那层没有残骸（B1 那条同一条路）"
+cp "$T/layers.bak3" "$P/build/layers.tsv"
+rm -f "$P/scripts/ok.sh" "$P/scripts/bad.sh"
+
+
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 printf 'docker_build_test: PASS %d  FAIL %d\n' "$pass" "$fail"
