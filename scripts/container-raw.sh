@@ -51,9 +51,14 @@ usage() {
     cat <<'USAGE'
 用法: container-raw.sh [--user <用户名>]
 
-  --user <用户名>   在容器里建一个普通用户（密码 root、sudo 免密），然后以它进 shell。
+  --user <用户名>   以普通用户进容器。**只做三件事**，做完就把 shell 交给它：
+                      1. 建这个用户（家目录、bash、密码 root、sudo 免密；uid 对齐宿主）
+                      2. 测速挑 apt 源（选好的源记下来，./install.sh 会接着用、不再测）
+                      3. 装 sudo 这个包（基础镜像里没有它）
+                    它**不跑 ./install.sh**，也不装 python3/git/curl/ansible ——
+                    进去之后照着提示敲那四条命令，和 root 进来时一模一样。
                     用户名要能当 Linux 用户名用：[a-z_][a-z0-9_-]*（小写字母开头）。
-                    不带这个参数就是老行为：root 进去，什么都不装。
+                    不带这个参数就是老行为：root 进去，这三件事一件都不做。
   -h, --help        打这份用法。
 USAGE
 }
