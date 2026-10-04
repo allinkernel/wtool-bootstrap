@@ -43,7 +43,7 @@ ok()   { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
 bad()  { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; [ $# -gt 1 ] && printf '      %s\n' "$2"; }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "期望 [$2]  实际 [$3]"; }
 
-PROJECTS="bootstrap:base shell/oh-my-zsh:shell shell/zsh:shell tools/repo:tools terminal/tmux:terminal terminal/fzf:terminal"
+PROJECTS="bootstrap:base shell/oh-my-zsh:shell shell/zsh:shell tools/git-repo-sh-tools:tools terminal/tmux:terminal terminal/fzf:terminal"
 
 printf '\n===== 1. 准备本地镜像与清单仓 =====\n'
 rm -rf "$WORK"

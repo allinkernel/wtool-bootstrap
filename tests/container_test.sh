@@ -16,7 +16,7 @@
 set -eu
 
 WT=${WT:-/wtool}
-PROJECTS="bootstrap shell/oh-my-zsh shell/zsh tools/repo terminal/tmux terminal/fzf"
+PROJECTS="bootstrap shell/oh-my-zsh shell/zsh tools/git-repo-sh-tools terminal/tmux terminal/fzf"
 # 状态目录放到 /tmp，让最后的"完全回退"比对只关注 $HOME 里的配置与软链
 export WTOOL_STATE=${WTOOL_STATE:-/tmp/wtool-state}
 
@@ -149,7 +149,7 @@ install_project() {
     printf '  ✓ %s\n' "$p"
 }
 # 故意乱序安装，验证最终顺序只由 priority 决定
-for p in terminal/fzf tools/repo shell/oh-my-zsh terminal/tmux shell/zsh bootstrap; do
+for p in terminal/fzf tools/git-repo-sh-tools shell/oh-my-zsh terminal/tmux shell/zsh bootstrap; do
     install_project "$p"
 done
 
@@ -220,7 +220,7 @@ printf '%s\n' "$pout" | sed 's/^/    /'
 
 printf '\n===== 5. 全部卸载，核对是否完全回退 =====\n'
 after=/tmp/wtool-snap-after.txt
-for p in shell/zsh terminal/tmux shell/oh-my-zsh tools/repo terminal/fzf bootstrap; do
+for p in shell/zsh terminal/tmux shell/oh-my-zsh tools/git-repo-sh-tools terminal/fzf bootstrap; do
     if [ -d "$WT/$p/.git" ] && [ -n "$(git -C "$WT/$p" status --porcelain -uno 2>/dev/null)" ]; then
         "$WT/$p/uninstall.sh" --force >/dev/null
     else
