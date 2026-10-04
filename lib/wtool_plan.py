@@ -3750,8 +3750,14 @@ def do_check(args):
             pid = os.path.relpath(dirpath, state)
             if pid == ".":
                 continue
+            # 哪些文件算"state 里有账"：`publish.tsv` 也算 —— 一个只发布过、
+            # 从没 install 过的项目，改名之后留下的就**只有**这个文件，
+            # 而它会静默把发布历史丢掉（看板那一格从「已完成」退回「未发布」）。
+            # 实测：`tools/repo` → `tools/git-repo-sh-tools` 就是这种（2026-10-04）。
             if not any(n in filenames for n in ("meta.tsv", "journal.tsv",
-                                                "env.zsh", "env.bash")):
+                                                "env.zsh", "env.bash",
+                                                "publish.tsv", "apt.tsv",
+                                                "artifacts.tsv", "system.tsv")):
                 continue
             if pid in on_disk or (want_id and pid != want_id):
                 continue
@@ -3764,6 +3770,17 @@ def do_check(args):
                         % (shell, shell, pid))
                     seen_env.add(pid)
                     break
+            # ①b 没有 env 块、但有别的账 —— 典型是"只发布过、从没 install 过"的项目：
+            #     不留这句话它就**完全隐形**（实测 `tools/repo` → `tools/git-repo-sh-tools`）。
+            if pid not in seen_env:
+                _left = [n for n in ("meta.tsv", "journal.tsv", "publish.tsv",
+                                     "apt.tsv", "artifacts.tsv", "system.tsv")
+                         if n in filenames]
+                if _left:
+                    bad(pid, "state 里还留着 %s，但磁盘上没有这个项目了 —— "
+                             "这是旧路径上的账（发布历史 / 安装记录），不会自己消失。"
+                             "撤掉：wtool uninstall %s --no-script"
+                        % ("、".join(_left), pid))
             # ② 悬空的中转软链 / $HOME 软链（journal 记着当初建了什么）
             for row in _read_tsv(os.path.join(dirpath, "journal.tsv")):
                 if len(row) < 4 or row[0] != "link":
