@@ -791,7 +791,7 @@ printf '\n== 场景 13：Tab 补全（wtool <TAB> 立刻列命令）==\n'
 #   用户 2026-10-04：wtool 生效后按 Tab 不该去补当前目录的文件，要列可选命令；
 #   bash / zsh 都要。候选由引擎自己算（`wtool _complete`），补全脚本只转发。
 _cmds=$(WTOOL_SUDO=yes "$WT" _complete "" 2>/dev/null | tr '\n' ' ')
-for want in install uninstall bootstrap build check doctor pack-release \
+for want in install uninstall bootstrap build check doctor status pack-release \
             publish-release download-release unpack-release \
             sudo-install sudo-uninstall sudo-bootstrap \
             unpack-layer push-layer pull-layer; do
@@ -804,7 +804,7 @@ case " $_cmds " in
     *" _layer-save "*) bad "内部命令 _layer-save 不该进补全" ;;
     *) ok "内部命令不进补全（和 --help 口径一致）" ;;
 esac
-chk "补 s 开头 → sudo-*" "sudo-install sudo-uninstall sudo-bootstrap" \
+chk "补 s 开头 → status + sudo-*" "status sudo-install sudo-uninstall sudo-bootstrap" \
     "$(WTOOL_SUDO=yes "$WT" _complete "s" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 # 没有 sudo 的机器：连补全也不提 sudo-*（和看板一个口径）
 case "$(WTOOL_SUDO=never "$WT" _complete "" 2>/dev/null)" in

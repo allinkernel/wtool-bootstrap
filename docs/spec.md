@@ -383,15 +383,15 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
 | sudo-install | `tests/provision_test.sh` | 40 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
 | publish | `tests/publish_test.sh` | 124 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行） |
-| table | `tests/table_test.sh` | 92 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
+| table | `tests/table_test.sh` | 94 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 63 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
-| contract | `tests/contract_test.sh` | 161 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁） |
+| contract | `tests/contract_test.sh` | 162 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁） |
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 46 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **689** 条断言：
+共 **692** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 10 组全跑
@@ -870,7 +870,7 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 
 | 段 | 内容 |
 |---|---|
-| 1 | **能力表**：`build` / `install` / `uninstall` / `sudo` / `sudo-un` / `pack` / `publish` / `download` / `layer` 九列（+ 项目、prio）—— `install` / `sudo` 各自跟一列 uninstall，装之前是「未安装」、装完变「可执行」（ADR-0034）。**`sudo` / `sudo-un` 两列要看这台机器有没有 sudo**：每次跑都现探，没有就**不列那两列**（9 列），图例里说明原因（ADR-0035）|
+| 1 | **能力表**：`build` / `install` / `uninstall` / `sudo` / `sudo-un` / `pack` / `publish` / `download` / `layer` 九列（+ 项目、prio）—— `install` / `sudo` 各自跟一列 uninstall，装之前是「未安装」、装完变「可执行」（ADR-0034）。**13 列**（`layer` 已拆成 unpack-layer / push-layer / pull-layer，一列一命令；长列名折两行）；**`sudo` / `sudo-un` 两列要看这台机器有没有 sudo**：每次跑都现探，没有就**不列那两列**（9 列），图例里说明原因（ADR-0035）|
 | 2 | `wtool install` 能装哪些项目、装过没、会做什么 |
 | 3 | `wtool sudo-install` 能装哪些项目、跑过没、会装什么 |
 | 4 | `wtool bootstrap` 这次会装哪些、什么顺序、谁被跳过 |

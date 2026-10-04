@@ -2456,13 +2456,13 @@ cmd_status() {
 # 下划线开头的是内部命令，**不进补全**（和 --help 的口径一致）。
 # ==========================================================================
 WTOOL_SUBCOMMANDS="build install uninstall bootstrap
-check repair doctor
+status check repair doctor
 pack-release unpack-release publish-release download-release
 sudo-install sudo-uninstall sudo-bootstrap
 unpack-layer push-layer pull-layer"
 
 # 第一个位置参数是"项目"的命令（补全时列项目 id，再加 all）
-WTOOL_PROJECT_CMDS="install uninstall build pack-release publish-release
+WTOOL_PROJECT_CMDS="status install uninstall build pack-release publish-release
 download-release unpack-release sudo-install sudo-uninstall
 unpack-layer push-layer pull-layer"
 
@@ -2518,8 +2518,14 @@ wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列
         check)              printf '%s\n' --json --home= --state= --root= ;;
         repair)             printf '%s\n' --dry-run --force --head= --home= --state= ;;
         doctor)             printf '%s\n' --quiet --json --brief --version ;;
+        status)             printf '%s\n' --color= ;;
         init)               printf '%s\n' --id= --priority= --all --with-install --with-build --with-download --with-publish ;;
     esac
+}
+
+cmd_status() {   # <项目> [--color=…]
+    # 只读：逐列给 状态 + 对应命令 + 依据（规划器里算，引擎不写任何东西）
+    python3 "$PY" status --root "$WTOOL_ROOT" --state "$WTOOL_STATE" "$@" || return $?
 }
 
 cmd_complete() {   # <正在补的词> [已经敲过的词...]
@@ -3984,6 +3990,7 @@ case $_cmd in
     refresh-downloads) wt_refresh_downloads ;;
     init)      cmd_init "$@" ;;
     _complete) cmd_complete "$@" ;;
+    status)    shift; cmd_status "$@" ;;
     scaffold)  wt_die "scaffold 已删除（不是改名，是删掉）。新建项目用: wtool init <目录>" ;;
     validate)  python3 "$PY" validate "$@" --home "$WTOOL_HOME" --state "$WTOOL_STATE" ;;
     version)   echo "wtool engine $ENGINE_VERSION" ;;

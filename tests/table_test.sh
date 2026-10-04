@@ -313,11 +313,25 @@ fi
 
 echo "== 9. 表头：逐项目的引擎命令都要在（2026-09-29 / 2026-10-04 用户要求）=="
 # 2026-09-29：以前只有 build / install 两列 → 七列。
-# 2026-10-04：用户要求 install / sudo 后面各跟一列 uninstall / sudo-uninstall
-#             （装之前"未安装"、装完变"可执行"），所以现在是九列。
-for col in 项目 prio build install uninstall sudo sudo-un pack publish download layer; do
-    tbl1 --color=never | sed -n 2p | grep -q "$col" && ok "有 $col 列" || bad "缺 $col 列"
+# 2026-10-04：install / sudo 后面各跟一列 uninstall / sudo-uninstall（九列）；
+#   同日再改：**一列只对应一个命令** —— layer 拆成 unpack/push/pull 三列（十一列），
+#   长列名**折两行**（每行 ≤6 字符，从上往下读就是命令名），所以表头占两行。
+_hdr1=$(tbl1 --color=never | sed -n 2p)
+_hdr2=$(tbl1 --color=never | sed -n 3p)
+for col in 项目 prio build install sudo pack publish; do
+    case $_hdr1 in *"$col"*) ok "有 $col 列" ;; *) bad "缺 $col 列" "$_hdr1" ;; esac
 done
+# 折成两行的长列名：上行 + 下行，合起来就是那条命令
+_fold() {   # <上行片段> <下行片段> <说明>
+    case $_hdr1 in *"$1"*) ;; *) bad "缺 $3 列（上半）" "$_hdr1"; return 0 ;; esac
+    case $_hdr2 in *"$2"*) ok "有 $3 列（折成两行）" ;; *) bad "缺 $3 列（下半）" "$_hdr2" ;; esac
+}
+_fold "un" "install" uninstall
+_fold "sudo" "-un" sudo-un
+_fold "down" "load" download
+_fold "unpack" "layer" unpack-layer
+_fold "push" "layer" push-layer
+_fold "pull" "layer" pull-layer
 # 图例里**每条命令都要写全名**（用户 2026-10-04：不要省略 pull-layer / push-layer）
 for cmd in "wtool build" "wtool install" "wtool uninstall" "wtool sudo-install" \
            "wtool sudo-uninstall" "wtool pack-release" "wtool publish-release" \
@@ -347,10 +361,9 @@ case $_ns in
     *) bad "图例没说明少列原因" ;;
 esac
 # 有 sudo 时那两列必须在（对照组）。表头是居中的，别去匹配"│ sudo "这种空格形状
-_hdr2=$(tbl1 --color=never | sed -n 2p)   # tbl1 = 第 1 张表的表头那两行
-case $_hdr2 in
-    *sudo-un*) ok "有 sudo 时 sudo / sudo-un 两列都在" ;;
-    *) bad "有 sudo 时少了列" "$_hdr2" ;;
+case "$(tbl1 --color=never | sed -n '2,3p')" in
+    *sudo*) ok "有 sudo 时 sudo / sudo-un 两列都在（折成 sudo + -un）" ;;
+    *) bad "有 sudo 时少了列" ;;
 esac
 
 echo "== 9b. 看板的后四段（install / sudo-install / bootstrap / sudo-bootstrap）=="

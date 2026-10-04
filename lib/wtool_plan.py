@@ -1692,9 +1692,13 @@ def project_caps(path, pub):
 
 
 def _box(headers, rows, aligns=None):
-    """带表框的小表格。格子里的 ANSI 转义不占宽度，CJK 占两格，都得算对。"""
+    """带表框的小表格。格子里的 ANSI 转义不占宽度，CJK 占两格，都得算对。
+
+    表头允许是**多行**（list）—— 长列名折两行，免得把表撑得太宽（见 DASH_COLS）。
+    """
+    headers = [h if isinstance(h, (list, tuple)) else [h] for h in headers]
     n = len(headers)
-    widths = [_width(_strip_ansi(h)) for h in headers]
+    widths = [max([_width(_strip_ansi(x)) for x in h] or [0]) for h in headers]
     for r in rows:
         for i in range(n):
             w = _width(_strip_ansi(r[i] if i < len(r) else ""))
@@ -1720,8 +1724,11 @@ def _box(headers, rows, aligns=None):
     def _rule(l, m, r):
         return l + m.join("\u2500" * (w + 2) for w in widths) + r
 
-    out = [_rule("\u250c", "\u252c", "\u2510"), _row(headers),
-           _rule("\u251c", "\u253c", "\u2524")]
+    out = [_rule("\u250c", "\u252c", "\u2510")]
+    # 表头可能不止一行：每一行都按同样的列宽铺出来
+    for _i in range(max(len(h) for h in headers)):
+        out.append(_row([h[_i] if _i < len(h) else "" for h in headers]))
+    out.append(_rule("\u251c", "\u253c", "\u2524"))
     for r in rows:
         out.append(_row(r))
     out.append(_rule("\u2514", "\u2534", "\u2518"))
@@ -1751,6 +1758,15 @@ def _manifest_entries(path):
     errors = []
     meta, entries = parse_manifest(wf, path, errors)
     return meta, entries
+
+
+def _layer_unpacked(path):
+    """`unpack-layer` 落地时会写 OWNED.tsv（每层一份）—— 拿它当"解过"的证据。"""
+    root = os.path.join(path, DIR_OUT)
+    for _dirpath, _dirs, files in os.walk(root):
+        if "OWNED.tsv" in files:
+            return True
+    return False
 
 
 def _layer_layouts(path):
@@ -1913,13 +1929,24 @@ def command_states(path, pub, st, state_dir):
     else:
         out["download"] = LBL_CAN
 
-    # layer-*：只有声明了 build/layers.tsv 的项目才有层
-    if not os.path.isfile(os.path.join(path, "build", "layers.tsv")):
-        out["layer"] = LBL_NONE
-    elif _layer_layouts(path):
-        out["layer"] = LBL_DONE
+    # layer-*：只有声明了 build/layers.tsv 的项目才有层。
+    # 三条命令**各占一列**（用户 2026-10-04：一列一命令，别把三条塞一列）：
+    #   unpack-layer  把 __layer/ 里的层解成安装产物 → 有层就是"可执行"，解过是"已完成"
+    #   push-layer    把层推到镜像仓库          → 有层才谈得上推
+    #   pull-layer    从镜像仓库拉层            → 有层能力就行（拉下来会覆盖 __layer/）
+    _has_layers = os.path.isfile(os.path.join(path, "build", "layers.tsv"))
+    _n_layouts = _layer_layouts(path) if _has_layers else 0
+    if not _has_layers:
+        out["unpack-layer"] = out["push-layer"] = out["pull-layer"] = LBL_NONE
     else:
-        out["layer"] = LBL_CAN
+        # ⚠️ 这三条命令**不写 journal**（实测：unpack/push/pull 跑完只在屏幕上说话），
+        #    所以"已完成"只能靠**文件**判：unpack 落地会写 OWNED.tsv。
+        #    推没推过、拉没拉过，本机没有记录 —— 那两列最高只到"可执行"，
+        #    想知道真状态得去问镜像仓库（别在这儿编一个"已完成"）。
+        out["unpack-layer"] = (LBL_DONE if _layer_unpacked(path)
+                               else (LBL_CAN if _n_layouts else LBL_TODO))
+        out["push-layer"] = LBL_CAN if _n_layouts else LBL_TODO
+        out["pull-layer"] = LBL_CAN
 
     return out
 
@@ -1927,10 +1954,34 @@ def command_states(path, pub, st, state_dir):
 # 列顺序：install / uninstall 成对、sudo / sudo-uninstall 成对（用户 2026-10-04 要求：
 # "装之前 install 是可执行、uninstall 是未安装；装完之后 install 变已完成、
 #  uninstall 变可执行，sudo 同此逻辑"）
-DASH_COLS = [("build", "build"), ("install", "install"), ("uninstall", "uninstall"),
-             ("sudo", "sudo"), ("sudo-uninstall", "sudo-un"),
-             ("pack", "pack"), ("publish", "publish"),
-             ("download", "download"), ("layer", "layer")]
+# 看板第 1 段的列：**(键, 表头行)**。表头行可以是一行，也可以是**折成两行**的
+# 几行 —— 用户 2026-10-04 的两条要求：
+#   ① 一列只对应**一个**命令（原来 `layer` 一列塞了 unpack/push/pull 三条，
+#      看的人分不清那个"已完成"指的是哪条）；
+#   ② 名字太长就把列宽撑开（`uninstall` 9 格、`download` 8 格），
+#      所以长名字**折成两行**，每行不超过 6 个字符。
+# 折法的规矩：**从上往下读就是那个命令名**（`un` + `install` = uninstall，
+# `unpack` + `layer` = unpack-layer），优先在 `-` 处断。
+# 列键 → 对应的**引擎命令名**（`wtool status` 要逐列写出来）。
+# 一列一命令，这张表就是那份对应关系（用户 2026-10-04 要求）。
+WT_CMD_OF = {"build": "wtool build", "install": "wtool install",
+             "uninstall": "wtool uninstall", "sudo": "wtool sudo-install",
+             "sudo-uninstall": "wtool sudo-uninstall", "pack": "wtool pack-release",
+             "publish": "wtool publish-release", "download": "wtool download-release",
+             "unpack-layer": "wtool unpack-layer", "push-layer": "wtool push-layer",
+             "pull-layer": "wtool pull-layer"}
+
+DASH_COLS = [("build", ["build"]),
+             ("install", ["install"]),
+             ("uninstall", ["un", "install"]),
+             ("sudo", ["sudo"]),
+             ("sudo-uninstall", ["sudo", "-un"]),
+             ("pack", ["pack"]),
+             ("publish", ["publish"]),
+             ("download", ["down", "load"]),
+             ("unpack-layer", ["unpack", "layer"]),
+             ("push-layer", ["push", "layer"]),
+             ("pull-layer", ["pull", "layer"])]
 
 
 def _hdr(title):
@@ -1947,6 +1998,83 @@ def _dash_cols(projects):
     return list(DASH_COLS)
 
 
+def _status_evidence(path, st, pub, state_dir):
+    """「这一格是从哪看出来的」—— 逐列给依据（用户 2026-10-04：把状态做成可查询的）。"""
+    def _has(rel):
+        return os.path.exists(os.path.join(path, rel))
+
+    out = os.path.join(path, DIR_OUT)
+    n_out = len(os.listdir(out)) if os.path.isdir(out) else 0
+    n_journal = sum(1 for _ in _read_tsv(os.path.join(state_dir, st["id"], "journal.tsv")))
+    n_pub = sum(1 for _ in _read_tsv(os.path.join(state_dir, st["id"], "publish.tsv")))
+    n_targets = _layer_layouts(path)
+    n_unpacked = 0
+    if os.path.isdir(out):
+        for _dp, _ds, _fs in os.walk(out):
+            if "OWNED.tsv" in _fs:
+                n_unpacked += 1
+    rel_json = os.path.join(path, "scripts", "release.json")
+    return {
+        "build": "有 scripts/build.sh；%s" % (
+            "%s 里有 %d 项" % (DIR_OUT + "/", n_out) if n_out else "%s/ 还没有" % DIR_OUT),
+        "install": "有 scripts/install.sh；安装记录 %d 条" % n_journal,
+        "uninstall": ("安装记录 %d 条 → 撤得掉" % n_journal) if n_journal
+                     else "安装记录 0 条 → 现在没什么可撤的",
+        "sudo": ("wtool.xml 声明了系统层（sysfile/source/task）；已装 %d 个文件"
+                 % st.get("sysfiles", 0)) if st.get("markers") or st.get("sysfiles")
+                else "wtool.xml 里没有系统层声明（sysfile/source/task）",
+        "sudo-uninstall": "已装系统文件 %d 个" % st.get("sysfiles", 0),
+        "pack": "%s 里有 %d 项" % (DIR_OUT + "/", n_out) if n_out else "%s/ 还没有" % DIR_OUT,
+        "publish": "发布记录 %d 条" % n_pub if n_pub else "发布记录 0 条（还没发过）",
+        "download": ("仓库里有 scripts/release.json（发布信息）" if os.path.isfile(rel_json)
+                     else "仓库里没有 scripts/release.json → 还没发布过，没东西可下"),
+        "unpack-layer": ("build/layers.tsv 在；%s/ 有 %d 个 target；解出来 %d 份 OWNED.tsv"
+                         % (DIR_LAYER, n_targets, n_unpacked) if _has("build/layers.tsv")
+                         else "没有 build/layers.tsv → 这个项目没有层"),
+        "push-layer": ("build/layers.tsv 在；%s/ 有 %d 个 target（推没推过本机不记，"
+                       "去镜像仓库看）" % (DIR_LAYER, n_targets) if _has("build/layers.tsv")
+                       else "没有 build/layers.tsv → 这个项目没有层"),
+        "pull-layer": ("build/layers.tsv 在 → 可以从镜像仓库拉（拉下来会覆盖 %s/）" % DIR_LAYER
+                       if _has("build/layers.tsv") else "没有 build/layers.tsv → 这个项目没有层"),
+    }
+
+
+def project_status(root, state_dir, ident):
+    """`wtool status <项目>`：逐列给 **状态 + 对应的命令 + 这一格的依据**。
+
+    用户 2026-10-04：表格里一列只该对应一个命令，而且"状态也要有专门的查询方法" ——
+    这张表就是那个查询：看板给你一眼，status 给你"为什么"和"接下来敲哪条"。
+    """
+    projs = scan_projects(root, manifests_only=True)
+    hit = None
+    for prio, pid, path, pub in projs:
+        if ident in (pid, path) or pid.endswith("/" + ident.rstrip("/")):
+            hit = (prio, pid, path, pub)
+            break
+    if hit is None:
+        return ["找不到项目「%s」。现有：%s" % (ident, " ".join(p[1] for p in projs))], 2
+    prio, pid, path, pub = hit
+    no_sudo = sudo_state() == "none"
+    st = dict(project_state(path, state_dir, root=root))
+    st["no_sudo"] = no_sudo
+    cmds = command_states(path, pub, st, state_dir)
+    ev = _status_evidence(path, st, pub, state_dir)
+    rows = []
+    for key, hdr in _dash_cols([st]):
+        # 列名用 key（折起来读是 uninstall，摊开还是 uninstall）；命令单独一列
+        rows.append([key, cmds[key], WT_CMD_OF.get(key, "-"), ev.get(key, "")])
+    out = ["", "项目 %s（prio %s）  %s" % (pid, prio, path),
+           "  一列一个命令；状态就是看板里那一格，依据 = 「这一格是怎么看出来的」。", ""]
+    out += _box([["列"], ["状态"], ["对应命令"], ["依据（这一格是怎么看出来的）"]], rows,
+                aligns=["l", "c", "l", "l"])
+    out += ["",
+            "  · 想知道某条命令**到底会做什么**：wtool <命令> %s --dry-run（不动手，只出计划）" % pid,
+            "  · 状态只有六种：不支持 / 可执行 / 待产出 / 已完成 / 未发布 / 未安装（和看板同一套）",
+            "  · push-layer / pull-layer 的「推过没、拉过没」本机**没有记录**（那两条命令不写 journal）——",
+            "    本机只能告诉你「能不能推」；真状态去镜像仓库看。"]
+    return out, 0
+
+
 def _section_command_table(projects, color):
     cols = _dash_cols(projects)
     rows = []
@@ -1955,10 +2083,10 @@ def _section_command_table(projects, color):
         for key, _h in cols:
             cells.append(p["cmds"][key])
         rows.append(cells)
-    headers = ["项目", "prio"] + [h for _k, h in cols]
+    headers = [["项目"], ["prio"]] + [h for _k, h in cols]
     plain = [[_strip_ansi(c) for c in r] for r in rows]
     colored = [r[:2] + [_state_cell(v, color) for v in r[2:]] for r in rows]
-    widths = [_width(h) for h in headers]
+    widths = [max(_width(x) for x in h) for h in headers]   # 表头可能折成两行
     for r in plain:
         for i, c in enumerate(r):
             widths[i] = max(widths[i], _width(c))
@@ -2164,8 +2292,11 @@ def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
     if no_sudo:
         out.append("      pack             wtool pack-release")
     out.append("      publish          wtool publish-release     download    wtool download-release")
-    out.append("      layer            wtool unpack-layer / wtool push-layer / wtool pull-layer")
-    out.append("                       （层是项目的资产：unpack 出安装产物、push/pull 走镜像仓库）")
+    out.append("      unpack-layer     wtool unpack-layer        push-layer  wtool push-layer")
+    out.append("      pull-layer       wtool pull-layer")
+    out.append("                       （层是项目的资产：unpack 把层解成安装产物，")
+    out.append("                         push 推到镜像仓库、pull 从镜像仓库拉；三条各自一列）")
+    out.append("  想知道某一格**是怎么算出来的**：wtool status <项目>（逐列给状态 + 依据 + 该敲哪条命令）")
     out.append("  格子：%s 这个项目没这项能力   %s 现在就能跑   %s 要先产出 __output/   %s 跑过了   %s 还没发布过   %s 还没装（撤不了）"
                % (LBL_NONE, LBL_CAN, LBL_TODO, LBL_DONE, LBL_UNPUB, LBL_NOTINST))
     out.append("")
@@ -3678,6 +3809,11 @@ def build_parser():
     pk.add_argument("project")
     pk.add_argument("--scratch", required=True)
 
+    stt = sub.add_parser("status")
+    stt.add_argument("--root", required=True)
+    stt.add_argument("--state", required=True)
+    stt.add_argument("--color", default="auto")
+    stt.add_argument("project")
     wd = sub.add_parser("write-dist")
     wd.add_argument("--out", required=True)
     wd.add_argument("--rows", required=True)
@@ -3803,6 +3939,12 @@ def main(argv):
             print("release   : %d 个文件" % len(res["release"]))
             print("declare   : %s" % (",".join(res["declare"]) or "-"))
             print("declare_file\t%s" % os.path.join(args.scratch, "declare.tsv"))
+        elif args.cmd == "status":
+            # 不做彩色：status 是"给你看依据"的，格子值本来就那六个词，一眼能认
+            lines, rc = project_status(args.root, args.state, args.project)
+            for ln in lines:
+                print(ln)
+            return rc
         elif args.cmd == "write-dist":
             dist = write_dist(args)
             print("dist      : %s（%d 个文件，%d 个分卷）"
