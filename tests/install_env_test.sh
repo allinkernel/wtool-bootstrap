@@ -240,6 +240,47 @@ case $_out in
 esac
 [ -f "$APT7/sources.list.d/wtool-mirror.sources" ] && bad "连不上还换了源" || ok "没动源文件"
 
+echo "== 8. 打印给用户的"接下来敲什么"，不许漏命令（回归）=="
+#   2026-10-04 用户发现：install.sh 结尾那份操作对照表里**没有 sudo-bootstrap** ——
+#   而"装系统层"恰恰是新机器上必须的一步。容器脚本里的表也一样。
+#   命令名以后还会变，所以这里守的是"这几处提示必须同时提到这两层"，
+#   而不是死抠文案。
+_scripts="$boot/scripts"
+_greet_check() {   # <文件> <必须出现的字符串...>
+    _gc_f=$1; shift
+    for _gc_want in "$@"; do
+        if grep -qF -- "$_gc_want" "$_gc_f" 2>/dev/null; then
+            ok "$(basename "$_gc_f") 提到「$_gc_want」"
+        else
+            bad "$(basename "$_gc_f") 的提示里没有「$_gc_want」（用户会漏掉这一步）"
+        fi
+    done
+}
+_greet_check "$_scripts/install.sh" \
+    "wtool sudo-bootstrap" "wtool bootstrap" "wtool uninstall" "wtool sudo-uninstall"
+_greet_check "$_scripts/container-raw.sh" \
+    "./install.sh" "exec \$SHELL" "wtool sudo-bootstrap" "wtool bootstrap"
+_greet_check "$_scripts/container-shell.sh" \
+    "wtool sudo-bootstrap" "wtool bootstrap"
+# 打印的**用法**必须真的能跑：`sudo-uninstall` 收的是项目/`all`，没有 `--id`
+# （`--id` 只是 `uninstall` 的开关）—— 差点在这份提示里印错，用户照着敲会报错。
+if grep -qF "sudo-uninstall --id" "$_scripts/install.sh"; then
+    bad "提示里的 sudo-uninstall --id 是错的（它没有 --id 这个开关）"
+else
+    ok "提示里的 sudo-uninstall 用法对（<项目>|all）"
+fi
+grep -qF "wtool sudo-uninstall <项目>|all" "$_scripts/install.sh" \
+    && ok "写清了 sudo-uninstall 收 <项目>|all" || bad "sudo-uninstall 的用法没写清"
+
+# 反向：容器脚本里不该再出现已经退休/改名的老命令
+for _old in "wtool download " "wtool publish " "wtool provision"; do
+    if grep -qF -- "$_old" "$_scripts/container-raw.sh" "$_scripts/container-shell.sh" 2>/dev/null; then
+        bad "容器脚本的提示里还有老命令「$_old」"
+    else
+        ok "容器脚本没有老命令「$_old」"
+    fi
+done
+
 echo
 printf 'install_env_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

@@ -8,7 +8,7 @@
 #
 # 和 container-shell.sh 的分工：
 #
-#   container-shell.sh   装系统依赖 → 装 wtool 引擎 → 跑 wtool bootstrap
+#   container-shell.sh   装系统依赖 → 装 wtool 引擎 → 交给你（sudo-bootstrap + bootstrap）
 #                        （把所有不需要决策的项目都装上）→ 进 zsh
 #                        用途：想马上得到一个能用的环境
 #
@@ -78,11 +78,15 @@ cat <<'TIP'
 
   ────────────────────────────────────────────────────────────
   这个容器里什么都没装 —— 等价于"刚 repo sync 完"。
-  接下来三条命令，和你在真机上做的一模一样：
+  接下来四条命令，和你在真机上做的一模一样：
 
-      cd /wtool && ./install.sh     # 准备环境 + 装 wtool 自己
+      cd /wtool && ./install.sh     # 准备环境 + 装 wtool 自己（会先让你挑镜像）
       exec $SHELL                   # 让当前 shell 认识 wtool
-      wtool bootstrap               # 装不需要你决策的项目
+      wtool sudo-bootstrap          # 系统层：apt 包 + /etc（可能要 sudo、要联网）
+      wtool bootstrap               # 用户层：文件、软链、shell 集成（不要 sudo、不联网）
+
+  后两条**别合成一条**：一条要 sudo 要联网，一条永不 sudo 永不联网 ——
+  出错时你才分得清该修系统环境还是某个项目。
 
   第一条会自动认系统、认缺什么包、认要不要接代理 —— 不用你操心。
   它还会**先给国内几个镜像站测速**（各下一个索引、最多 3 秒），画成表让你挑一个，

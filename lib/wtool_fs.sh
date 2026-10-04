@@ -657,7 +657,15 @@ wt_task_run() {
     (
         export WTOOL_PREFIX WTOOL_OS_ID WTOOL_OS_VERSION WTOOL_OS_CODENAME WTOOL_OS_LIKE
         export WTOOL_ARCH WTOOL_JOBS
-        export WTOOL_PROJECT_ID WTOOL_PROJECT_DIR WTOOL_PROJECT_ROOT
+        export WTOOL_PROJECT_ID WTOOL_PROJECT_ROOT
+        # ⚠️ 这里必须**重新指向项目检出目录**：在 `wtool.sh` 的 sudo-install 路径上，
+        #    `WTOOL_PROJECT_DIR` 指的是"这个项目的状态目录"（journal/meta/apt.tsv 那堆，
+        #    （见 wt_load_project），而项目脚本（build.sh / install.sh / 任务脚本）
+        #    一直把它理解成"项目目录"。同一个名字两种含义 = 脚本会静默写错地方
+        #    （实测：验收脚本里的任务把 marker 写到了状态目录，检查却看项目目录）。
+        #    状态目录改叫 WTOOL_PROJECT_STATE_DIR，名字说清自己是什么。
+        export WTOOL_PROJECT_STATE_DIR="$WTOOL_PROJECT_DIR"
+        export WTOOL_PROJECT_DIR="${WTOOL_PROJECT_ROOT:-$_cwd}"
         # 无人值守：debconf 的交互提问会把任务挂死（容器里没人回答）
         DEBIAN_FRONTEND=noninteractive
         export DEBIAN_FRONTEND

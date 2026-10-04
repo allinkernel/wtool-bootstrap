@@ -329,6 +329,37 @@ printf '# 机器原来的源\nTypes: deb\n' > "$H/orig.sources"
 rm -rf "$H"
 
 # --------------------------------------------------------------------------
+printf '\n== 场景 9b：任务里的 WTOOL_PROJECT_DIR 必须是"项目目录"（不是状态目录）==\n'
+#   踩过：sudo-install 路径上 wt_load_project 把 WTOOL_PROJECT_DIR 设成了**状态目录**
+#   （journal/meta/apt.tsv 的落脚点），而项目脚本（build.sh / install.sh / 任务脚本）
+#   一直把它当"项目目录"用。同名两种含义 → 脚本静默写到别处（容器验收里就是这么
+#   发现"任务没跑"的）。现在任务里 WTOOL_PROJECT_DIR = 项目目录，
+#   状态目录叫 WTOOL_PROJECT_STATE_DIR。
+newenv
+p="$H/proj9b"; mkrepo "$p"
+cat > "$p/whatdirs.sh" <<'EOF'
+printf 'DIR=%s\nROOT=%s\nSTATE=%s\n' "$WTOOL_PROJECT_DIR" "$WTOOL_PROJECT_ROOT" "$WTOOL_PROJECT_STATE_DIR" \
+    > "$WTOOL_PROJECT_DIR/dirs.txt"
+EOF
+cat > "$p/wtool.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="dirs/test" priority="5">
+  <sudo-install src="whatdirs.sh" marker="dirs" desc="把三个变量落盘"/>
+</wtool>
+XML
+commit "$p"
+"$boot/wtool.sh" sudo-install "$p" >"$H/p9b.log" 2>&1 || bad "sudo-install 执行" "$(cat "$H/p9b.log")"
+_prj=$(cd "$p" && pwd)
+check "WTOOL_PROJECT_DIR = 项目目录（脚本写文件的地方对）" \
+      "DIR=$_prj" "$(sed -n '1p' "$p/dirs.txt" 2>/dev/null)"
+check "WTOOL_PROJECT_ROOT 也是项目目录" "ROOT=$_prj" "$(sed -n '2p' "$p/dirs.txt" 2>/dev/null)"
+check "状态目录改叫 WTOOL_PROJECT_STATE_DIR" \
+      "STATE=$H/state/dirs/test" "$(sed -n '3p' "$p/dirs.txt" 2>/dev/null)"
+[ -f "$H/state/dirs/test/dirs.txt" ] && bad "脚本按老含义写进了状态目录" \
+    || ok "状态目录里没有误写的文件"
+rm -rf "$H"
+
+# --------------------------------------------------------------------------
 printf '\n== 场景 10：provision-packages —— 从 playbook 报出"这一步装几个包" ==\n'
 #   用户 2026-10-04 的反馈：ansible 跑起来只看得到"在等"，看不到装了什么。
 #   引擎先用它数包、问 apt 要下多少（见 wt_task_plan_report）。

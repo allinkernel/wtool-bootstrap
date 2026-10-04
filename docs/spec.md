@@ -381,7 +381,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | 组 | 文件 | 条数 | 守什么 |
 |---|---|---|---|
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
-| sudo-install | `tests/provision_test.sh` | 36 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
+| sudo-install | `tests/provision_test.sh` | 40 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
 | publish | `tests/publish_test.sh` | 124 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行） |
 | table | `tests/table_test.sh` | 43 | 能力表格的格子语义与列对齐 |
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
@@ -390,7 +390,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `layer/` → 导 `output/`（一层镜像对一层 output）、续跑、从 `layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 46 | `layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **593** 条断言：
+共 **612** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 10 组全跑
@@ -409,7 +409,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | **A 长期** | `WTOOL_OS_ID` / `WTOOL_OS_VERSION` / `WTOOL_OS_CODENAME` / `WTOOL_OS_LIKE` | 同上（`lib/wtool_os.sh` 读 `/etc/os-release`） | 每次开 shell | ✅ 有 |
 | **A 长期** | `WTOOL_ARCH` / `WTOOL_JOBS` | 同上 | 每次开 shell | ✅ 有 |
 | **A 长期** | `PATH` += `$WTOOL_PREFIX/bin` 和 `$WTOOL_PROJECT_DIR/bin`（`wtool` 命令） | 同上 | 每次开 shell | ✅ 有 |
-| **B 项目脚本期** | `WTOOL_PROJECT_ID` / `WTOOL_PROJECT_DIR` / `WTOOL_PROJECT_ROOT` / `WTOOL_WORKSPACE` / `WTOOL_HOME` / `WTOOL_PREFIX` / `WTOOL_JOBS` / `WTOOL_ARCH` / `WTOOL_OS_ID` / `WTOOL_OS_VERSION` / `WTOOL_OS_CODENAME` / `WTOOL_OS_LIKE` / `WTOOL_ARTIFACTS` / `WTOOL_STATE_DIR` | 引擎在 `wt_run_project_script` 里临时注入（`wtool.sh:325-335`） | 仅该次项目脚本（build / install） | ❌ 不该有 |
+| **B 项目脚本期** | `WTOOL_PROJECT_ID` / `WTOOL_PROJECT_DIR`（= 项目目录）/ `WTOOL_PROJECT_ROOT` / `WTOOL_WORKSPACE` / `WTOOL_HOME` / `WTOOL_PREFIX` / `WTOOL_JOBS` / `WTOOL_ARCH` / `WTOOL_OS_ID` / `WTOOL_OS_VERSION` / `WTOOL_OS_CODENAME` / `WTOOL_OS_LIKE` / `WTOOL_ARTIFACTS` / `WTOOL_STATE_DIR` | 引擎在 `wt_run_project_script` 里临时注入（`wtool.sh:325-335`） | 仅该次项目脚本（build / install） | ❌ 不该有 |
 | **B′ `<source>` 任务** | `WTOOL_SOURCE_DIR` / `WTOOL_SOURCE_REF` | 只有 `<source>` 任务额外拿得到（`lib/wtool_fs.sh:555-557`） | 仅该次任务 | ❌ 不该有 |
 | **C source 期** | `WTOOL_PROJECT_ID` / `WTOOL_PROJECT_DIR` / `WTOOL_PROJECT_ROOT` | rc 块 | source 期间（会被后加载的块覆盖） | ⚠️ 有但只对最后一个块成立 |
 
@@ -544,6 +544,21 @@ wtool.sh bootstrap      [--dry-run] [--force]        # 所有项目的 install�
 **apt 差集**：`sudo-install` 在跑任务前后各取一次已装包快照（`dpkg-query -W`），
 差集就是"这次新装进来的包"，记进 `apt.tsv`。`sudo-uninstall` 只卸这些
 （`WTOOL_APT_GET` 可覆盖 apt-get，测试用）。不是 Debian 系（没有 dpkg）就跳过这一步。
+
+---
+
+### 11.x `sudo-install` 的任务能拿到什么（2026-10-04 修正）
+
+`<sudo-install src="provision/xxx.sh"/>` 跑起来时，注入的变量里**目录有三个**，
+别再混用（混用的后果见 `harness/docs/hazards.md` H22）：
+
+| 变量 | 值 | 用途 |
+|---|---|---|
+| `WTOOL_PROJECT_DIR` | **项目检出目录**（和 `build.sh` / `install.sh` 里一致） | 脚本读写项目自己的文件 |
+| `WTOOL_PROJECT_ROOT` | 同上（`WTOOL_PROJECT_DIR` 的规范形式） | 同上 |
+| `WTOOL_PROJECT_STATE_DIR` | `$WTOOL_STATE/<项目 id>`（journal / meta / apt.tsv / provisioned 记号） | 想自己记点什么的时候用 |
+
+工作目录（`$PWD`）是 `$WTOOL_SOURCE_DIR`（有 `<source>` 的项目）或项目目录。
 
 ---
 

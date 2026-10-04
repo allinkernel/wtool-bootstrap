@@ -10,7 +10,8 @@
 #
 #   1. ./install.sh          准备运行环境 + 装 wtool 自己（不装任何项目）
 #   2. 交给你一个 shell      让当前 shell 认识 wtool
-#   3. 你跑 wtool bootstrap  装那些不需要你决策的项目
+#   3. 你跑 wtool sudo-bootstrap  系统层（apt 包 + /etc；要 sudo、要联网）
+#   4. 你跑 wtool bootstrap       用户层（文件 / 软链 / shell 集成；不要 sudo、不联网）
 #
 # **第 3 步故意不替你做。** "让工具能用"和"装哪些项目"是两件事，
 # 失败原因也完全不同，混在一条命令里用户看到一屏输出分不清该修哪头。
@@ -60,17 +61,22 @@ cat <<'TIP'
 
       exec $SHELL          # 或者干脆重开一个终端
 
-  第 3 步：装那些不需要你决策的项目
+  第 3 步：系统层 —— apt 包 + /etc 下的文件（**要 sudo、要联网**）
 
-      wtool                # 先看项目表
-      wtool bootstrap      # 再装
+      wtool sudo-bootstrap
+
+  第 4 步：用户层 —— 装那些不需要你决策的项目（不要 sudo、不联网）
+
+      wtool                # 先看项目表（五段看板）
+      wtool bootstrap      # 再装用户层
 
   wtool bootstrap 不 build、不 download —— 需要先产出东西的项目会被跳过
   并列出来，让你自己决定跑哪条：
 
-      wtool download <项目>   从发布页拿现成的包（分钟级）
-      wtool build    <项目>   自己编（小时级）
-      wtool install  <项目>
+      wtool download-release <项目>   从发布页拿现成的包（分钟级）
+      wtool unpack-release   <项目>   校验 + 拼卷 + 解到 output/
+      wtool build            <项目>   自己编（小时级）
+      wtool install          <项目>
   ────────────────────────────────────────────────────────────
 
 TIP

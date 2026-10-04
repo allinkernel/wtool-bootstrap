@@ -241,17 +241,19 @@ cat <<TIP
       exec \$SHELL          # 或者干脆重开一个终端
 $([ -n "$_rc" ] && printf '      # 配置写在 %s 里的那一段 loader\n' "$_rc")
 
-  然后：
+  然后**两步**：先系统层，再用户层（分开是有意的，失败原因完全不同）：
 
-      wtool                # 看项目表：每个项目支持什么、做到哪一步了
-      wtool bootstrap      # 装那些"不需要你决策"的项目
+      wtool                # 看项目表：每个项目支持什么、走到哪一步了
+      wtool sudo-bootstrap # 系统层：apt 包 + /etc 下的文件（**可能要 sudo、要联网**）
+      wtool bootstrap      # 用户层：文件、软链、shell 集成（不要 sudo、不联网）
 
   wtool bootstrap 不会替你做这些决定，需要时才自己跑：
       wtool build    <项目>    自己编（小时级；声明要容器而本机没有 docker 时会直接拒绝）
       wtool download-release <项目>   从发布页下现成的包到 release/（分钟级）
       wtool unpack-release   <项目>   照包自带的 dist.json 校验 + 拼卷 + 解到 output/
       wtool install  <项目>    登记 + 软链 + shell 集成
-      wtool uninstall --id <项目>   撤掉
+      wtool uninstall --id <项目>   撤掉（只撤用户层）
+      wtool sudo-uninstall <项目>|all   撤系统层（/etc 还原 + 卸掉这次装进来的 apt 包）
 
   自己发一版（都要先提交，发布只发 release/ 里已有的东西）：
       wtool pack-release    <项目>    output/ → release/（打包 + 分卷，不联网）
