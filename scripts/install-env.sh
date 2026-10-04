@@ -34,6 +34,32 @@ env_priv() {
     fi
 }
 
+# ── 提权：普通用户跑 ./install.sh 时，apt 和 /etc/apt 的写都要 sudo ──────
+#
+# 2026-10-04 发现：这套脚本原来**只在 root 下能用** —— `env_prepare` 里算出了
+# 提权前缀 `_p` 却没人用它，所有 `apt-get` 都是裸调的。在 root 的机器上
+# （作者的 WSL）一直没暴露；容器里 `container-raw.sh --user` 建出普通用户之后，
+# `./install.sh` 第一步就 permission denied。
+#
+# 规矩：**apt / /etc/apt 一律走下面这几个助手**，它们按 $ENV_PRIV 自动加 sudo：
+#   ENV_PRIV=""       （root，或者根本没有 sudo 可用）
+#   ENV_PRIV="sudo "  （普通用户 + 有 sudo）
+env_priv_refresh() {   # 用之前顺手刷新（可能刚装上 sudo）
+    ENV_PRIV=$(env_priv)
+    export ENV_PRIV
+}
+env_priv_mkdir() { ${ENV_PRIV:-}mkdir -p "$@" 2>/dev/null || true; }
+env_priv_rm()    { ${ENV_PRIV:-}rm -f -- "$@" 2>/dev/null || true; }
+env_priv_cp()    { ${ENV_PRIV:-}cp -a -- "$@" 2>/dev/null || true; }
+env_priv_write() {   # <目标文件>，内容走 stdin
+    _pw_dst=$1
+    if [ -n "${ENV_PRIV:-}" ]; then
+        ${ENV_PRIV}tee "$_pw_dst" >/dev/null
+    else
+        cat > "$_pw_dst"
+    fi
+}
+
 env_need_root() {
     [ "$(id -u 2>/dev/null || echo 1)" = 0 ] && return 0
     command -v sudo >/dev/null 2>&1 && return 0
@@ -56,19 +82,20 @@ env_use_mirror() {
     # 先把**原来的**源文件备份一份：万一这个镜像不好用，得有路回去。
     # （以前是直接删掉原源 —— 换源失败就没退路了。）
     _um_dir=${ENV_APT_DIR:-/etc/apt}
+    env_priv_refresh
     if [ ! -d "$_um_dir/wtool-sources.bak" ]; then
-        mkdir -p "$_um_dir/wtool-sources.bak" 2>/dev/null || true
-        cp -a "$_um_dir/sources.list" "$_um_dir/wtool-sources.bak/" 2>/dev/null || true
-        mkdir -p "$_um_dir/wtool-sources.bak/sources.list.d" 2>/dev/null || true
-        cp -a "$_um_dir/sources.list.d/." "$_um_dir/wtool-sources.bak/sources.list.d/" 2>/dev/null || true
+        env_priv_mkdir "$_um_dir/wtool-sources.bak"
+        env_priv_cp "$_um_dir/sources.list" "$_um_dir/wtool-sources.bak/"
+        env_priv_mkdir "$_um_dir/wtool-sources.bak/sources.list.d"
+        env_priv_cp "$_um_dir/sources.list.d/." "$_um_dir/wtool-sources.bak/sources.list.d/"
     fi
     . /etc/os-release 2>/dev/null || true
     [ -n "${VERSION_CODENAME:-}" ] || { env_warn "读不出 VERSION_CODENAME，跳过换源"; return 0; }
 
-    mkdir -p "$_um_dir/sources.list.d"
+    env_priv_mkdir "$_um_dir/sources.list.d"
     # deb822（.sources）在 apt 1.1 就有了，20.04 的 apt 2.0 也认。
     # 曾经误以为 focal 不认，走了弯路 —— 见 harness/docs/hazards.md。
-    cat > "$_um_dir/sources.list.d/wtool-mirror.sources" <<EOF
+    env_priv_write "$_um_dir/sources.list.d/wtool-mirror.sources" <<EOF
 Types: deb
 URIs: http://$ENV_MIRROR/ubuntu/
 Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports $VERSION_CODENAME-security
@@ -77,11 +104,11 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
     # 原来的源文件要清掉，否则它还指着官方源，换源等于没换。
     # 20.04 是 /etc/apt/sources.list，24.04 是 sources.list.d/ubuntu.sources —— 两种都清。
-    rm -f "$_um_dir/sources.list" 2>/dev/null || true
+    env_priv_rm "$_um_dir/sources.list"
     for _f in "$_um_dir"/sources.list.d/*; do
         case $_f in
             */wtool-mirror.sources) ;;
-            *) rm -f -- "$_f" 2>/dev/null || true ;;
+            *) env_priv_rm "$_f" ;;
         esac
     done
 }
@@ -98,7 +125,9 @@ env_mirror_record() {   # <代号> [主机名]
     _mr_code=$1; _mr_host=${2:--}
     _mr_state=${WTOOL_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/wtool}
     mkdir -p "$_mr_state" 2>/dev/null || return 0
-    printf '%s\t%s\tinstall.sh\t%s\n' "$_mr_code" "$_mr_host" \
+    # 来源默认写 install.sh；container-raw.sh --user 会把它设成自己的名字，
+    # 这样 `mirror.txt` 里能看出"这台机器上是谁挑的"
+    printf '%s\t%s\t%s\t%s\n' "$_mr_code" "$_mr_host" "${ENV_MIRROR_SOURCE:-install.sh}" \
         "$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || echo -)" \
         > "$_mr_state/mirror.txt" 2>/dev/null || true
 }
@@ -287,6 +316,37 @@ env_mirror_pick() {
 env_apt_ready() {
     env_say "检查 apt 源"
 
+    # ── 这台机器上已经挑过一次了 → 接着用，不再测速 ──────────────────
+    #
+    # 记录在 <state>/mirror.txt（install.sh 第 0 步写的，引擎的系统层也读它，
+    # 见 ADR-0032）。第二次跑 install.sh 时**没必要再测一遍**：
+    # 测速要下 7 个索引（每个最多 3 秒），而结果十有八九还是同一个。
+    #
+    # 想重挑：WTOOL_MIRROR=pick（或者 auto/test），或者直接给代号/主机名。
+    case ${WTOOL_MIRROR:-} in
+        pick|auto|test) WTOOL_MIRROR="" ;;   # 强制重新测速
+    esac
+    if [ -z "${WTOOL_MIRROR:-}" ]; then
+        _rr_state=${WTOOL_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/wtool}
+        if [ -s "$_rr_state/mirror.txt" ]; then
+            _rr_code=$(cut -f1 "$_rr_state/mirror.txt" 2>/dev/null | head -1)
+            _rr_host=$(cut -f2 "$_rr_state/mirror.txt" 2>/dev/null | head -1)
+            if [ "$_rr_code" = "official" ]; then
+                env_say "  上次（$_rr_state/mirror.txt）选的是官方源 → 接着用，不再测速"
+                env_apt_try 2 ${ENV_PRIV:-}apt-get update -qq >/dev/null 2>&1 || true
+                return 0
+            fi
+            if [ -n "$_rr_host" ] && [ "$_rr_host" != "-" ]; then
+                env_say "  上次挑的是 $_rr_host（$_rr_code）→ 接着用"
+                env_say "  想重新测速：WTOOL_MIRROR=pick ./install.sh"
+                env_apt_bypass_proxy "$_rr_host"
+                env_use_mirror "$_rr_host"
+                env_apt_try 2 ${ENV_PRIV:-}apt-get update -qq >/dev/null 2>&1                     || env_warn "  它现在更新不了 —— 想重挑就 WTOOL_MIRROR=pick ./install.sh"
+                return 0
+            fi
+        fi
+    fi
+
     # ── 用户显式指定：不测速，直接用 ────────────────────────────────
     #   WTOOL_MIRROR=ustc        按代号（见 env_mirror_list）
     #   WTOOL_MIRROR=mirrors.aliyun.com   直接给主机名
@@ -299,7 +359,7 @@ env_apt_ready() {
                 # "official = 不换源" 通过了，但它其实换了，只是没打印）
                 env_say "  按 WTOOL_MIRROR=$WTOOL_MIRROR：保持系统自带的源"
                 env_mirror_record official
-                env_apt_try 2 apt-get update -qq >/dev/null 2>&1 \
+                env_apt_try 2 ${ENV_PRIV:-}apt-get update -qq >/dev/null 2>&1 \
                     || env_warn "  系统自带的源更新不了 —— 网络问题，下面的装包大概率会失败"
                 return 0 ;;
             *)
@@ -313,12 +373,12 @@ env_apt_ready() {
                     env_mirror_record "${WTOOL_MIRROR}" "$_wm_host"
                     env_apt_bypass_proxy "$_wm_host"
                     env_use_mirror "$_wm_host"
-                    if env_apt_try 2 apt-get update -qq >/dev/null 2>&1; then
+                    if env_apt_try 2 ${ENV_PRIV:-}apt-get update -qq >/dev/null 2>&1; then
                         env_say "  换源后可用"
                     else
                         env_warn "  指定的源不好用，放回原来的源"
                         env_apt_restore_sources
-                        env_apt_try 2 apt-get update -qq >/dev/null 2>&1 || true
+                        env_apt_try 2 ${ENV_PRIV:-}apt-get update -qq >/dev/null 2>&1 || true
                     fi
                     return 0
                 fi
@@ -341,7 +401,7 @@ env_apt_ready() {
     if [ -z "$_pick_code" ] || [ "$_pick_code" = "official" ]; then
         env_say "  用系统自带的源"
         env_mirror_record official
-        env_apt_try 2 apt-get update -qq >/dev/null 2>&1 \
+        env_apt_try 2 ${ENV_PRIV:-}apt-get update -qq >/dev/null 2>&1 \
             || env_warn "  系统自带的源更新不了 —— 网络问题，下面的装包大概率会失败"
         return 0
     fi
@@ -354,7 +414,7 @@ env_apt_ready() {
     # 测速那一步量的也是直连（DIRECT），这里对得上。
     env_apt_bypass_proxy "$_pick_host"
     env_use_mirror "$_pick_host"
-    if env_apt_try 2 apt-get update -qq >/dev/null 2>&1; then
+    if env_apt_try 2 ${ENV_PRIV:-}apt-get update -qq >/dev/null 2>&1; then
         env_say "  换源后可用"
         return 0
     fi
@@ -362,7 +422,7 @@ env_apt_ready() {
     # 挑的那个不好用 → 退回原来的源（这才是"能用就别乱动"那句话真正要的保护）
     env_warn "  $_pick_host 更新不了，把原来的源放回去"
     env_apt_restore_sources
-    if env_apt_try 2 apt-get update -qq >/dev/null 2>&1; then
+    if env_apt_try 2 ${ENV_PRIV:-}apt-get update -qq >/dev/null 2>&1; then
         env_say "  原来的源可用"
     else
         env_warn "  两条路都不行 —— 网络问题，下面的装包大概率会失败"
@@ -378,8 +438,8 @@ env_apt_restore_sources() {
             */wtool-mirror.sources) rm -f -- "$_f" 2>/dev/null || true ;;
         esac
     done
-    cp -a "$_rs_dir/wtool-sources.bak/sources.list" "$_rs_dir/sources.list" 2>/dev/null || true
-    cp -a "$_rs_dir/wtool-sources.bak/sources.list.d/." "$_rs_dir/sources.list.d/" 2>/dev/null || true
+    env_priv_cp "$_rs_dir/wtool-sources.bak/sources.list" "$_rs_dir/sources.list"
+    env_priv_cp "$_rs_dir/wtool-sources.bak/sources.list.d/." "$_rs_dir/sources.list.d/"
     env_say "  已把原来的 apt 源放回去"
 }
 
@@ -397,9 +457,10 @@ env_apt_bypass_proxy() {
             *) export "$_v=${_cur:+$_cur,}$_h" ;;
         esac
     done
-    mkdir -p "${ENV_APT_DIR:-/etc/apt}/apt.conf.d" 2>/dev/null || return 0
+    env_priv_refresh
+    env_priv_mkdir "${ENV_APT_DIR:-/etc/apt}/apt.conf.d" || return 0
     printf 'Acquire::http::Proxy::%s "DIRECT";\n' "$_h" \
-        > "${ENV_APT_DIR:-/etc/apt}/apt.conf.d/99wtool-noproxy" 2>/dev/null || true
+        | env_priv_write "${ENV_APT_DIR:-/etc/apt}/apt.conf.d/99wtool-noproxy"
 }
 
 # 装一个包，**按候选名依次试**。
@@ -416,10 +477,11 @@ env_install_first() {
     # 被这里覆盖之后，后面那句提示就成了
     #     "请手动装：ansibleapt-get install -y git"
     # 这种"看着像乱码"的输出，根源都是变量被别的函数偷了。
+    env_priv_refresh
     for _cand in "$@"; do
         # shellcheck disable=SC2086
         if DEBIAN_FRONTEND=noninteractive env_apt_try 3 \
-               apt-get install -y -qq --no-install-recommends $_cand >/dev/null 2>&1; then
+               ${ENV_PRIV:-}apt-get install -y -qq --no-install-recommends $_cand >/dev/null 2>&1; then
             env_say "  $_desc ✓（包名 $_cand）"
             return 0
         fi
@@ -487,8 +549,9 @@ env_apt_try() {   # <次数> <命令...>
 #
 # 加上超时之后，"停滞"会变成"失败"，重试/换源才有机会生效。
 env_apt_fastfail() {
-    mkdir -p /etc/apt/apt.conf.d 2>/dev/null || return 0
-    cat > /etc/apt/apt.conf.d/99wtool-timeout <<'EOF'
+    env_priv_refresh
+    env_priv_mkdir /etc/apt/apt.conf.d || return 0
+    env_priv_write /etc/apt/apt.conf.d/99wtool-timeout <<'EOF'
 Acquire::http::Timeout "20";
 Acquire::https::Timeout "20";
 Acquire::Retries "3";
@@ -515,7 +578,7 @@ env_prepare() {
         _try=$((_try + 1))
         # shellcheck disable=SC2086
         if DEBIAN_FRONTEND=noninteractive env_apt_try 3 \
-               apt-get install -y -qq --no-install-recommends \
+               ${_p}apt-get install -y -qq --no-install-recommends \
                ca-certificates git python3 curl ${ENV_EXTRA_PKGS:-} >/dev/null 2>&1; then
             env_say "  ca-certificates git python3 curl ✓"
             break
@@ -547,15 +610,34 @@ env_prepare() {
     env_say "运行环境就绪"
 }
 
-# 让 git 认这个仓库（只在以 root 访问别人的仓库时才需要）
+# 让 git 认挂进来的仓库。
+#
+# 触发它的有两种情况，**都不是"以 root 才行"**：
+#   · 容器里以 root 访问宿主目录（uid 0 ≠ 宿主 uid）
+#   · 容器里的普通用户 uid 和宿主 uid 不一样（`container-raw.sh --user`
+#     在镜像自带的 uid 1000 被 `ubuntu` 占着时会拿到 1001 —— 实测就是这么撞上的：
+#     `wtool install` 报 "git 拒绝使用 /wtool/bootstrap 的仓库"）
+# 所以这里**不再限定 root**：谁跑 install.sh 就给谁设。
 env_git_ownership() {
     [ -n "${WTOOL_WS_DIR:-}" ] || return 0
     command -v git >/dev/null 2>&1 || return 0
-    [ "$(id -u 2>/dev/null || echo 1)" = 0 ] || return 0
+    # ⚠️ 别拿**工作区根目录**去试：它是 repo 客户端，**不是 git 仓库**
+    #    （`git -C /wtool rev-parse` 必然失败）。要试就试里面某个项目。
+    _go_probe=""
+    for _go_cand in "$WTOOL_WS_DIR/bootstrap" "$WTOOL_WS_DIR"/*/; do
+        [ -d "$_go_cand/.git" ] || [ -f "$_go_cand/.git" ] || continue
+        _go_probe=$_go_cand
+        break
+    done
+    [ -n "$_go_probe" ] || return 0
     # 读一次试试：能读就什么都不用做
-    if git -C "$WTOOL_WS_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    if git -C "$_go_probe" rev-parse --git-dir >/dev/null 2>&1; then
         return 0
     fi
     git config --global --add safe.directory '*' 2>/dev/null || true
-    env_say "  已允许 git 使用挂载进来的仓库（容器里以 root 访问宿主目录时要这一步）"
+    if git -C "$_go_probe" rev-parse --git-dir >/dev/null 2>&1; then
+        env_say "  已允许 git 使用挂载进来的仓库（uid 和宿主不一致时要这一步）"
+    else
+        env_warn "  git 还是读不了 $_go_probe —— 手动跑一次：git config --global --add safe.directory '*'"
+    fi
 }

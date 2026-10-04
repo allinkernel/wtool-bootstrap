@@ -74,6 +74,13 @@ printf 'apt-get %s\n' "$*" >> "${ENV_APT_LOG:-/dev/null}"
 exit 0
 EOF
 chmod +x "$T/bin/apt-get"
+# 假 sudo：**原样执行**后面的命令（测试是在普通用户下跑的，install-env.sh 现在
+# 会给 apt 加上提权前缀 —— 真 sudo 会要密码，桩就把它吃掉）
+cat > "$T/bin/sudo" <<'EOF'
+#!/bin/sh
+exec "$@"
+EOF
+chmod +x "$T/bin/sudo"
 
 # 一份"本来就有"的源，用来验证备份/还原
 mk_aptdir() {   # <目录>
@@ -109,9 +116,16 @@ run_env() {   # <apt 目录> [VAR=值 ...] <要调用的命令...>
             *) break ;;
         esac
     done
+    # ⚠️ state 一定要指到临时目录：`env_apt_ready` 现在会读 <state>/mirror.txt
+    #    （上次挑过就接着用），不隔离就会读到**跑测试那个人自己的**记录，
+    #    于是"该测速的没测速"（实测：4 条断言因此红过）。
+    #   每个 fixture 的 apt 目录配一个独立 state：同一节里前后两小段（比如
+    #   "先记 official、再自动挑"）才不会互相串味。
+    _st=${WTOOL_STATE:-$T/state-$(basename -- "$_d")}
+    mkdir -p "$_st"
     PATH="$T/bin:$PATH" \
     ENV_APT_DIR="$_d" ENV_APT_HELPER="$T/apt-helper" ENV_CODENAME=noble \
-    ENV_APT_LOG="$T/apt.log" \
+    ENV_APT_LOG="$T/apt.log" WTOOL_STATE="$_st" \
         sh -c '. "$1"; . "$2"; shift 2; "$@"' sh "$ENV_SH" "$T/env_shim" "$@" < /dev/null
 }
 
@@ -229,8 +243,12 @@ env_mirror_list() {
 EOF
 APT7="$T/apt7"; mk_aptdir "$APT7"
 set +e
+#   ⚠️ 这一条是裸 sh -c（不走 run_env），state 也要自己隔离 ——
+#      不然会读到跑测试那个人自己的 ~/.local/state/wtool/mirror.txt
+mkdir -p "$T/state-apt7"
 _out=$(PATH="$T/bin:$PATH" ENV_APT_DIR="$APT7" ENV_APT_HELPER="$T/apt-helper" \
-       ENV_CODENAME=noble sh -c '. "$1"; . "$2"; env_apt_ready' sh "$ENV_SH" "$T/env_shim_dead" 2>&1)
+       ENV_CODENAME=noble WTOOL_STATE="$T/state-apt7" \
+       sh -c '. "$1"; . "$2"; env_apt_ready' sh "$ENV_SH" "$T/env_shim_dead" 2>&1)
 _rc=$?
 set -e
 chk "全连不上时退出码仍是 0（不能把安装整个搞崩）" "$_rc" "0"
@@ -271,6 +289,24 @@ else
 fi
 grep -qF "wtool sudo-uninstall <项目>|all" "$_scripts/install.sh" \
     && ok "写清了 sudo-uninstall 收 <项目>|all" || bad "sudo-uninstall 的用法没写清"
+
+# container-raw.sh --user：提示里必须写清用户名/密码/sudo 这几件事
+#   （用户 2026-10-04 要求：加 --user 参数并"把默认密码写进提示里"）
+if grep -qF -- "--user <用户名>" "$_scripts/container-raw.sh" \
+   && grep -qF '密码是 **root**' "$_scripts/container-raw.sh" \
+   && grep -qF 'sudo **免密**' "$_scripts/container-raw.sh"; then
+    ok "container-raw.sh 有 --user 用法，且提示里写了密码 root / sudo 免密"
+else
+    bad "container-raw.sh 的 --user 用法或密码提示不全"
+fi
+grep -qF 'chpasswd' "$_scripts/container-raw.sh" && grep -qF 'NOPASSWD:ALL' "$_scripts/container-raw.sh" \
+    && ok "--user 真的会设密码 + 写 sudoers 免密" || bad "--user 缺 chpasswd / NOPASSWD"
+grep -qF 'exec su - "$USER_NAME"' "$_scripts/container-raw.sh" \
+    && ok "--user 最后切到那个用户（su -）" || bad "--user 没有切用户"
+# 不带 --user 时不能装东西（老行为"什么都不装"）
+grep -qE '^if \[ -n "\$USER_NAME" \]; then$' "$_scripts/container-raw.sh" \
+    && ok "装 sudo / 建用户都在 --user 分支里（不带参数不装东西）" \
+    || bad "--user 的分支结构不对（可能不带参数也会装东西）"
 
 # 反向：容器脚本里不该再出现已经退休/改名的老命令
 for _old in "wtool download " "wtool publish " "wtool provision"; do

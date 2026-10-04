@@ -390,7 +390,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
 | layer | `tests/layer_test.sh` | 46 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **631** 条断言：
+共 **635** 条断言：
 
 ```sh
 ./tests/run_all.sh            # 10 组全跑
@@ -448,6 +448,11 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 （见 `harness/docs/hazards.md` H20）。
 
 `WTOOL_MIRROR=<代号|主机名|official>` 可以跳过测速直接指定；`official` = 不换源。
+
+**挑过一次就不再测**：结果记在 `<state>/mirror.txt`，第二次跑 `install.sh` 直接接着用
+（省掉 7 个索引、每个最多 3 秒的探测）。想重新测速：`WTOOL_MIRROR=pick ./install.sh`。
+容器里的 `container-raw.sh --user <名字>` 也是走这套（它把记录写进**那个用户**的 state，
+所以后面 `install.sh` 读到的是同一份）。
 
 ---
 
