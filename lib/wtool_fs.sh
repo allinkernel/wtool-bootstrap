@@ -959,6 +959,53 @@ wt_has_action() {   # <项目 id> <动作名>
 
 
 # --------------------------------------------------------------------------
+# 产物账本：<state>/<项目 id>/artifacts.tsv —— "当前磁盘上的产物是谁产出的"
+#
+# 为什么要有它、为什么放状态目录、为什么**截断重写**：见 ADR-0036。
+# 一句话：`__output/` 的形状是契约（build 和 download 解出来必须逐路径相同），
+# 所以"自己编的 / 下载解的 / 上次遗留的 / 手工塞的"在文件系统上长得一模一样，
+# 来源只能另记一本账。
+#
+# 格式（TAB 分隔 4 列，一行一个层目录）：
+#   kind <TAB> 相对项目根的路径 <TAB> 来源 <TAB> 时间
+#   payload    __output/<target>/<层>   build:<target>   2026-10-04T21:30:12+0800
+#
+# 读它的只有一处：wtool_plan.py 的 project_state()（`:1559-1564` 读、`:1932` 用）——
+# 取**第一条**有来源的行，看板「下gz包」那格靠 `== "download"` 区分
+# 已完成（下载解的）和可执行（能下但还没下）。
+#
+# 为什么由引擎写：`kind="docker"` + `build/layers.tsv` 的构建（ADR-0029）里
+# **根本没有项目脚本**（起容器 / commit / 导出都是引擎干的），项目脚本那条路走不到。
+# 项目自己驱动构建时由 `build.sh` 写同一张表（格式必须一致，两边都对着 ADR-0036）。
+# --------------------------------------------------------------------------
+wt_record_artifacts() {   # <项目 id> <项目目录> <来源前缀>
+    _wa_id=${1:-}; _wa_dir=${2:-}; _wa_src=${3:-}
+    [ -n "$_wa_id" ] && [ -n "$_wa_dir" ] && [ -n "$_wa_src" ] || return 0
+    wt_dry && return 0                       # dry-run：一个字节都不写
+    _wa_out="$_wa_dir/__output"
+    [ -d "$_wa_out" ] || return 0
+    mkdir -p -- "$WTOOL_STATE/$_wa_id" 2>/dev/null || return 0
+    _wa_f="$WTOOL_STATE/$_wa_id/artifacts.tsv"
+    _wa_ts=$(date +%Y-%m-%dT%H:%M:%S%z)
+    # 截断重写：这张表说的是"当前磁盘上"的产物（读的人取第一条）——
+    # 追加会让上一轮的来源永远压住新的（先 build 后 download 就显示不出已完成），
+    # 而且每跑一轮都会堆长。截断重写还天然幂等。别改成 `>>` 追加。
+    : > "$_wa_f" 2>/dev/null || return 0
+    for _wa_t in "$_wa_out"/*/; do
+        [ -d "$_wa_t" ] || continue
+        _wa_target=$(basename -- "$_wa_t")
+        for _wa_l in "$_wa_t"*/; do
+            [ -d "$_wa_l" ] || continue
+            printf 'payload\t%s\t%s\t%s\n' \
+                "__output/$_wa_target/$(basename -- "$_wa_l")" \
+                "$_wa_src:$_wa_target" "$_wa_ts" >> "$_wa_f" 2>/dev/null || true
+        done
+    done
+    return 0
+}
+
+
+# --------------------------------------------------------------------------
 # 环境变量汇总：每次 install/uninstall 之后重新生成
 #
 # 顺序很重要 —— 先让项目的 env 块落盘（wt_plan_exec 干的），

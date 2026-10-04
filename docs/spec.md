@@ -443,11 +443,11 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 63 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷 |
 | contract | `tests/contract_test.sh` | 221 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同）、**`--id` / 裸 id 的 uninstall 也跑项目脚本**（标记文件 + 参数；解析不出来时明确报错、退出码非 0，`--no-script` 只警告 —— BL-47） |
-| docker-build | `tests/docker_build_test.sh` | 44 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错 |
+| docker-build | `tests/docker_build_test.sh` | 58 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错、**产物账本**（格式/来源/截断重写幂等/dry-run 不写/看板「下gz包」四种来源值/按项目分开，ADR-0036） |
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 46 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **751** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
+共 **765** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
 `run_all.sh` **文件头**注释里那几行逐组条数也同步成了这一版，但**以它跑出来的 PASS 行为准**）：
 
 ```sh
@@ -482,7 +482,14 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 所以在 docker 里 `wtool sudo-install` 也能正确工作，哪怕 shell 一个变量都没导出。
 
 **B 类为什么不能进 shell**：它描述的是"这一次脚本"而不是"这台机器的常态"。
-`WTOOL_ARTIFACTS` 指向的是**这一轮**的产物表；两个项目同时 build 时还会互相覆盖。
+`WTOOL_ARTIFACTS` 指向的是**这一轮**的产物表（`$WTOOL_STATE/<项目 id>/artifacts.tsv`）。
+
+> **订正（2026-10-04）**：这里原来还有一句"两个项目同时 build 时还会互相覆盖"——
+> **那是错的**，路径按**项目 id** 分开，`wtool build all` 时各写各的。
+> 复现：临时工作区里两个项目（一个引擎驱动、一个自己跑 `build.sh`）各写各的账本 →
+> 两份 `artifacts.tsv` 都在、planner 分别读到 `build:ubuntu_24.04` / `build:plain`。
+> 断言在 `tests/docker_build_test.sh` 场景 8（一份账本四种来源值）和场景 9（不互相覆盖）。
+> 以本条为准。
 
 **`WTOOL_PREFIX` 的语义**：编译安装的唯一前缀，`wsw.sh` 只准往这里写。
 卸载 = 删掉 `$WTOOL_PREFIX` 下对应文件（不需要 journal）。

@@ -1034,6 +1034,10 @@ EOF
             fi
             wt_record_action "$_pid" build
             if wt_docker_build "$_path" "$_pid" "$_build_target" "$_build_jobs"; then
+                # 产物账本：这条路里**没有项目脚本**（起容器/commit/导出都是引擎干的），
+                # 所以"这批产物是本机编的"只能由引擎记 —— 项目自己的 build.sh 够不着
+                # （ADR-0036）。写表的是 wt_record_artifacts（只写不算那一半）。
+                wt_record_artifacts "$_pid" "$_path" build
                 _done=$((_done + 1))
             else
                 _failed=$((_failed + 1))

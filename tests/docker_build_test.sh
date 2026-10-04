@@ -319,6 +319,18 @@ _rc=0
 grep -q 'boom' "$T/build4.log" && ok "把容器里的日志尾部贴出来了" || bad "没贴日志" "$(tail -5 "$T/build4.log")"
 [ -d "$P/__output/ubuntu_24.04/one" ] && bad "失败了还留了半成品 output 层" || ok "失败时没有留下半成品"
 grep -q '^commit ' "$DOCKER_LOG" && bad "失败了居然 commit 了" || ok "失败时不 commit"
+# 换回能跑的 layer.sh：上面那个"必失败"的脚本是为了这一节，别留给后面的节
+cat > "$P/scripts/layer.sh" <<'EOF'
+#!/bin/sh
+set -e
+L=$1
+D="$WTOOL_TEST_ROOT/root/.wtool/usr/share/$L"
+mkdir -p "$D"
+printf '%s\n' "$L" > "$D/file.txt"
+printf 'junk\n' > "$D/skip.log"
+: > "$D/.wh.deleted"
+EOF
+chmod +x "$P/scripts/layer.sh"
 
 echo "== 6. --dry-run：一个字节都不动 =="
 : > "$DOCKER_LOG"; : > "$DOCKER_IMAGES"
@@ -342,6 +354,77 @@ _rc=0
 "$WT" build editor/demo > "$T/duplayer.log" 2>&1 || _rc=$?
 [ "$_rc" != 0 ] && grep -q '重复' "$T/duplayer.log" && ok "层名重复被拒" || bad "重复层名没拒" "$(cat "$T/duplayer.log")"
 cp "$T/layers.bak" "$P/build/layers.tsv"
+
+echo "== 8. 产物账本：引擎驱动构建要把来源记下来（ADR-0036）=="
+# 这条路里**没有项目脚本**（起容器/commit/导出都是引擎干的），所以"这批产物是本机编的"
+# 只能由引擎记 —— 项目自己的 build.sh 够不着。读它的是 wtool_plan.py 的 project_state()。
+AF="$WTOOL_STATE/editor/demo/artifacts.tsv"
+: > "$DOCKER_LOG"; : > "$DOCKER_IMAGES"
+rm -rf "$P/__output" "$P/__layer" "$WTOOL_STATE"
+"$WT" build editor/demo > "$T/art1.log" 2>&1 || bad "为账本重跑一次 build" "$(cat "$T/art1.log")"
+[ -f "$AF" ] && ok "引擎驱动构建写了账本 \$WTOOL_STATE/editor/demo/artifacts.tsv" \
+    || bad "引擎驱动构建没写账本（ADR-0036 的那条路）"
+chk "账本每行 4 列（TAB 分隔：kind/路径/来源/时间）" \
+    "$(awk -F'\t' 'NF != 4 {n++} END {print n+0}' "$AF")" "0"
+chk "来源列全是 build:<target>" "$(cut -f3 "$AF" | sort -u | paste -sd, -)" "build:ubuntu_24.04"
+chk "一行一个层目录（相对项目根，含占位层 empty）" "$(cut -f2 "$AF" | sort | paste -sd, -)" \
+    "__output/ubuntu_24.04/empty,__output/ubuntu_24.04/one,__output/ubuntu_24.04/other,__output/ubuntu_24.04/three,__output/ubuntu_24.04/two"
+# 幂等：再构建一次是**截断重写**，不是追加（同一路径不许写两遍把表撑爆）
+cp "$AF" "$T/art.first"
+"$WT" build editor/demo > "$T/art2.log" 2>&1 || bad "第二次 build（账本幂等）" "$(cat "$T/art2.log")"
+chk "再 build 一次：行数不变（不堆积）" "$(wc -l < "$AF" | tr -d ' ')" "$(wc -l < "$T/art.first" | tr -d ' ')"
+chk "再 build 一次：kind/路径/来源逐字节相同（截断重写）" \
+    "$(cut -f1-3 "$AF" | paste -sd';' -)" "$(cut -f1-3 "$T/art.first" | paste -sd';' -)"
+# dry-run：一个字节都不写（连账本也不写）
+rm -f "$AF"
+"$WT" build editor/demo --dry-run > "$T/artdry.log" 2>&1 || bad "dry-run（账本）" "$(cat "$T/artdry.log")"
+[ -e "$AF" ] && bad "dry-run 写了账本" || ok "dry-run 不写账本"
+# 读法：「下gz包」那格只认**裸** `download`；build:* / 别的值 / 没有账本都是「可执行」
+# （⚠️ 精确相等，不是前缀 —— 退休的 download.sh 写的 `download:$TAG` 对不上，见 ADR-0036）
+printf '{}\n' > "$P/scripts/release.json"
+_cell() { env -u WTOOL_ROOT python3 "$PY" table --root "$WTOOL_ROOT" --state "$WTOOL_STATE" 2>/dev/null \
+          | sed 's/│/|/g' | grep -E '^\| editor/demo ' | awk -F'|' '{gsub(/^ +| +$/,"",$11); print $11}'; }
+"$WT" build editor/demo > "$T/art3.log" 2>&1 || bad "第三次 build（账本读法）" "$(cat "$T/art3.log")"
+chk "账本来源 build:* → 下gz包=可执行（本机自己编的）" "$(_cell)" "可执行"
+printf 'payload\t__output/ubuntu_24.04/one\tdownload\t2026-10-04T00:00:00+0800\n' > "$AF"
+chk "账本来源裸 download → 下gz包=已完成（下载解的）" "$(_cell)" "已完成"
+printf 'payload\t__output/ubuntu_24.04/one\tdownload:v1\t2026-10-04T00:00:00+0800\n' > "$AF"
+chk "账本来源 download:<tag> 对不上（历史格式的坑）→ 可执行" "$(_cell)" "可执行"
+rm -f "$AF"
+chk "没有账本（今天下载侧就是这样）→ 下gz包=可执行" "$(_cell)" "可执行"
+
+echo "== 9. 账本按项目分开：一次 build 两条路各写各的（ADR-0036）=="
+# 一个**没有层清单**的项目 → cmd_build 回退到 scripts/build.sh（项目自驱那条路），
+# 账本由脚本自己写。顺带断言引擎**真的把 $WTOOL_ARTIFACTS 喂进脚本**（空了就 exit 9）。
+P2="$WTOOL_ROOT/editor/plain"
+mkdir -p "$P2/scripts"
+cat > "$P2/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" id="editor/plain" priority="51"/>
+EOF
+cat > "$P2/scripts/build.sh" <<'EOF'
+#!/bin/sh
+set -eu
+[ -n "${WTOOL_ARTIFACTS:-}" ] || { echo "引擎没喂 WTOOL_ARTIFACTS" >&2; exit 9; }
+mkdir -p __output/main
+: > __output/main/x
+: > "$WTOOL_ARTIFACTS"
+printf 'payload\t__output/main\tbuild:plain\t2026-10-04T00:00:00+0800\n' >> "$WTOOL_ARTIFACTS"
+EOF
+chmod +x "$P2/scripts/build.sh"
+AP="$WTOOL_STATE/editor/plain/artifacts.tsv"
+rm -f "$AF" "$AP"
+# ⚠️ 这里**不能**写 `build all`：`wt_all_projects build` 只认"有 scripts/build.sh"的项目，
+#    而 editor/demo 是纯引擎驱动（没有 build.sh）→ 会被 all 漏掉（见 BACKLOG BL-50）。
+#    显式点名两个项目，一次调用里两条路都跑。
+"$WT" build editor/demo editor/plain > "$T/all.log" 2>&1 || bad "一次 build 两条路（引擎驱动 + 项目自驱）" "$(cat "$T/all.log")"
+[ -s "$AF" ] && ok "引擎驱动那条路（editor/demo）写了账本" \
+    || bad "引擎驱动那条路没写账本" "$(cat "$T/all.log")"
+[ -s "$AP" ] && ok "项目脚本那条路（editor/plain）写了账本 —— 引擎真喂了 \$WTOOL_ARTIFACTS" \
+    || bad "项目脚本那条路没写成账本" "$(cat "$T/all.log")"
+chk "按项目 id 分开：两份账本各自来源正确（谁也不覆盖谁）" \
+    "$(cut -f3 "$AF" | sort -u | paste -sd, -)|$(cut -f3 "$AP")" \
+    "build:ubuntu_24.04|build:plain"
 
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
