@@ -1,2 +1,12 @@
 __pycache__/
 *.pyc
+
+# wtool 产物目录：wtool 生成、机器特定、永不进 Git（ADR-0033）
+#   __output/  wtool build / unpack-release 的产出
+#   __release/ wtool pack-release 的产出，也是 download-release 的落点
+#   __layer/   kind="docker" 项目的 OCI 层仓库
+# ⚠️ 必须 ignore：否则 `git status` 里是未跟踪目录，而 publish-release 的
+#    脏检查（wt_git_dirty）会因此拒绝发布 —— 本次发布时实测撞到。
+/__output/
+/__release/
+/__layer/
