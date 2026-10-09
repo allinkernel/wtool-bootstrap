@@ -3543,8 +3543,12 @@ except Exception:
 
     # 只有这一轮真的推上去了东西，才去改文档。
     # 一个都没发出去还去刷新，等于拿"什么都没发生"去覆盖现状。
+    #
+    # ‼️ `|| true` 是有意的：刷新会**拒绝**在有多个下载页时动手（返回非零，ADR-0042），
+    #    而本脚本头上有 `set -eu` —— 不接住它，一次**发布成功**会被报成失败
+    #    （文档配置问题不该让发布背锅）。要单独看这个错误就敲 `wtool docs refresh`。
     if [ "$_done" -gt 0 ]; then
-        wt_refresh_downloads
+        wt_refresh_downloads || true
     elif ! wt_dry; then
         wt_warn "没有发布任何项目，下载链接未改动"
     fi
@@ -3573,12 +3577,31 @@ wt_refresh_downloads() {
     # 只认"整行就是这个标记"的文件。用 -F 匹配子串会误伤：
     # 任何一篇**提到**这个标记的文档都会被当成目标
     # （实测把 harness/BACKLOG.md 当成了下载页，然后刷失败）。
-    _doc=$(grep -rl --include='*.md' -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' \
-               "$WTOOL_ROOT" 2>/dev/null | head -1)
-    if [ -z "$_doc" ]; then
+    #
+    # ‼️ **工作区里只允许有一个**带标记的文档（ADR-0042）。
+    # 以前这里直接 `| head -1`：两个文档都带标记时**不报错**，
+    # 只有遍历顺序靠前的那个被刷 —— 另一个永远停在旧版本，
+    # 而用户完全看不出来（"下载页有两份、只更新了一份"）。
+    # 下载页只能有一个真相源，所以多于一个时**拒绝刷新**，并列出全部候选让人去删。
+    # ‼️ 末尾的 `|| true` 不能省：本脚本头上有 `set -eu`，而"一个都没找到"时
+    #    `grep -rl` 的退出码是 1 —— 裸赋值会让整个 wtool 当场退出
+    #    （实测：publish-release 明明发成功了，却因为这里返回 1 而报失败）。
+    _docs=$(grep -rl --include='*.md' -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' \
+                "$WTOOL_ROOT" 2>/dev/null || true)
+    _n_docs=$(printf '%s\n' "$_docs" | grep -c . || true)
+    if [ "$_n_docs" = 0 ]; then
         wt_info "没有文档带 wtool:downloads 标记，跳过下载链接刷新"
         return 0
     fi
+    if [ "$_n_docs" -gt 1 ]; then
+        wt_warn "有 $_n_docs 个文档带 wtool:downloads 标记 —— 下载页只能有一个，拒绝刷新"
+        printf '%s\n' "$_docs" | while IFS= read -r _d; do
+            [ -n "$_d" ] && wt_warn "  ${_d#$WTOOL_ROOT/}"
+        done
+        wt_warn "  只留一个（那个才是下载页），把其余文档里的标记块删掉再来"
+        return 1
+    fi
+    _doc=$(printf '%s\n' "$_docs" | head -1)
     if wt_dry; then
         wt_step "[dry-run] 刷新下载链接块: ${_doc#$WTOOL_ROOT/}"
         return 0

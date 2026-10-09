@@ -397,16 +397,24 @@ fi
 
 echo "== 6. ★测试没有碰真工作区的文档 =="
 # 这条断言是为了防住"测试改写真实文件"这类问题——它真的发生过一次。
-_real_doc="$WS/wtool-base/README.md"
+# 宿主文件是 **download.md**（ADR-0042 把 wtool:downloads 块从 README 挪进了下载页；
+# README 里现在只剩一行指过去的链接，不再带标记）。
+_real_doc="$WS/wtool-base/download.md"
 if [ -f "$_real_doc" ]; then
     if grep -q 'wtool:downloads' "$_real_doc" \
             && [ "$(grep -c '还没有发布过任何项目' "$_real_doc" || true)" = 0 ]; then
-        ok "真工作区的 README 没被动过（下载块里是真链接）"
+        ok "真工作区的 download.md 没被动过（下载块里是真链接）"
     else
-        bad "真工作区的 README 被测试改动了"
+        bad "真工作区的 download.md 被测试改动了"
     fi
 else
     ok "真工作区没有 wtool-base（无所谓）"
+fi
+# 反向断言：README **不许**再带标记块 —— 带了就是两个真相源（ADR-0042 禁止）
+if [ -f "$WS/wtool-base/README.md" ]; then
+    grep -q '^<!-- >>> wtool:downloads >>> -->' "$WS/wtool-base/README.md" \
+        && bad "真工作区 README 又带上了下载块标记（下载页只能有一个）" \
+        || ok "真工作区 README 里没有下载块标记（只链接到 download.md）"
 fi
 
 echo "== 7. 拒绝：__release/ 里没有 dist.json（不许凭空发）=="
@@ -928,6 +936,70 @@ grep -q 'release create v-nc --repo fakeowner/nocommit' "$T/gh.log" \
     && ok "release 照建（没有因为拿不到 sha 就停）" || bad "release 没建"
 chk "★一个 --target 都没传（不猜、也不传空的）" \
     "$(grep -c -- '--target' "$T/gh.log" || true)" "0"
+
+echo "== 18. ★下载页只能有一个：两个文档都带标记时拒绝刷新（ADR-0042）=="
+# 症状（改前）：`grep -rl … | head -1` 挑遍历顺序靠前的那个，**不报错**。
+# 于是"下载页有两份、只更新了一份"，另一份永远停在旧版本 —— 正是这个项目
+# 一直在消灭的"同一个东西两个说法"。改成：多于一个就拒绝 + 列出全部候选 + 非零退出。
+WS18="$T/ws18"; ST18="$T/state18"; P18="$WS18/alpha"
+mkdir -p "$P18" "$WS18/wtool-base"
+cat > "$P18/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="10">
+  <publish to="fakeowner/alpha"/>
+</wtool>
+EOF
+echo 'demo' > "$P18/demo.txt"
+git_init "$P18"
+# 让 alpha 有"自己记着的 tag"（`wt_publish_current_tag` 读的就是它）——
+# 打桩 gh 只认 `v-alpha`，别的 tag 一律查不到。
+mkdir -p "$P18/scripts"
+printf '{\n  "schema": 1,\n  "project": "alpha",\n  "repo": "fakeowner/alpha",\n  "tag": "v-alpha"\n}\n' \
+    > "$P18/scripts/release.json"
+cat > "$WS18/wtool-base/README.md" <<'EOF'
+# wtool
+
+下载看 [download.md](download.md)。
+EOF
+cat > "$WS18/wtool-base/download.md" <<'EOF'
+# 下载
+
+<!-- >>> wtool:downloads >>> -->
+<!-- <<< wtool:downloads <<< -->
+EOF
+# 第二份"下载页"：老 README 保留下来的标记块（就是这次搬迁要防的那种残留）
+cat > "$WS18/wtool-base/OLD-downloads.md" <<'EOF'
+# 旧下载页（残留）
+
+<!-- >>> wtool:downloads >>> -->
+| 项目 | 版本 | 包 | 大小 |
+|---|---|---|---|
+| alpha | [snapshot-2020-01-01](https://example.invalid/x) | [old.tar.gz](https://example.invalid/old.tar.gz) | 1.0K |
+<!-- <<< wtool:downloads <<< -->
+EOF
+_before18a=$(cat "$WS18/wtool-base/download.md")
+_before18b=$(cat "$WS18/wtool-base/OLD-downloads.md")
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin-dl" "$WS18" "$ST18" refresh-downloads > "$T/log18" 2>&1 || _rc=$?
+chk "★两个标记文档 → 非零退出（不再静默挑一个）" "$_rc" "1"
+grep -q '2 个文档带 wtool:downloads 标记' "$T/log18" \
+    && ok "报出了标记文档的个数" || { bad "没说有几个"; sed 's/^/     /' "$T/log18"; }
+grep -q 'wtool-base/OLD-downloads.md' "$T/log18" \
+    && ok "把候选逐个列出来了（知道该删哪个）" || bad "没列出候选文档"
+chk "★两个文件都一个字节没动（第一个）" "$(cat "$WS18/wtool-base/download.md")" "$_before18a"
+chk "★两个文件都一个字节没动（第二个）" "$(cat "$WS18/wtool-base/OLD-downloads.md")" "$_before18b"
+chk "★一个 gh 查询都没发（拒绝得早）" "$(grep -c 'release view' "$T/gh.log" || true)" "0"
+
+# 删掉残留那个 → 恢复正常，刷进唯一的那个
+rm -f "$WS18/wtool-base/OLD-downloads.md"
+_rc=0
+wt "$T/bin-dl" "$WS18" "$ST18" refresh-downloads > "$T/log18b" 2>&1 || _rc=$?
+chk "只剩一个标记文档时退出码 0" "$_rc" "0"
+grep -q 'v-alpha/source.zip' "$WS18/wtool-base/download.md" \
+    && ok "★刷的是唯一的那个文档（download.md）" || bad "唯一那个没刷到"
+chk "★刷完仍只有一个文档带标记" \
+    "$(grep -rl --include='*.md' -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' "$WS18" 2>/dev/null | wc -l | tr -d ' ')" "1"
 
 echo
 printf 'publish_test: PASS %d  FAIL %d\n' "$pass" "$fail"

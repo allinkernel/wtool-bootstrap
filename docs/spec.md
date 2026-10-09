@@ -93,6 +93,15 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 `.tar.gz` 用 `tar -xf`、`dist.json`/`*-hash.txt` 不解、分卷先拼回）—— 见 ADR-0041；
 没有标记块或没有 `gh` 就跳过。
 
+**宿主文件：工作区里带标记的文档必须**唯一**（ADR-0042）。** 目标不写死路径，靠标记自己
+声明（`grep -rl` 找**整行就是标记**的 `*.md`）。今天这个宿主是 `wtool-base/download.md`
+（README 里只有一行指过去的链接，不再带标记）。带标记的文档**多于一个**时它
+**拒绝刷新**（列出全部候选、返回非零、一个字节都不动）—— 以前是 `| head -1`，
+两个文档都带标记时**不报错**、只刷遍历顺序靠前的那个，另一份就永远停在旧版本。
+⚠️ 读标记那一步的 `$(grep … || true)` 不能省：脚本头上有 `set -eu`，"一个都没找到"时
+`grep` 返回 1，裸赋值会让整个 wtool 当场退出；`cmd_publish_release` 里调用它的地方也
+接了 `|| true` —— 文档配置问题不该让一次**发布成功**背成失败。
+
 **删掉的命令**：`provision`（→ `sudo-install`，`--with-system` 一并删）、`table`（→ 裸跑 `wtool`）、
 `list`（→ `status`）、`env`（→ `doctor`；`doctor --quiet` 只输出 export 行，可直接 eval）、
 `scaffold`（**整个删掉**，不是改名 —— 新建项目用 `wtool init <目录>`）。
