@@ -16,10 +16,12 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 # 产物与发布（release 四条边：pack/unpack 本地一对，publish/download 远端一对）
 ./wtool.sh build          <项目>|all   # 跑项目自己的 scripts/build.sh，或引擎驱动容器 → __output/
                                       #   --rebuild：无视"已经编好了"的三条判据，强制重编
-./wtool.sh pack-release   <项目>       # __output/ → __release/（源码.zip / release.zip / 分卷 / dist.json）
+./wtool.sh pack-release   <项目>       # __output/ → __release/（源码.zip / 分卷 / dist.json；
+                                      #   有构建产物的项目再加一个 release.zip —— ADR-0039）
 ./wtool.sh publish-release [<项目>]    # __release/ → GitHub（**只上传**），成功后写 scripts/release.json
 ./wtool.sh download-release <项目>|all # 读提交在项目里的 scripts/release.json → __release/（**只下载**）
 ./wtool.sh unpack-release <项目>       # 照 dist.json 校验分卷 → 拼接 → 解到 __output/
+                                      #   （只有源码包的版本：把源码铺回项目目录）
 
 # 层（第二条通道：容器镜像仓库；__layer/ 是一棵 OCI 镜像布局，ADR-024）
 ./wtool.sh _layer-save   <项目> --image=<镜像>   # docker 镜像 → __layer/<target>/
