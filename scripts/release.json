@@ -2,11 +2,11 @@
   "schema": 1,
   "project": "bootstrap",
   "repo": "allinkernel/wtool-bootstrap",
-  "tag": "ds_dev-2026-10-07",
-  "base_url": "https://github.com/allinkernel/wtool-bootstrap/releases/download/ds_dev-2026-10-07",
-  "commit": "2cadca91af01029a9caf530cccd83646c1b810b7",
-  "packed_at": "2026-10-08T01:05:01+0800",
-  "published_at": "2026-10-08T01:06:29+08:00",
+  "tag": "ds_dev-2026-10-09",
+  "base_url": "https://github.com/allinkernel/wtool-bootstrap/releases/download/ds_dev-2026-10-09",
+  "commit": "fa91244d6307bd44f4b46c6617a5a86b0511672c",
+  "packed_at": "2026-10-09T15:32:00+0800",
+  "published_at": "2026-10-09T15:33:46+08:00",
   "wtool_engine": "1.0.0",
   "dirty": false,
   "volume_size": "32M",
@@ -20,33 +20,21 @@
     {
       "name": "dist.json",
       "role": "",
-      "bytes": 923,
-      "sha256": "fbb8d4831594f89230d5cd6603b1a942345693a766d10f7c05a917bac4732c86"
+      "bytes": 859,
+      "sha256": "13db90109d94d8bc254083ddb91fb60d9297af880b2892c2592cb9b43c7b78a0"
     },
     {
-      "name": "release-hash.txt",
-      "role": "",
-      "bytes": 78,
-      "sha256": "b2e78418b9932072ea2ef5b9a0b50f185e24bf8a1a3900c61f2b7c7ced3f0b29"
-    },
-    {
-      "name": "release.zip",
-      "role": "release",
-      "bytes": 2259,
-      "sha256": "fcda1cc095f04384d0c2ca125f1d2316bedfec7af53d16951b93dd79026a51cb"
-    },
-    {
-      "name": "源码-hash.txt",
+      "name": "source-hash.txt",
       "role": "",
       "bytes": 77,
-      "sha256": "9192b5dfd7cb8b7157429e0f06b2796e0e956e07130509ded95a5461202a224a"
+      "sha256": "436f6a2db52344e4a69982e95de486a1d5eb1bf1817caef7a97c294b91e85672"
     },
     {
-      "name": "源码.zip",
+      "name": "source.zip",
       "role": "source",
-      "bytes": 351476,
-      "sha256": "4a170d9b6a7380ebeddd86c0fe46e485745b0dac6939dbde98a5a417d9607a45"
+      "bytes": 361724,
+      "sha256": "293baf2f7fd911d30fe2b172688492d20cb987bf4a7a2c0df1df2c7bb63d7ef9"
     }
   ],
-  "how": "wtool download-release bootstrap   # 下到项目的 __release/（按本文件的 sha256 校验）\nwtool unpack-release bootstrap     # 拼分卷 + 解到 __output/\nwtool install bootstrap            # 装到本机"
+  "how": "wtool download-release bootstrap   # 下到项目的 __release/（按本文件的 sha256 校验）\nwtool unpack-release bootstrap     # 拼分卷 + 把源码铺回项目目录\nwtool install bootstrap            # 装到本机"
 }
