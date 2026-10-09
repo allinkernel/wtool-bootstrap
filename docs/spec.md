@@ -283,8 +283,10 @@ wtool:              WTOOL_ARTIFACTS=… WTOOL_STATE_DIR=…
 **为什么不"把 `--dry-run` 转给项目脚本，让脚本自己打计划"**
 （2026-10-04 之前的做法，也是那句错误注释的来源）：
 **项目脚本认不认这个开关，引擎管不了。** 实测：`templates/{install,build}.sh.tpl`
-里 0 处 dry-run；`tools/gerrit-gate/scripts/install.sh --dry-run` 照样 `ln -s` 建软链。
-引擎能保证的只有自己这一层，所以干脆不进脚本这条路。复现命令与判据见
+里 0 处 dry-run；当年拿一个真实项目脚本（`tools/gerrit-gate/scripts/install.sh`，
+2026-10-09 该项目已搬出本工作区）实测过 `--dry-run` 照样 `ln -s` 建软链 ——
+**那个脚本现在不在了，这条复现没法原地重跑**，只留作当时的记录。
+引擎能保证的只有自己这一层，所以干脆不进脚本这条路。当时的复现思路与判据见
 `tests/contract_test.sh` 场景 15 的文件头；断言在场景 15（前后 `find` 清单逐行相同 +
 没跑脚本 + 打印了脚本路径 / 工作目录 / `WTOOL_PREFIX`）。
 

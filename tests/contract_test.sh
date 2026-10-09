@@ -931,16 +931,10 @@ esac
 printf '\n== 场景 15：--dry-run 不跑项目脚本（一个字节都不写）==\n'
 #   用户 2026-10-04 拍板（原话"要改！！"）：--dry-run 只打印计划，**不执行操作**。
 #   老做法是把 --dry-run 转给项目脚本、指望脚本自己支持 —— 那是空头支票：
-#   templates/{install,build}.sh.tpl 里 0 处 dry-run，
-#   `tools/gerrit-gate/scripts/install.sh --dry-run` 照样 ln -s 建软链。
-#   复现那条（改之前会真建软链，判据 = 末尾 ls 有输出）：
-#     T=$(mktemp -d); mkdir -p "$T/home/.wtool/links/tools/gerrit-gate/bin" "$T/prefix"
-#     printf '#!/bin/sh\necho hi\n' > "$T/home/.wtool/links/tools/gerrit-gate/bin/gerrit-gate"
-#     chmod +x "$T/home/.wtool/links/tools/gerrit-gate/bin/gerrit-gate"
-#     HOME="$T/home" WTOOL_PREFIX="$T/prefix" sh tools/gerrit-gate/scripts/install.sh --dry-run
-#     ls -l "$T/prefix/bin"
-#   ⚠️ 那个脚本读的是**老路径** $HOME/.wtool/links/...；拿新路径
-#     （wtool-work-dir/links/…）去建 src，它会打一句"找不到"就退出 0，看不到问题。
+#   templates/{install,build}.sh.tpl 里 0 处 dry-run；2026-10-04 拿一个真实项目脚本
+#   （tools/gerrit-gate/scripts/install.sh，该项目 2026-10-09 已搬出本工作区）实测过
+#   "--dry-run 照样 ln -s 建软链"，判据 = 末尾 `ls -l $T/prefix/bin` 有输出。
+#   ⚠️ 那个脚本已经不在了，**这条复现没法原地重跑**，只留作当时的记录。
 #   本场景的判据：项目脚本**故意不认** --dry-run（被调用就落地），
 #   dry-run 前后文件清单必须逐行相同。
 newhome
