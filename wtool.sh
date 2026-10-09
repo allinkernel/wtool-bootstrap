@@ -352,9 +352,9 @@ wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
     #
     # 这里原来是"把 --dry-run 转给脚本，让脚本自己打计划"（当时那句注释写着
     # "脚本要支持 --dry-run（模板里有）"）—— 那是假的：
-    # templates/{install,build}.sh.tpl 里 0 处 dry-run，
-    # `tools/gerrit-gate/scripts/install.sh --dry-run` 照样 ln -s 建软链
-    # （用户 2026-10-04 实测后拍板："要改！！"）。
+    # templates/{install,build}.sh.tpl 里 0 处 dry-run；当年拿一个真实项目脚本
+    # （tools/gerrit-gate 的 install.sh，该项目 2026-10-09 已搬出本工作区）实测过
+    # "--dry-run 照样 ln -s 建软链"（用户 2026-10-04 实测后拍板："要改！！"）。
     # 项目脚本认不认这个开关，引擎管不了；引擎能保证的只有自己这一层，
     # 所以 dry-run 干脆不进脚本这条路 —— 一个字节都不写。
     # 复现与断言：tests/contract_test.sh 场景 15、docs/spec.md「--dry-run 的语义」。
