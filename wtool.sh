@@ -3469,6 +3469,20 @@ except Exception:
             esac
         fi
 
+        # 这一版是拿哪个 commit 打的包 —— 建 release 时要把它当 `--target`。
+        # 取 `__release/dist.json` 的 `commit`（pack-release 写它时取的 `git rev-parse HEAD`）：
+        # 不传 --target 的话 gh 会用**远端默认分支**建 tag，tag 就指到了 main 的 HEAD 上，
+        # 而资产是从别的 commit 打的包（2026-10-09 那批 9 个 tag 全中）。
+        # **不能拿当前 HEAD 顶替**：改了代码没重新打包就发是允许的（见上面的同名 commit 检查），
+        # 那时 HEAD 已经不是包里那一版了。
+        _sha=$(wt_publish_packed_commit "$_rel")
+        if [ -z "$_sha" ]; then
+            wt_warn "  __release/dist.json 里没有 commit —— 这一版不传 --target，"
+            wt_warn "  gh 会把 tag 建在远端默认分支的 HEAD 上（可追溯性对不上，包本身不受影响）"
+        else
+            wt_info "  target : $_sha（这一版打包用的 commit）"
+        fi
+
         if wt_dry; then
             wt_step "[dry-run] 上传 $_n 个文件 → $_repo $_tag"
             # 把资产名打出来：发布前这是**唯一**能核对"线上会叫什么"的时机 ——
@@ -3481,7 +3495,8 @@ except Exception:
         fi
 
         wt_publish_gh_release "$_repo" "$_tag" "$_pid $_date" \
-            "由 wtool pack-release + publish-release 生成。内容与每卷的 sha256 见 dist.json。"
+            "由 wtool pack-release + publish-release 生成。内容与每卷的 sha256 见 dist.json。" \
+            "$_sha"
         # shellcheck disable=SC2086
         if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
             _failed=$((_failed + 1))
@@ -3583,7 +3598,8 @@ wt_refresh_downloads() {
         else
             _repo=$(wt_publish_repo_of "$_path" 2>/dev/null) || continue
         fi
-        _tag=$(wt_publish_tag "$_tpl")
+        # tag 取**项目自己记着的那个**（已发布的 tag），不是模板算的 —— 见函数注释
+        _tag=$(wt_publish_current_tag "$_path" "$_tpl")
         # 以 GitHub 上的实际资产为准
         gh release view "$_tag" --repo "$_repo" --json assets \
             --jq '.assets[] | "\(.name)\t\(.url)\t\(.size)"' 2>/dev/null |

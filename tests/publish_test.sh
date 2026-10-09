@@ -248,6 +248,12 @@ chk "publish-release 退出码 0" "$_rc" "0"
 grep -q 'release create v-1 --repo allinkernel/wtool-tmux-config' "$T/gh.log" \
     && ok "对项目自己的仓建了 release（remote 叫 github 也认得）" \
     || { bad "没建 __release"; sed 's/^/     /' "$T/gh.log"; }
+# ★ 缺陷 B：建 tag 时必须点名"被打包的那个 commit"（`--target=`）。
+#   不传的话 gh 用仓库的**默认分支**建 tag —— tag 就指向远端 main 的 HEAD，
+#   而资产是 ds_dev 那个 commit 打的包，`git checkout <tag>` 拿到的是另一棵树。
+chk "★建 release 带 --target=<被打包的 commit>" \
+    "$(grep -o -- '--target=[0-9a-f]*' "$T/gh.log" | head -1)" \
+    "--target=$(git -C "$P1" rev-parse HEAD)"
 grep -q 'release upload v-1 --repo allinkernel/wtool-tmux-config' "$T/gh.log" \
     && ok "上传到同一个仓" || bad "没上传"
 grep -q 'source.zip' "$T/gh.log" && ok "上传了source.zip（pack-release 的产物）" \
@@ -361,6 +367,15 @@ if [ -f "$RJ" ]; then
     chk "新 commit 照常发布（不拦）" "$_rc" "0"
     grep -q 'release upload v-2' "$T/gh.log" && ok "新 commit 真的传了" \
         || { bad "新 commit 没传（不该拦的拦住了）"; sed 's/^/     /' "$T/log5b2"; }
+    # ★ 缺陷 B（第二种情形，比上一条更关键）：**打包之后又提交了一个**，
+    #   这时 --target 必须是 dist.json 里那个"打包时"的 commit，不能是当前 HEAD ——
+    #   拿 HEAD 顶替等于把 tag 钉到一个和包无关的提交上（"改了代码没重新打包就发"
+    #   是允许的，所以这两者真的会不一样）。
+    chk "★打包后又提交：--target 仍是打包时那个 commit（不是当前 HEAD）" \
+        "$(grep -o -- '--target=[0-9a-f]*' "$T/gh.log" | head -1)" \
+        "--target=$_packed_commit"
+    chk "而当前 HEAD 确实已经不是它了（这条才测得出东西）" \
+        "$([ "$(git -C "$P1" rev-parse HEAD)" != "$_packed_commit" ] && echo yes || echo no)" "yes"
     # ⚠️ 声明里记的是**打包时那个 commit**（dist.json 的 commit），不是当前 HEAD：
     #    这次没重新 pack，发出去的就是老包 —— 声明必须如实说"这一版是哪个 commit 编的"。
     chk "发布声明仍记打包时那个 commit（没重打包就不假装是新版）" \
@@ -757,6 +772,162 @@ chk "顺着软链读到的内容对" "$(cat "$B/themes/alias.zsh-theme" 2>/dev/n
 _rc=0
 wt "$T/bin" "$WS15" "$ST15" publish-release lnk --tag=lnk-1 > "$T/log15b" 2>&1 || _rc=$?
 chk "publish-release 退出码 0" "$_rc" "0"
+
+echo "== 16. ★下载表按「项目自己记着的 tag」刷新（缺陷 A：查错 tag → 表一直是旧的）=="
+# 症状：wt_refresh_downloads 用 `wt_publish_tag`（模板 `snapshot-%Y-%m-%d`）求 tag，
+# 无视 `publish-release --tag=ds_dev-2026-10-09` 的覆盖值 → 查的是一个不存在的 release
+# → 查到 0 个资产 → 守卫拦住空表 → **文档一直停在旧版本，而且不报错**。
+# 2026-10-09 实测：9 次发布全走了这条路，README 的 wtool:downloads 块还停在
+# snapshot-2026-09-15。所以这里同时盯三件事：
+#   ① 发布过的项目按 scripts/release.json 的 tag 查；② 没发布过的退回模板；
+#   ③ 生成出来的命令要**能照着跑**（前缀防撞名 + 按扩展名解压）。
+WS16="$T/ws16"; ST16="$T/state16"; P16="$WS16/alpha"; P16B="$WS16/beta"
+mkdir -p "$P16" "$P16B" "$WS16/wtool-base"
+cat > "$P16/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="10">
+  <publish to="fakeowner/alpha"/>
+</wtool>
+EOF
+echo 'demo' > "$P16/demo.txt"
+git_init "$P16"
+cat > "$P16B/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="20">
+  <publish to="fakeowner/beta"/>
+</wtool>
+EOF
+echo 'demo' > "$P16B/demo.txt"
+git_init "$P16B"
+
+# 打桩 gh：只有 `v-alpha`（alpha 发布声明里那个 tag）和模板 tag 有资产。
+# 别的 tag 一律"查不到" —— 修复前 refresh 查的正是那个查不到的，于是表格不动。
+# ⚠️ alpha 和 beta 的资产名**故意重名**（都叫 source.zip / dist.json，线上就是这样：
+#    每个项目都发 source.zip）—— 生成器不加项目前缀就会互相覆盖，这条要测出来。
+TODAY16=$(date +snapshot-%Y-%m-%d)
+mkdir -p "$T/bin-dl"
+cat > "$T/bin-dl/gh" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$T/gh.log"
+case "\$1 \$2" in
+    "repo view")    echo "ADMIN"; exit 0 ;;
+    "release view")
+        case "\$3" in
+            v-alpha)
+                printf 'source.zip\thttps://github.com/fakeowner/alpha/releases/download/v-alpha/source.zip\t2048\n'
+                printf 'dist.json\thttps://github.com/fakeowner/alpha/releases/download/v-alpha/dist.json\t100\n'
+                exit 0 ;;
+            $TODAY16)
+                case "\$5" in
+                    *beta*)
+                        printf 'source.zip\thttps://github.com/fakeowner/beta/releases/download/$TODAY16/source.zip\t8192\n'
+                        printf 'dist.json\thttps://github.com/fakeowner/beta/releases/download/$TODAY16/dist.json\t111\n'
+                        printf 'pkg-2026-01-01.tar.gz\thttps://github.com/fakeowner/beta/releases/download/$TODAY16/pkg-2026-01-01.tar.gz\t4096\n'
+                        exit 0 ;;
+                esac
+                exit 1 ;;
+        esac
+        exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$T/bin-dl/gh"
+
+# 目标文档：块里**已经有一张表**（旧版本）—— 这样"空表也要拦住"那条守卫不会兜底，
+# 能不能更新全看真的查到了资产。
+DOC16="$WS16/wtool-base/README.md"
+cat > "$DOC16" <<'EOF'
+# 下载
+
+<!-- >>> wtool:downloads >>> -->
+| 项目 | 版本 | 包 | 大小 |
+|---|---|---|---|
+| alpha | [snapshot-2020-01-01](https://example.invalid/snapshot-2020-01-01) | [old.tar.gz](https://example.invalid/old.tar.gz) | 1.0K |
+<!-- <<< wtool:downloads <<< -->
+EOF
+
+chk "pack-release alpha --tag=v-alpha" \
+    "$(wt "$T/bin-dl" "$WS16" "$ST16" pack-release alpha --tag=v-alpha --repo=fakeowner/alpha \
+        > "$T/log16a" 2>&1 && echo 0 || echo 1)" "0"
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin-dl" "$WS16" "$ST16" publish-release alpha --tag=v-alpha > "$T/log16b" 2>&1 || _rc=$?
+chk "publish-release alpha --tag=v-alpha 退出码 0" "$_rc" "0"
+[ "$_rc" = 0 ] || sed 's/^/     /' "$T/log16b"
+chk "发布声明里记的是覆盖值 v-alpha" \
+    "$(J 'import json,sys;print(json.load(open(sys.argv[1]))["tag"])' "$P16/scripts/release.json" 2>/dev/null || echo none)" "v-alpha"
+
+# 发布成功后引擎自己会跑一遍刷新 —— 这里就是缺陷 A 的现场
+chk "★刷新时查的是项目自己记着的 tag（v-alpha）" \
+    "$(grep -c 'release view v-alpha --repo fakeowner/alpha --json assets' "$T/gh.log" || true)" "1"
+chk "★没有再拿模板 tag 去查发布过的项目" \
+    "$(grep -c "release view $TODAY16 --repo fakeowner/alpha" "$T/gh.log" || true)" "0"
+grep -q 'v-alpha/source.zip' "$DOC16" \
+    && ok "★下载块里已经是新 tag 的直链" \
+    || { bad "下载块没更新（还是旧 tag）"; sed -n '/wtool:downloads/,/wtool:downloads <<</p' "$DOC16" | head -8 | sed 's/^/     /'; }
+grep -q 'snapshot-2020-01-01' "$DOC16" \
+    && bad "块里还留着旧版本那一行" || ok "旧版本那一行被换掉了"
+
+# 没发布过的项目（没有 scripts/release.json）仍然按模板 tag 查 —— 老行为不能丢
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin-dl" "$WS16" "$ST16" refresh-downloads > "$T/log16c" 2>&1 || _rc=$?
+chk "refresh-downloads（wtool docs refresh 同一个实现）退出码 0" "$_rc" "0"
+chk "没发布过的项目退回模板 tag" \
+    "$(grep -c "release view $TODAY16 --repo fakeowner/beta" "$T/gh.log" || true)" "1"
+grep -q "download/$TODAY16/pkg-2026-01-01.tar.gz" "$DOC16" \
+    && ok "模板 tag 那一行也进了表" || bad "没发布过的项目没进表"
+
+# 生成出来的命令必须能照着跑：撞名 / 假命令都不行
+# （alpha 和 beta 的资产名一样 —— 前缀没生效的话这里会数出重复）
+chk "★每个资产的下载目标名互不相同（前缀防撞名）" \
+    "$(awk '/^### bash/,/^### PowerShell/' "$DOC16" | grep -oE '^curl -fL -o [^ ]+' | awk '{print $4}' | sort | uniq -d | wc -l | tr -d ' ')" "0"
+chk "下载行数 == 资产数（5 个：alpha 2 + beta 3）" \
+    "$(grep -c '^curl -fL -o ' "$DOC16" || true)" "5"
+chk "重名的资产各自带项目前缀" \
+    "$(grep -c -E '^curl -fL -o (alpha|beta)-source\.zip ' "$DOC16" || true)" "2"
+chk "★清单文件不被当包解（没有 tar -xf dist.json）" \
+    "$(grep -c 'tar -xf.*dist\.json' "$DOC16" || true)" "0"
+chk "★zip 用 unzip 解（tar -xf 解不开 zip）" \
+    "$(grep -c '^unzip -o alpha-source.zip$' "$DOC16" || true)" "1"
+chk "tar.gz 仍然用 tar -xf" \
+    "$(awk '/^### bash/,/^### PowerShell/' "$DOC16" | grep -c '^tar -xf beta-pkg-2026-01-01.tar.gz$' || true)" "1"
+
+# 幂等：再刷一遍内容不变，而且要明说"没有变化"
+_before16=$(cat "$DOC16")
+_rc=0
+wt "$T/bin-dl" "$WS16" "$ST16" refresh-downloads > "$T/log16d" 2>&1 || _rc=$?
+chk "再刷一遍退出码 0" "$_rc" "0"
+chk "内容不变（幂等）" "$(cat "$DOC16")" "$_before16"
+grep -q '没有变化' "$T/log16d" && ok "明说了「没有变化」" \
+    || { bad "没有报「没有变化」"; sed 's/^/     /' "$T/log16d"; }
+
+echo "== 17. ★拿不到「被打包的 commit」时不猜：警告 + 不传 --target =="
+# 老包（不是这一版引擎打的）的 dist.json 里没有 commit。这时**不能**拿当前 HEAD 顶替
+# （那正是缺陷 B 的成因），也不能传一个空的 --target= —— 只能警告 + 不传。
+WS17="$T/ws17"; ST17="$T/state17"; P17="$WS17/nocommit"
+mkdir -p "$P17/__release"
+cat > "$P17/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="10">
+  <publish to="fakeowner/nocommit"/>
+</wtool>
+EOF
+git_init "$P17"
+printf '{"project":"nocommit","repo":"fakeowner/nocommit","tag":"v-nc","files":[],"volumes":[]}\n' \
+    > "$P17/__release/dist.json"
+printf 'packed\tfakeowner/nocommit\tv-nc\t\t2026-01-01T00:00:00+08:00\n' \
+    > "$P17/__release/.source"
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin" "$WS17" "$ST17" publish-release nocommit --tag=v-nc > "$T/log17" 2>&1 || _rc=$?
+chk "publish-release 退出码 0（老包照样能发）" "$_rc" "0"
+grep -q 'dist.json 里没有 commit' "$T/log17" && ok "警告说清了：dist.json 里没有 commit" \
+    || { bad "没有警告"; sed 's/^/     /' "$T/log17"; }
+grep -q 'release create v-nc --repo fakeowner/nocommit' "$T/gh.log" \
+    && ok "release 照建（没有因为拿不到 sha 就停）" || bad "release 没建"
+chk "★一个 --target 都没传（不猜、也不传空的）" \
+    "$(grep -c -- '--target' "$T/gh.log" || true)" "0"
 
 echo
 printf 'publish_test: PASS %d  FAIL %d\n' "$pass" "$fail"

@@ -778,6 +778,47 @@ wt_publish_tag() {
     date +"$_wtpub_tpl"
 }
 
+# 这个项目**最后一版实际用的 tag**（刷新下载表时查的就是它）
+#
+# 模板算出来的那个不一定是发布用的那个：`publish-release --tag=ds_dev-2026-10-09`
+# 会把覆盖值写进项目里提交的 `scripts/release.json`（ADR-0026 的发布声明）。
+# 查错 tag 的后果是"查到 0 个资产"——守卫会拦住空表，于是下载页**一直停在旧版本**
+# 而且不报错：2026-10-09 实测 9 次发布全走了这条路，`wtool:downloads` 块
+# 还停在 `snapshot-2026-09-15`。所以：**发布声明里有 tag 就用它**，
+# 没有（从没发布过的项目）才退回模板。
+wt_publish_current_tag() {   # <项目目录> <tag 模板>
+    _wtct_dir=$1; _wtct_tpl=$2
+    if [ -f "$_wtct_dir/scripts/release.json" ]; then
+        _wtct_tag=$(python3 -c 'import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("tag") or "")
+except Exception:
+    print("")' "$_wtct_dir/scripts/release.json" 2>/dev/null || true)
+        if [ -n "$_wtct_tag" ]; then
+            printf '%s\n' "$_wtct_tag"
+            return 0
+        fi
+    fi
+    wt_publish_tag "$_wtct_tpl"
+}
+
+# 这一版是拿哪个 commit 打的包 —— `gh release create --target=` 要指它。
+#
+# 只认 `__release/dist.json` 的 `commit`（pack-release 写它时取的是 `git rev-parse HEAD`）。
+# **不能取当前 HEAD**：允许"改了代码没重新打包就发"（就是那个同名 commit 检查放行的场景），
+# 那时 HEAD 已经不是包里那一版了 —— 拿 HEAD 当 target 等于把 tag 钉到一个和包无关的提交上
+# （这正是 2026-10-09 这批的毛病：tag 指到了远端 main 的 HEAD）。
+# 也没有 dist.json 的 commit 就打印空串，让调用方去警告并**不传 --target**（不猜）。
+wt_publish_packed_commit() {   # <__release 目录>
+    _wtpc_dist=$1/dist.json
+    [ -f "$_wtpc_dist" ] || return 0
+    python3 -c 'import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("commit") or "")
+except Exception:
+    print("")' "$_wtpc_dist" 2>/dev/null || true
+}
+
 # 有没有权限往这个仓推 release。第三方上游仓（neovim/neovim）会在这里被挡下。
 wt_publish_can_push() {
     _wtpub_repo=$1
@@ -792,10 +833,20 @@ wt_publish_can_push() {
 }
 
 # 建 release（已存在就复用）
+#
+# `--target` 是**必给的**（调用方从 `__release/dist.json` 的 `commit` 取）：
+# 不传时 gh 用仓库的**默认分支**去创建 tag，于是 tag 指向远端 main 的 HEAD，
+# 而资产是从 `ds_dev` 那个 commit 打的包 —— `git checkout <tag>` 拿到的是另一棵树，
+# 可追溯性就断了。2026-10-09 这批 9 个 tag 全中（实测 tmux 的 tag→`4d36585`(main)，
+# 包是 `dae6b1e`(ds_dev) 编的）。tag 已经存在时 GitHub **忽略**这个字段，所以照样安全。
+# 空串 = 拿不到被打包的那个 commit：调用方已经警告过，这里就不传（不猜）。
 wt_publish_gh_release() {
     _wtpub_repo=$1; _wtpub_tag=$2; _wtpub_title=$3; _wtpub_notes=$4
+    _wtpub_target=${5:-}
+    _wtpub_target_arg=""
+    if [ -n "$_wtpub_target" ]; then _wtpub_target_arg="--target=$_wtpub_target"; fi
     if wt_dry; then
-        wt_step "[dry-run] gh release create $_wtpub_tag --repo $_wtpub_repo"
+        wt_step "[dry-run] gh release create $_wtpub_tag --repo $_wtpub_repo $_wtpub_target_arg"
         return 0
     fi
     if wt_gh release view "$_wtpub_tag" --repo "$_wtpub_repo" >/dev/null 2>&1; then
@@ -807,9 +858,18 @@ wt_publish_gh_release() {
     # 报错。所以 create 失败之后要再判断一次，否则一个早就建好的 release
     # 会让整个 publish 硬失败（实测在 shell/zsh 上撞过 422 already exists）。
     _wtpub_err=$(mktemp "${TMPDIR:-/tmp}/wtool-gh.XXXXXX")
-    if wt_gh release create "$_wtpub_tag" --repo "$_wtpub_repo" \
-            --title "$_wtpub_title" --notes "$_wtpub_notes" 2>"$_wtpub_err"; then
-        wt_step "创建 release $_wtpub_tag @ $_wtpub_repo"
+    if [ -n "$_wtpub_target_arg" ]; then
+        _wtpub_ok=0
+        wt_gh release create "$_wtpub_tag" --repo "$_wtpub_repo" \
+            --title "$_wtpub_title" --notes "$_wtpub_notes" \
+            "$_wtpub_target_arg" 2>"$_wtpub_err" || _wtpub_ok=$?
+    else
+        _wtpub_ok=0
+        wt_gh release create "$_wtpub_tag" --repo "$_wtpub_repo" \
+            --title "$_wtpub_title" --notes "$_wtpub_notes" 2>"$_wtpub_err" || _wtpub_ok=$?
+    fi
+    if [ "$_wtpub_ok" = 0 ]; then
+        wt_step "创建 release $_wtpub_tag @ $_wtpub_repo${_wtpub_target:+（target $_wtpub_target）}"
         rm -f -- "$_wtpub_err"
         return 0
     fi

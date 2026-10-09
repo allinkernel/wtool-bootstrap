@@ -86,6 +86,11 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 **帮助里没列的隐藏命令**：`wtool docs` / `wtool docs refresh` / `wtool refresh-downloads`
 （三个入口同一个实现 `wt_refresh_downloads`）——按文档里的 `wtool:downloads` 标记块，
 用 `gh release view` 查 GitHub 上**真实存在**的 release，重刷下载链接；
+**查的是项目自己记着的那个 tag** —— 项目里提交在仓库中的 `scripts/release.json` 的 `tag`
+（发布成功时写的，ADR-0026）；没有它（从没发布过）才退回按 `<publish tag=>` 模板算。
+资产以 GitHub 上的实际存在为准；一个都没查到而文档里本来有表 → **拒绝用空表覆盖**
+（`--force` 才清空）。生成块的命令按资产形状走（下载名带项目前缀、`.zip` 用 `unzip`、
+`.tar.gz` 用 `tar -xf`、`dist.json`/`*-hash.txt` 不解、分卷先拼回）—— 见 ADR-0041；
 没有标记块或没有 `gh` 就跳过。
 
 **删掉的命令**：`provision`（→ `sudo-install`，`--with-system` 一并删）、`table`（→ 裸跑 `wtool`）、
@@ -451,16 +456,16 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 |---|---|---|---|
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
 | sudo-install | `tests/provision_test.sh` | 40 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
-| publish | `tests/publish_test.sh` | 128 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行）、**资产名全是 ASCII**（`--dry-run` 打出的清单 + `release.json` 的 `assets[]` —— H27 / ADR-0040） |
+| publish | `tests/publish_test.sh` | 154 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行）、**资产名全是 ASCII**（`--dry-run` 打出的清单 + `release.json` 的 `assets[]` —— H27 / ADR-0040）、**建 release 带 `--target=<被打包的 commit>`**（打包后又提交也不许拿 HEAD 顶替；拿不到就警告 + 不传）、**下载表刷新认发布声明里的 tag**（正反两面 + 没发布过的退回模板 + 前缀防撞名 + `unzip`/`tar` 分发 + 幂等） —— ADR-0041 场景 16/17 |
 | table | `tests/table_test.sh` | 94 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
-| release | `tests/release_test.sh` | 94 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷、**`unpack-release --dry-run` 不写 `__output/`**、**`--from=<目录>` 真被用上**（这两个原来都被静默忽略/无守卫）、**资产名全是 ASCII + 上一版留下的中文名报一声再删**（H27 / ADR-0040） |
+| release | `tests/release_test.sh` | 109 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷、**`unpack-release --dry-run` 不写 `__output/`**、**`--from=<目录>` 真被用上**（这两个原来都被静默忽略/无守卫）、**资产名全是 ASCII + 上一版留下的中文名报一声再删**（H27 / ADR-0040）、**下载块生成器按资产形状生成**（前缀防撞名 / `unzip` 与 `tar` 分发 / 分卷 `cat` 拼回 / `Expand-Archive`、`copy /b` / 块里的命令名与安装入口与现状一致 —— ADR-0041 场景 9） |
 | contract | `tests/contract_test.sh` | 250 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同）、**uninstall 按路径指项目、且真跑项目脚本**（标记文件 + 参数；解析不出来时明确报错、退出码非 0，`--no-script` 只警告 —— BL-47/BL-48）、**`--id` 老写法给指路**、**`wtool move` 收干净改名残留 + `--dry-run` 零副作用**、**手工 mv 的残渣 `wtool check` 必须报出来**（旧 env 块 / 悬空链 / registry 旧行 —— ADR-0037，场景 17） |
 | docker-build | `tests/docker_build_test.sh` | 101 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错、**产物账本**（格式/来源/整表重写幂等/dry-run 不写/看板「下gz包」四种来源值/按项目分开/一行一个层目录含 `lang/x`/失败路径也重写，ADR-0036）、**`--rebuild` 绕过三条跳过判据**、**导出被拒不留残骸且重跑不被当成已导出**、**代理与本地镜像目录真的传进容器**、**构建日志保留 `<项目 id>` 里的 `/`** |
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 50 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描（**被拒之后重跑不许被当成已导出**）、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **876** 条断言（2026-10-09 实测：`cd bootstrap/tests && ./run_all.sh`；
+共 **917** 条断言（2026-10-09 实测：`cd bootstrap/tests && ./run_all.sh`；
 `run_all.sh` **文件头**注释里那几行逐组条数也同步成了这一版，但**以它跑出来的 PASS 行为准**）：
 
 ```sh

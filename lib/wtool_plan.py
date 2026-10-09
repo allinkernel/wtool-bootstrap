@@ -2715,6 +2715,123 @@ def splice_block(text, begin, end, body):
     return "\n".join(lines[:i + 1] + body.split("\n") + lines[j:])
 
 
+def _dl_prefix(pid):
+    """下载到本地时的文件名前缀：项目路径里的 `/` 换成 `-`。
+
+    引擎打的资产名**不带项目名**（`source.zip` / `release.zip` / `dist.json`，ADR-0040），
+    而这张表让人把几十个资产下到**同一个目录**里 —— 不加前缀就会互相覆盖
+    （实测：10 个 `source.zip` 只剩最后那一个）。老一版的资产名自带项目前缀
+    （`bootstrap-2026-09-15.tar.gz`），所以从前不撞；README §0.1 ③ 末尾那句
+    "表里那批包名带项目前缀、不会撞"说的就是这条规则。
+    """
+    return pid.replace("/", "-")
+
+
+def _dl_name(pid, name):
+    return "%s-%s" % (_dl_prefix(pid), name)
+
+
+# `pack-release` 切分卷时的后缀：`<文件>-volNN`（见 lib/wtool_fs.sh 的 split）
+_VOL_RE = re.compile(r"-vol[0-9]+$")
+
+
+def _archive_kind(name):
+    """这个资产是什么归档、该用什么解：`zip` / `tar` / 空串（不是归档）。
+
+    `dist.json` / `*-hash.txt` 是给 `unpack-release` 用的清单和校验文件，不是包 ——
+    对它们写 `tar -xf` 是假命令；`source.zip` 是 zip，`tar -xf` 也解不开它
+    （2026-10-09 之前资产是 `.tar.gz`，那时这段代码是对的；换形状之后因为缺陷 A
+    卡着刷新，这段生成逻辑一次都没跑过）。
+    """
+    low = name.lower()
+    if low.endswith(".zip"):
+        return "zip"
+    if low.endswith(".tar.gz") or low.endswith(".tgz") or low.endswith(".tar"):
+        return "tar"
+    return ""
+
+
+def _is_release_archive(name):
+    """是不是**产物包**（`release.zip`；分卷也算）。
+
+    它解出来的是 `__output/` 和声明面（相对项目目录），所以要解到 `wtool/<项目>/` 里；
+    源码包第一层固定是 `wtool/<项目>/`，解到当前目录正好得到工作区。判据就是资产名 ——
+    名字在 `lib/wtool_fs.sh` 里只有 `release.zip` 这一处（`WT_*` 常量管的是源码包）。
+    """
+    return _VOL_RE.sub("", name) == "release.zip"
+
+
+def _curl_lines(rows, ps):
+    """下载每一行 —— **每个资产都要有**（这张表的用处就是"所有链接都在一处"）。"""
+    out = []
+    for pid, _repo, _tag, name, url, _size in rows:
+        local = _dl_name(pid, name)
+        if ps:
+            out.append('Invoke-WebRequest -Uri "%s" -OutFile "%s"' % (url, local))
+        else:
+            out.append("curl -fL -o %s %s" % (local, url))
+    return out
+
+
+def _extract_lines(rows, ps):
+    """解开那几步（按项目，源码包在前、产物包在后）。
+
+    只解归档：分卷先拼回父文件（`cat a-vol* > a`，PowerShell 用 `copy /b`），
+    `dist.json` / `*-hash.txt` 不解 —— 它们是 `unpack-release` 的输入，不是包。
+    """
+    vol_parts = {}
+    for pid, _repo, _tag, name, _url, _size in rows:
+        m = _VOL_RE.search(name)
+        if m:
+            vol_parts.setdefault((pid, name[:m.start()]), []).append(name)
+
+    entries = []            # (pid, 本地名, 归档种类, 是不是产物包)
+    seen = set()
+    for pid, _repo, _tag, name, _url, _size in rows:
+        m = _VOL_RE.search(name)
+        base = name[:m.start()] if m else name
+        key = (pid, base)
+        if key in seen:
+            continue
+        seen.add(key)
+        kind = _archive_kind(base)
+        if kind:
+            entries.append((pid, base, kind, _is_release_archive(base)))
+
+    # 同一个项目里源码包先解、产物包后解：源码包会建出 `wtool/<项目>/` 那棵树，
+    # 产物包要往它里面铺 `__output/`（顺序反了也行，但读起来别扭）
+    entries.sort(key=lambda e: (e[0], e[3], e[1]))
+
+    out = []
+    last_pid = None
+    for pid, base, kind, is_release in entries:
+        if last_pid is not None and pid != last_pid:
+            out.append("")
+        last_pid = pid
+
+        local = _dl_name(pid, base)
+        parts = vol_parts.get((pid, base))
+        if parts:
+            if ps:
+                src = "+".join('"%s"' % _dl_name(pid, p) for p in parts)
+                out.append('cmd /c copy /b %s "%s" | Out-Null' % (src, local))
+            else:
+                out.append("cat %s-vol* > %s" % (local, local))
+
+        # 产物包进项目目录（`unpack-release` 的 role=release 那条路就是这么铺的）；
+        # 源码包/老的整包解到当前目录 —— ~/self，正好得到 wtool/<项目>/…
+        dest = "wtool/%s" % pid if is_release else ""
+        if kind == "zip":
+            if ps:
+                out.append('Expand-Archive -Force -Path "%s" -DestinationPath "%s"'
+                           % (local, dest.replace("/", "\\") if dest else "."))
+            else:
+                out.append("unzip -o %s%s" % (local, (" -d " + dest) if dest else ""))
+        else:
+            out.append("tar -xf %s%s" % (local, (" -C " + dest) if dest else ""))
+    return out
+
+
 def render_downloads(rows):
     """rows: [(项目 id, 仓 owner/repo, tag, 资产名, 下载 URL, 字节数)]
 
@@ -2723,11 +2840,11 @@ def render_downloads(rows):
     """
     rows = sorted(rows)
     out = []
-    out.append("<!-- 这一块由 `wtool publish` 自动重写，不要手改。 -->")
+    out.append("<!-- 这一块由 `wtool publish-release` 自动重写，不要手改。 -->")
     out.append("")
     if not rows:
         out.append("> 还没有发布过任何项目。在任意一台能访问 GitHub 的机器上跑")
-        out.append("> `wtool publish` 之后，这里会自动填上。")
+        out.append("> `wtool publish-release` 之后，这里会自动填上。")
         return "\n".join(out)
 
     out.append("每个项目的最新发布包都在它自己的 release 页面上。")
@@ -2741,18 +2858,19 @@ def render_downloads(rows):
     out.append("")
 
     # 下载目录和最终的目录名：解压出来第一层就是 wtool/
+    #
+    # ⚠️ 每条命令都带**项目前缀**（`bootstrap-source.zip`）：资产名在线上不带项目名，
+    #    几十个文件落在同一个目录里不加前缀就会互相覆盖（见 _dl_prefix 的注释）。
     out.append("### bash（Linux / macOS / WSL）")
     out.append("")
     out.append("```bash")
     out.append("mkdir -p ~/self && cd ~/self")
-    for _pid, _repo, _tag, name, url, _size in rows:
-        out.append('curl -fL -o %s \\\n  %s' % (name, url))
-    for _pid, _repo, _tag, name, _url, _size in rows:
-        out.append("tar -xf %s" % name)
+    out += _curl_lines(rows, ps=False)
+    out += _extract_lines(rows, ps=False)
     out.append("```")
     out.append("")
     out.append("跑完 `~/self/wtool/` 就是一个完整的工作区。")
-    out.append("接着 `cd ~/self/wtool && ./bootstrap/install.sh`（第一次要用完整路径，")
+    out.append("接着 `cd ~/self/wtool && ./bootstrap/scripts/install.sh`（第一次要用完整路径，")
     out.append("它会把根目录的 `./install.sh` 等入口补齐，之后就能直接用短的了）。")
     out.append("")
 
@@ -2761,10 +2879,8 @@ def render_downloads(rows):
     out.append("```powershell")
     _bs = chr(92)
     out.append('$d = "$HOME%sself"; New-Item -ItemType Directory -Force -Path $d | Out-Null; Set-Location $d' % _bs)
-    for _pid, _repo, _tag, name, url, _size in rows:
-        out.append('Invoke-WebRequest -Uri "%s" -OutFile "%s"' % (url, name))
-    for _pid, _repo, _tag, name, _url, _size in rows:
-        out.append("tar -xf %s" % name)
+    out += _curl_lines(rows, ps=True)
+    out += _extract_lines(rows, ps=True)
     out.append("```")
     out.append("")
     out.append("跑完 `$HOME%sself%swtool` 就是一个完整的工作区。" % (_bs, _bs))

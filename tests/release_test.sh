@@ -568,6 +568,82 @@ mv -f "$T/pub8/release.zip.good" "$T/pub8/release.zip"
 [ -f "$P8/wtool.xml" ] && [ -f "$P8/env.bash" ] && ok "声明面回到项目根" || bad "声明面没回来"
 
 # --------------------------------------------------------------------------
+# 场景 9：下载页那两段命令是**按资产形状**生成的（引擎侧生成器，纯函数）
+#
+# 这块生成逻辑从前只对着"一个项目一个 tar.gz"的老形状跑过；资产改成
+# source.zip / dist.json / source-hash.txt（ADR-0039 / 0040）之后，因为缺陷 A
+# 卡着刷新，它**一次都没再跑过** —— 一跑就会写出：
+#   · 不带项目前缀的 `-o source.zip`：十几个项目互相覆盖（README §0.1 ③ 末尾正警告这条）
+#   · `tar -xf dist.json` / `tar -xf source.zip`：前者是假命令，后者解不开 zip
+# 所以这里直接喂合成资产表，盯死生成结果。
+printf '\n== 场景 9：下载块的两段命令按资产形状生成 ==\n'
+ROWS="$T/dlrows.tsv"
+DOCS="$T/dldoc.md"
+cat > "$DOCS" <<'EOF'
+# 下载
+
+<!-- >>> wtool:downloads >>> -->
+<!-- <<< wtool:downloads <<< -->
+EOF
+# 三个项目：两个**重名**资产（线上每个项目都发 source.zip）+ 一个分卷的 tar.gz
+{
+    printf 'proj/a\tr/a\tv-1\tdist.json\thttps://ex/a/dist.json\t10\n'
+    printf 'proj/a\tr/a\tv-1\tsource.zip\thttps://ex/a/source.zip\t20\n'
+    printf 'proj/b\tr/b\tv-2\tdist.json\thttps://ex/b/dist.json\t11\n'
+    printf 'proj/b\tr/b\tv-2\tsource.zip\thttps://ex/b/source.zip\t21\n'
+    printf 'proj/c\tr/c\tv-3\tbig-2026-01-01.tar.gz-vol01\thttps://ex/c/vol01\t30\n'
+    printf 'proj/c\tr/c\tv-3\tbig-2026-01-01.tar.gz-vol02\thttps://ex/c/vol02\t30\n'
+} > "$ROWS"
+DOC9=$(py "$boot/lib/wtool_plan.py" update-downloads --doc "$DOCS" --rows "$ROWS") \
+    || bad "update-downloads 跑失败"
+printf '%s\n' "$DOC9" > "$T/dldoc.new"
+
+# 1) 表里每个资产一条直链（"所有下载链接都在一处"）
+chk "表里列了全部 6 个资产（每行一个）" \
+    "$(printf '%s\n' "$DOC9" | grep -c '^| `proj/' || true)" "6"
+
+# 2) 下载名带项目前缀 → 重名不撞
+chk "重名的 source.zip 各自带项目前缀" \
+    "$(printf '%s\n' "$DOC9" | grep -c -E '^curl -fL -o proj-[ab]-source\.zip ' || true)" "2"
+chk "下载目标名互不相同" \
+    "$(printf '%s\n' "$DOC9" | grep -oE '^curl -fL -o [^ ]+' | awk '{print $4}' | sort | uniq -d | wc -l | tr -d ' ')" "0"
+
+# 3) 只解归档、且用对工具
+chk "zip 用 unzip 解" \
+    "$(printf '%s\n' "$DOC9" | grep -c '^unzip -o proj-a-source.zip$' || true)" "1"
+chk "清单/校验文件不被解（没有 tar -xf dist.json 这种假命令）" \
+    "$(printf '%s\n' "$DOC9" | grep -c 'tar -xf.*dist\.json' || true)" "0"
+chk "zip 不会被 tar 解（tar 解不开 zip）" \
+    "$(printf '%s\n' "$DOC9" | grep -c 'tar -xf.*source\.zip' || true)" "0"
+chk "PowerShell 那版用 Expand-Archive" \
+    "$(printf '%s\n' "$DOC9" | grep -c 'Expand-Archive -Force -Path "proj-a-source.zip"' || true)" "1"
+
+# 4) 分卷先拼回父文件再解（`<文件>-volNN` 是 pack-release 的切分规则）
+chk "分卷用 cat 拼回父文件" \
+    "$(printf '%s\n' "$DOC9" | grep -c '^cat proj-c-big-2026-01-01.tar.gz-vol\* > proj-c-big-2026-01-01.tar.gz$' || true)" "1"
+chk "拼回来之后按 tar.gz 解（bash / PowerShell 各一条）" \
+    "$(printf '%s\n' "$DOC9" | grep -c '^tar -xf proj-c-big-2026-01-01.tar.gz$' || true)" "2"
+chk "分卷自己不当作归档解" \
+    "$(printf '%s\n' "$DOC9" | grep -cE '^(unzip|tar -xf) proj-c-big.*-vol' || true)" "0"
+chk "PowerShell 用 copy /b 拼分卷" \
+    "$(printf '%s\n' "$DOC9" | grep -c 'cmd /c copy /b' || true)" "1"
+
+# 5) 生成块里的**命令名和路径**必须和现状一致（都是被手改过、又被重新生成冲掉的：
+#    块是引擎生成的，手改一定会丢，所以只能盯生成器）
+chk "块头写的是 retire 之后的命令名 wtool publish-release" \
+    "$(printf '%s\n' "$DOC9" | grep -c '由 `wtool publish-release` 自动重写' || true)" "1"
+chk "块里不再提已退休的 wtool publish（会 die 的老名字）" \
+    "$(printf '%s\n' "$DOC9" | grep -c '`wtool publish`' || true)" "0"
+chk "安装入口是 bootstrap/scripts/install.sh（包里只有这一个）" \
+    "$(printf '%s\n' "$DOC9" | grep -c './bootstrap/scripts/install.sh' || true)" "1"
+
+# 6) 没有资产时不是空白块，而是明说"还没发布过"
+printf '' > "$ROWS"
+DOC9B=$(py "$boot/lib/wtool_plan.py" update-downloads --doc "$DOCS" --rows "$ROWS")
+printf '%s\n' "$DOC9B" | grep -q '还没有发布过任何项目' \
+    && ok '空表时明说「还没有发布过任何项目」' || bad "空表没给说明"
+
+# --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 printf 'release_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
