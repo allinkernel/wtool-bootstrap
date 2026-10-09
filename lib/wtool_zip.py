@@ -4,7 +4,9 @@
 
 为什么不用系统的 `zip` 命令：这台机器上的 Info-ZIP **不设 UTF-8 名字标志**
 （实测 `zip -UN=UTF8 源码.txt` 出来的条目 flag_bits=0，用别的工具解开是乱码），
-而我们的归档名里有中文（`源码.zip` / `release.zip`）。python3 的 zipfile 是
+而我们的归档里**条目名**有中文（`wtool-base/原理.md` 这种路径；资产名本身
+从 2026-10-09 起是 ASCII 的 `source.zip` / `release.zip` —— GitHub 不接受
+非 ASCII 资产名，见 harness/docs/hazards.md H27）。python3 的 zipfile 是
 标准库（引擎本来就依赖 python3），会正确设置 UTF-8 标志，还顺带解决了
 "权限位要不要留住"（output 里的可执行文件必须留住）。
 

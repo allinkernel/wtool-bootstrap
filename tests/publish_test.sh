@@ -3,7 +3,7 @@
 #
 # 全程用打桩的 gh：不碰网络、不碰真 $WTOOL_STATE、不碰 $HOME、不碰真工作区。
 # 验证点：
-#   1. pack-release：源码.zip 里第一层是项目路径（解压到工作区即与 repo sync 一致）、
+#   1. pack-release：source.zip 里第一层是项目路径（解压到工作区即与 repo sync 一致）、
 #      包里不含 .git；相对软链在包里还是软链、指向没被改写
 #   2. pack-release 写出的 docs/download.md 是文本且登记进 generated.tsv；
 #      scripts/downloads.sh **不再生成**（那份清单归 scripts/release.json）
@@ -56,7 +56,8 @@ chmod +x "$T/bin/gh"
 
 # 安静一点：python 别刷 ResourceWarning
 py() { python3 -W ignore "$@"; }
-# 解发布包：源码包/发布包现在是 zip（wtool_zip.py 打的，中文名带 UTF-8 标志）
+# 解发布包：源码包/发布包现在是 zip（wtool_zip.py 打的；资产名是 ASCII 的
+# source.zip / release.zip，包里的**条目名**仍可能是中文，所以 UTF-8 标志照样要设）
 unzip_to() { python3 -W ignore "$WT_ZIP" extract "$1" "$2"; }
 
 # 跑一段读文件的 python：J '<源码；sys.argv[1] 是文件路径，后面跟着其余参数>' <文件> [参数...]
@@ -126,8 +127,8 @@ wt "$T/bin" "$WS1" "$ST1" pack-release terminal/tmux --tag=v-1 > "$T/log1" 2>&1 
 chk "pack-release 退出码 0" "$_rc" "0"
 [ "$_rc" = 0 ] || sed 's/^/     /' "$T/log1"
 REL1="$P1/__release"
-PKG="$REL1/源码.zip"
-if [ -f "$PKG" ]; then ok "产出了源码包 __release/源码.zip"; else bad "没产出源码包"; fi
+PKG="$REL1/source.zip"
+if [ -f "$PKG" ]; then ok "产出了源码包 __release/source.zip"; else bad "没产出源码包"; fi
 [ -f "$REL1/dist.json" ] && ok "写了 __release/dist.json" || bad "没有 __release/dist.json"
 [ -f "$REL1/release.zip" ] && ok "写了 __release/release.zip" || bad "没有 __release/release.zip"
 
@@ -218,6 +219,23 @@ if [ -f "$P1/scripts/release.json" ]; then
 else
     ok "dry-run 没写 scripts/release.json"
 fi
+# --dry-run 要**把资产名打出来**，而且那一串名字必须全是 ASCII（BL-56 / H27：
+# GitHub 把非 ASCII 名改写成 default.zip 且 gh 不报错，dry-run 是发布前唯一的核对时机）。
+# 行首那截标签本身是中文（`wtool:   - [dry-run] 资产（N 个）: `），所以只取
+# **最后一个冒号之后**那截 —— 那才是资产名。
+_aline=$(grep '资产（' "$T/log2" || true)
+_names=${_aline##*: }
+[ -n "$_aline" ] && ok "--dry-run 列出了要传的资产名" \
+    || { bad "--dry-run 没列资产名"; sed 's/^/     /' "$T/log2"; }
+case $_names in
+    *source.zip*) ok "--dry-run 的资产清单里有 source.zip" ;;
+    *) bad "--dry-run 的资产清单里没有 source.zip" "$_names" ;;
+esac
+if LC_ALL=C printf '%s\n' "$_names" | grep -q '[^ -~]'; then
+    bad "--dry-run 的资产清单里有非 ASCII 字符（GitHub 会改名成 default.zip）" "$_names"
+else
+    ok "--dry-run 的资产清单全是 ASCII"
+fi
 
 echo "== 3. publish-release：只上传 __release/ =="
 # ★ .source 是内部标记，不能上传；同时把 --out 也验一下
@@ -232,11 +250,11 @@ grep -q 'release create v-1 --repo allinkernel/wtool-tmux-config' "$T/gh.log" \
     || { bad "没建 __release"; sed 's/^/     /' "$T/gh.log"; }
 grep -q 'release upload v-1 --repo allinkernel/wtool-tmux-config' "$T/gh.log" \
     && ok "上传到同一个仓" || bad "没上传"
-grep -q '源码.zip' "$T/gh.log" && ok "上传了源码.zip（pack-release 的产物）" \
-    || bad "没上传源码.zip"
+grep -q 'source.zip' "$T/gh.log" && ok "上传了source.zip（pack-release 的产物）" \
+    || bad "没上传source.zip"
 grep -q 'release.zip' "$T/gh.log" && ok "上传了 release.zip" || bad "没上传 release.zip"
 chk "★上传的文件里没有 .source（内部标记）" "$(grep -c '\.source' "$T/gh.log" || true)" "0"
-[ -f "$T/out1/源码.zip" ] && ok "--out 收到了产物" || bad "--out 没有产物"
+[ -f "$T/out1/source.zip" ] && ok "--out 收到了产物" || bad "--out 没有产物"
 [ -f "$T/out1/.source" ] && bad "--out 不该带出 .source" || ok "--out 没带出 .source"
 
 echo "== 4. 本地记录 =="
@@ -286,19 +304,24 @@ print(",".join(sorted({k for a in d["assets"] for k in need if k not in a})))' "
     chk "★assets 里没有 .source" "$(J '
 import json, sys
 print(sum(1 for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == ".source"))' "$RJ")" "0"
-    chk "源码.zip 的 role=source" "$(J '
+    # BL-56 / H27：清单里的资产名会**变成线上直链**，非 ASCII 名 GitHub 不接受
+    chk "★assets 的名字全是 ASCII（非 ASCII 会被 GitHub 改写成 default.zip）" "$(J '
 import json, sys
-print(next(a["role"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "源码.zip"))' "$RJ")" "source"
+print(",".join(a["name"] for a in json.load(open(sys.argv[1]))["assets"]
+               if any(ord(c) > 127 for c in a["name"])))' "$RJ")" ""
+    chk "source.zip 的 role=source" "$(J '
+import json, sys
+print(next(a["role"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "source.zip"))' "$RJ")" "source"
     chk "release.zip 的 role=__release" "$(J '
 import json, sys
 print(next(a["role"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "release.zip"))' "$RJ")" "release"
-    chk "源码.zip 的 sha256 和盘上的一致" "$(J '
+    chk "source.zip 的 sha256 和盘上的一致" "$(J '
 import json, sys
-print(next(a["sha256"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "源码.zip"))' "$RJ")" \
+print(next(a["sha256"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "source.zip"))' "$RJ")" \
         "$(sha256sum -- "$PKG" | cut -d' ' -f1)"
-    chk "源码.zip 的 bytes 和盘上的一致" "$(J '
+    chk "source.zip 的 bytes 和盘上的一致" "$(J '
 import json, sys
-print(next(a["bytes"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "源码.zip"))' "$RJ")" \
+print(next(a["bytes"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == "source.zip"))' "$RJ")" \
         "$(wc -c < "$PKG" | tr -d ' ')"
 else
     bad "没有 scripts/release.json"
@@ -654,7 +677,7 @@ else
     ok "scripts/publish.sh 没被调用（文件存在不再等于能力声明）"
 fi
 chk "引擎照样打出了源码包" \
-    "$([ -f "$WS13/legacy/__release/源码.zip" ] && echo yes || echo no)" "yes"
+    "$([ -f "$WS13/legacy/__release/source.zip" ] && echo yes || echo no)" "yes"
 _rc=0
 wt "$T/bin" "$WS13" "$ST13" publish-release legacy --tag=l-1 > "$T/log13d" 2>&1 || _rc=$?
 chk "publish-release legacy 退出码 0" "$_rc" "0"
@@ -718,7 +741,7 @@ git_init "$P15"
 chk "pack-release lnk" \
     "$(wt "$T/bin" "$WS15" "$ST15" pack-release lnk --repo=fakeowner/lnk --tag=lnk-1 > "$T/log15" 2>&1 && echo 0 || echo 1)" "0"
 mkdir -p "$T/x15"
-unzip_to "$P15/__release/源码.zip" "$T/x15" || true
+unzip_to "$P15/__release/source.zip" "$T/x15" || true
 
 B="$T/x15/wtool/lnk"
 chk "相对软链的指向没被改写" "$(readlink "$B/themes/alias.zsh-theme")" "real.zsh-theme"

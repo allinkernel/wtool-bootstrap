@@ -449,16 +449,16 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 |---|---|---|---|
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
 | sudo-install | `tests/provision_test.sh` | 40 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
-| publish | `tests/publish_test.sh` | 124 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行） |
+| publish | `tests/publish_test.sh` | 128 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行）、**资产名全是 ASCII**（`--dry-run` 打出的清单 + `release.json` 的 `assets[]` —— H27 / ADR-0040） |
 | table | `tests/table_test.sh` | 94 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
-| release | `tests/release_test.sh` | 71 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷、**`unpack-release --dry-run` 不写 `__output/`**、**`--from=<目录>` 真被用上**（这两个原来都被静默忽略/无守卫） |
+| release | `tests/release_test.sh` | 94 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷、**`unpack-release --dry-run` 不写 `__output/`**、**`--from=<目录>` 真被用上**（这两个原来都被静默忽略/无守卫）、**资产名全是 ASCII + 上一版留下的中文名报一声再删**（H27 / ADR-0040） |
 | contract | `tests/contract_test.sh` | 250 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同）、**uninstall 按路径指项目、且真跑项目脚本**（标记文件 + 参数；解析不出来时明确报错、退出码非 0，`--no-script` 只警告 —— BL-47/BL-48）、**`--id` 老写法给指路**、**`wtool move` 收干净改名残留 + `--dry-run` 零副作用**、**手工 mv 的残渣 `wtool check` 必须报出来**（旧 env 块 / 悬空链 / registry 旧行 —— ADR-0037，场景 17） |
 | docker-build | `tests/docker_build_test.sh` | 101 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错、**产物账本**（格式/来源/整表重写幂等/dry-run 不写/看板「下gz包」四种来源值/按项目分开/一行一个层目录含 `lang/x`/失败路径也重写，ADR-0036）、**`--rebuild` 绕过三条跳过判据**、**导出被拒不留残骸且重跑不被当成已导出**、**代理与本地镜像目录真的传进容器**、**构建日志保留 `<项目 id>` 里的 `/`** |
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 50 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描（**被拒之后重跑不许被当成已导出**）、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **849** 条断言（2026-10-04 实测：`cd bootstrap/tests && ./run_all.sh`；
+共 **876** 条断言（2026-10-09 实测：`cd bootstrap/tests && ./run_all.sh`；
 `run_all.sh` **文件头**注释里那几行逐组条数也同步成了这一版，但**以它跑出来的 PASS 行为准**）：
 
 ```sh
@@ -868,9 +868,9 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 | 项目 | 打什么 |
 |---|---|
-| **有**构建能力（`scripts/build.sh`，或 `kind="docker"` + `build/layers.tsv`），且 `__output/` 里有文件 | `源码.zip` **和** `release.zip`（两个都打，行为不变） |
+| **有**构建能力（`scripts/build.sh`，或 `kind="docker"` + `build/layers.tsv`），且 `__output/` 里有文件 | `source.zip` **和** `release.zip`（两个都打，行为不变） |
 | **有**构建能力，但 `__output/` 是空的 | **报错**（那是"忘了 build"，装出来会是半成品） |
-| **没有**构建能力（纯源码 / 纯声明式） | **只打 `源码.zip`** |
+| **没有**构建能力（纯源码 / 纯声明式） | **只打 `source.zip`** |
 
 判据是"**磁盘上有没有产物**"（`__output/` 里有没有文件）**加上**"它有没有本事产出产物"，
 两半都看（`wtool_plan.py` 的 `has_build_capability()`，一处判据、多处复用）。
@@ -879,11 +879,18 @@ apt-get update && apt-get install -y --no-install-recommends \
 release 包 3 个文件 2210 字节，而且那 3 个是源码包的**子集**，两个包发的是同一批东西。
 反过来，一个**没有** `build.sh` 却手工放了 `__output/` 的项目照样两个包 —— 不静默丢东西。
 
+> ‼️ **资产名一律 ASCII**（`source.zip` / `source-hash.txt`）：GitHub **不接受非 ASCII
+> 资产名**，`源码.zip` 传上去会被它改写成 `default.zip` 且 `gh` 不报错 —— 下载页那两条
+> 直链就 404（现象 / 复现见 `harness/docs/hazards.md` **H27**，决策见 **ADR-0040**）。
+> 名字在 `lib/wtool_fs.sh` 里只定义一次（`WT_SOURCE_ZIP` / `WT_SOURCE_HASH`）。
+> `pack-release` 重跑时会把上一版留下的中文名（`源码.zip` / `源码-hash.txt` /
+> `源码.zip-vol*`）**报一声再删掉** —— 留着会被 `publish-release` 当资产传上去。
+
 | 文件 | 内容 |
 |---|---|
-| `源码.zip` | 项目目录。**真读 `.gitignore`**（git 可用就让 `git ls-files -co --exclude-standard` 算，否则自带解析器），并永远排除 `__output/`、`__release/`。包内第一层是 `wtool/<项目路径>/`，所以解压到工作区上一层得到的路径和 `repo sync` 一致；另带 `wtool/.wtool-dist/<路径（斜杠换成连字符）>.json` 发布副本标记（解压副本免 `--force`，`head=` 有出处） |
+| `source.zip` | 项目目录。**真读 `.gitignore`**（git 可用就让 `git ls-files -co --exclude-standard` 算，否则自带解析器），并永远排除 `__output/`、`__release/`。包内第一层是 `wtool/<项目路径>/`，所以解压到工作区上一层得到的路径和 `repo sync` 一致；另带 `wtool/.wtool-dist/<路径（斜杠换成连字符）>.json` 发布副本标记（解压副本免 `--force`，`head=` 有出处） |
 | `release.zip` | `__output/` 里的东西 + **声明面**（`wtool.xml` / `env.zsh` / `env.bash`）。包内结构就是项目根的镜像，解压即到位。**只在有构建产物时产出** |
-| `源码-hash.txt` | `源码.zip` 的 sha256 |
+| `source-hash.txt` | `source.zip` 的 sha256 |
 | `release-hash.txt` | `release.zip` 的 sha256（只在有 `release.zip` 时写） |
 | `dist.json` | 每卷的名字 / sha256 / 大小，**按顺序逐个声明**；`how` 跟着包的内容说（只有源码包时说"源码会铺回项目目录"） |
 | `.source` | 内部来源标记：`packed` + repo / tag / commit / 时间（**不上传、不进清单**） |
@@ -892,7 +899,8 @@ release 包 3 个文件 2210 字节，而且那 3 个是源码包的**子集**�
   **切开的原始大文件不留在 __release/**（它正是传不上去的那个）
 - 项目有 `build.sh` 而 `__output/` 是空的 → **报错**（那是"忘了 build"，装出来会是半成品）
 - 归档是 zip，由 `lib/wtool_zip.py` 打（系统的 Info-ZIP 在这台机器上**不设 UTF-8
-  名字标志**，中文名到别的工具里就是乱码；python3 的 zipfile 会设）
+  名字标志**，包里的**条目名**有中文（`wtool-base/原理.md` 这种路径）到别的工具里
+  就是乱码；python3 的 zipfile 会设）
 - **相对软链保留为软链**（不是拷成实体），指向不被改写
 
 另外往**项目目录里**写 `docs/download.md`（给人看的下载页，**要进 Git**）。
@@ -961,6 +969,9 @@ wtool publish-release tmux --out=/tmp/pkg      # 发布完把 __release/ 里的�
 - **只上传 `<项目>/__release/` 里已有的文件**（`find -maxdepth 1 -type f`，内部的 `.source`
   标记排除在外）。它**不替你打包**（没有 `dist.json` 就警告并提示先 `pack-release`），
   也**不再调任何项目脚本**
+- `--dry-run` 除了"上传 N 个文件"，还会**把资产名逐个打出来** —— 发布前这是唯一能核对
+  "线上会叫什么"的时机：GitHub **不接受非 ASCII 资产名**，非 ASCII 名传上去会被它
+  改写成 `default.zip` 而 `gh` 不报错（**H27**、ADR-0040）。资产名现在一律 ASCII
 - `__release/.source` 是 `downloaded` → **拒绝**："不能把别人打的包当自己的发出去"
 - 项目不是 git 仓库、或工作区有**未提交改动** → 拒绝（`--force` 跳过；
   wtool 自己生成的文件 —— `release.json` / `download.md` —— 已豁免，否则一次发布会堵死下一次）

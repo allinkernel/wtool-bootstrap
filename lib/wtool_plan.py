@@ -3646,7 +3646,7 @@ def download_doc(args):
     # （ADR-0039）。
     if "release" in roles.values():
         unpack_what = "拼分卷 + 解到 __output/"
-        tail = ["`install` 只认 `release.zip`（产物包），不需要 `源码.zip`。"]
+        tail = ["`install` 只认 `release.zip`（产物包），不需要 `source.zip`。"]
     else:
         unpack_what = "拼分卷 + 把源码铺回项目目录"
         tail = ["这一版**只有源码包**：这个项目没有构建产物（没有 `scripts/build.sh`、",

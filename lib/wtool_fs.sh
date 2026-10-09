@@ -1108,10 +1108,17 @@ EOF
 #
 # 归档用 lib/wtool_zip.py（python3 zipfile）而不是系统的 zip 命令：
 # 这台机器上的 Info-ZIP **不设 UTF-8 名字标志**（实测 flag_bits=0），
-# 而归档名里有中文（源码.zip / release.zip），用别的工具解开就是乱码。
-# 它和 tar/gzip 一样只是个工具，由这一层调用、写调用方给的路径。
+# 而归档里的**条目名**有中文（`wtool-base/原理.md` 这种路径），用别的工具解开
+# 就是乱码。它和 tar/gzip 一样只是个工具，由这一层调用、写调用方给的路径。
+#
+# ‼️ **资产名必须是纯 ASCII**：GitHub **不接受非 ASCII 资产名** —— `源码.zip`
+#    传上去被它改写成 `default.zip`，`download-release` 那两条直链 404
+#    （现象 / 复现 / 判据见 harness/docs/hazards.md **H27**，决策见 **ADR-0040**）。
+#    所以这两个名字只在这里定义一次，pack / unpack / 分卷 / 提示文字全引用它们。
 # ==========================================================================
 WT_ZIP_TOOL="$here/lib/wtool_zip.py"
+WT_SOURCE_ZIP="source.zip"          # 源码包（2026-10-09 前叫 `源码.zip`）
+WT_SOURCE_HASH="source-hash.txt"    # 源码包的 sha256（2026-10-09 前叫 `源码-hash.txt`）
 
 wt_sha256() { sha256sum -- "$1" | cut -d' ' -f1; }
 wt_bytes()  { wc -c < "$1" | tr -d ' '; }
@@ -1181,13 +1188,13 @@ wt_pack_release() {
     case $_pk_mode in both | need-build | source-only) ;; *) _pk_mode=both ;; esac
 
     if wt_dry; then
-        wt_step "[dry-run] 源码.zip  ← $_pk_nsrc 个文件（已按 .gitignore 过滤，永远排除 __output/ __release/）"
+        wt_step "[dry-run] $WT_SOURCE_ZIP  ← $_pk_nsrc 个文件（已按 .gitignore 过滤，永远排除 __output/ __release/）"
         if [ "$_pk_mode" = source-only ]; then
             wt_step "[dry-run] 不打 release.zip —— 这个项目没有构建能力，release 包只会是声明面（源码包的子集）"
-            wt_step "[dry-run] 写 $_pk_pub/：dist.json、源码-hash.txt、超 $_pk_vol 就切分卷"
+            wt_step "[dry-run] 写 $_pk_pub/：dist.json、$WT_SOURCE_HASH、超 $_pk_vol 就切分卷"
         else
             wt_step "[dry-run] release.zip ← $_pk_nrel 个文件 + 声明面 ${_pk_declare:-（无）}"
-            wt_step "[dry-run] 写 $_pk_pub/：dist.json、源码-hash.txt、release-hash.txt、超 $_pk_vol 就切分卷"
+            wt_step "[dry-run] 写 $_pk_pub/：dist.json、$WT_SOURCE_HASH、release-hash.txt、超 $_pk_vol 就切分卷"
         fi
         wt_step "[dry-run] 写 $_pk_dir/docs/download.md 和 $_pk_pub/.source（来源标记）"
         wt_step "[dry-run] 发布地址 https://github.com/$_pk_repo/releases/download/$_pk_tag/"
@@ -1208,9 +1215,24 @@ wt_pack_release() {
     wt_run mkdir -p -- "$_pk_pub"
     # 只清掉"这次会重新生成"的文件。__release/ 也可能是 unpack-release 的下载落点，
     # 把用户下下来的东西删了是最难解释的那种事故。
-    rm -f -- "$_pk_pub/源码.zip" "$_pk_pub/release.zip" "$_pk_pub/dist.json" \
-             "$_pk_pub/源码-hash.txt" "$_pk_pub/release-hash.txt" 2>/dev/null || true
-    rm -f -- "$_pk_pub/源码.zip-vol"* "$_pk_pub/release.zip-vol"* 2>/dev/null || true
+    #
+    # ‼️ 2026-10-09 之前的版本打的源码包叫**中文名**（`源码.zip` / `源码-hash.txt`，
+    #    BL-56 / ADR-0040）。这一版不会再产生它们，而 publish-release 是按
+    #    "目录里实际有什么"上传的 —— 留着就会被当资产传上去，GitHub 再把它
+    #    改写成 `default.zip`（H27）。所以**先报一声**再连它们一起清掉。
+    _pk_legacy=""
+    for _pk_o in 源码.zip 源码-hash.txt; do
+        if [ -e "$_pk_pub/$_pk_o" ]; then _pk_legacy="$_pk_legacy $_pk_o"; fi
+    done
+    if [ -n "$_pk_legacy" ]; then
+        wt_warn "__release/ 里还有旧的中文资产名（$_pk_legacy）—— 这一版改用 $WT_SOURCE_ZIP / $WT_SOURCE_HASH，"
+        wt_warn "  旧的留着会被 publish-release 当资产传上去（GitHub 会改写成 default.zip，见 H27），已删除"
+    fi
+    rm -f -- "$_pk_pub/$WT_SOURCE_ZIP" "$_pk_pub/release.zip" "$_pk_pub/dist.json" \
+             "$_pk_pub/$WT_SOURCE_HASH" "$_pk_pub/release-hash.txt" \
+             "$_pk_pub/源码.zip" "$_pk_pub/源码-hash.txt" 2>/dev/null || true
+    rm -f -- "$_pk_pub/$WT_SOURCE_ZIP-vol"* "$_pk_pub/release.zip-vol"* \
+             "$_pk_pub/源码.zip-vol"* 2>/dev/null || true
 
     # 2) 两个包
     #
@@ -1243,11 +1265,11 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     case $_pk_rel in ..|../*|/*) _pk_rel=$_pk_pid ;; esac
 
     if [ "$_pk_nsrc" -gt 0 ]; then
-        wt_zip_create "$_pk_pub/源码.zip" "$_pk_dir" "$_pk_scratch/source.files" \
+        wt_zip_create "$_pk_pub/$WT_SOURCE_ZIP" "$_pk_dir" "$_pk_scratch/source.files" \
             --prefix="wtool/$_pk_rel/" \
             --extra "$_pk_scratch/dist/.wtool-dist/$_pk_dashed.json" \
                     "wtool/.wtool-dist/$_pk_dashed.json"
-        wt_hash_file "$_pk_pub/源码.zip" > "$_pk_pub/源码-hash.txt"
+        wt_hash_file "$_pk_pub/$WT_SOURCE_ZIP" > "$_pk_pub/$WT_SOURCE_HASH"
     else
         wt_warn "源码包是空的（.gitignore 是否把什么都排除了？），跳过"
     fi
@@ -1267,12 +1289,12 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     # 3) 分卷（大包传不上去：实测直连 ~237KB/s，几分钟断一次）
     : > "$_pk_scratch/rows.tsv"
     _pk_volbytes=$(wt_size_bytes "$_pk_vol")
-    for _pk_name in 源码.zip release.zip; do
+    for _pk_name in "$WT_SOURCE_ZIP" release.zip; do
         [ -f "$_pk_pub/$_pk_name" ] || continue
         _pk_b=$(wt_bytes "$_pk_pub/$_pk_name")
         case $_pk_name in
-            源码.zip) _pk_role=source ;;
-            *)        _pk_role=release ;;
+            "$WT_SOURCE_ZIP") _pk_role=source ;;
+            *)                _pk_role=release ;;
         esac
         printf '%s\t%s\t%s\t%s\t\n' "$_pk_name" "$(wt_sha256 "$_pk_pub/$_pk_name")" \
             "$_pk_b" "$_pk_role" >> "$_pk_scratch/rows.tsv"

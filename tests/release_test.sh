@@ -3,7 +3,7 @@
 #
 # 全程在临时目录里跑，不碰真 $HOME、不碰真工作区、不连网。
 # 验证点：
-#   1. 源码.zip **真的读了 .gitignore**，而且永远排除 __output/ __release/
+#   1. source.zip **真的读了 .gitignore**，而且永远排除 __output/ __release/
 #      （不读的话 GB 级的 __output/ 会被原样打进源码包 —— 实测过）
 #   2. release.zip 带声明面（wtool.xml + env 文件），只下它也能 wtool install
 #   3. dist.json：每卷的名字 / sha256 / 大小，按顺序逐个声明
@@ -77,7 +77,7 @@ git -C "$P" -c user.name=t -c user.email=t@t commit -qm init
 "$WT" pack-release "$P" --tag=v1.0 --repo=fakeowner/wtool-tmux > "$T/pack1.log" 2>&1 \
     || bad "pack-release 执行" "$(cat "$T/pack1.log")"
 
-for f in 源码.zip release.zip dist.json 源码-hash.txt release-hash.txt; do
+for f in source.zip release.zip dist.json source-hash.txt release-hash.txt; do
     [ -f "$P/__release/$f" ] && ok "__release/$f 产出了" || bad "__release/$f 没产出"
 done
 [ -f "$P/scripts/downloads.sh" ] && bad "scripts/downloads.sh 又出现了（ADR-026 已经删掉它）" \
@@ -86,8 +86,20 @@ done
 check "__release/.source 记了来源是本地打包" "packed" \
     "$(cut -f1 < "$P/__release/.source" 2>/dev/null || echo 无)"
 
+# 1a) 资产名必须是**纯 ASCII**（BL-56 / ADR-0040）：GitHub 不接受非 ASCII 资产名，
+#     `源码.zip` 传上去会被它改写成 `default.zip`，下载页那两条直链就 404（H27）。
+if LC_ALL=C ls -A "$P/__release" | grep -q '[^ -~]'; then
+    bad "资产名里有非 ASCII 字符（GitHub 会改名成 default.zip）" \
+        "$(LC_ALL=C ls -A "$P/__release" | grep '[^ -~]')"
+else
+    ok "资产名全是 ASCII（BL-56：GitHub 只接受 ASCII 资产名）"
+fi
+[ -e "$P/__release/源码.zip" ] && bad "还在产出中文名 源码.zip" || ok "不再产出 源码.zip"
+[ -f "$P/__release/source-hash.txt" ] && ok "校验文件写成 source-hash.txt" \
+    || bad "没产出 source-hash.txt"
+
 # 1) 源码包：.gitignore 生效
-SRC="$P/__release/源码.zip"
+SRC="$P/__release/source.zip"
 zhave "$SRC" "wtool/terminal/tmux/tmux.conf" && ok "源码包第一层是 wtool/<项目路径>" \
     || bad "源码包路径不对" "$(zlist "$SRC" | head -5)"
 zlist "$SRC" | grep -q '/__output/' && bad "__output/ 被打进源码包了" \
@@ -157,7 +169,7 @@ chk "每一卷都声明了拼给谁" \
     "$(py -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 names={v["of"] for v in d["volumes"]}
-print(",".join(sorted(names)))' "$D")" "release.zip,源码.zip"
+print(",".join(sorted(names)))' "$D")" "release.zip,source.zip"
 check "分卷的 sha256 和磁盘一致" "$(zsha "$P/__release/release.zip-vol01")" \
     "$(py -c 'import json,sys
 d=json.load(open(sys.argv[1]))
@@ -237,7 +249,7 @@ cp -a "$P" "$P2b_SUB"
 rm -rf -- "$P2b_SUB/__release"
 "$WT" pack-release "$P2b_SUB" --tag=v1.0 --repo=fakeowner/wtool-tmux --volume-size=64M \
     > "$T/pack2b.log" 2>&1 || bad "pack-release（不切卷，拿来做旧布局包）" "$(cat "$T/pack2b.log")"
-cp "$P2b_SUB/__release/源码.zip" "$T/oldpkg/"
+cp "$P2b_SUB/__release/source.zip" "$T/oldpkg/"
 py - "$P2b_SUB/__release/release.zip" "$T/oldpkg/release.zip" "$P2b_SUB/__release/dist.json" "$T/oldpkg/dist.json" <<'PY'
 import hashlib, json, os, shutil, sys, tempfile, zipfile
 src, dst, dsrc, ddst = sys.argv[1:5]
@@ -263,7 +275,7 @@ for v in d.get("volumes", []):
         v["bytes"] = len(data)
 json.dump(d, open(ddst, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PY
-cp "$T/oldpkg/dist.json" "$T/oldpkg/源码.zip" "$T/oldpkg/release.zip" "$P2b/__release/"
+cp "$T/oldpkg/dist.json" "$T/oldpkg/source.zip" "$T/oldpkg/release.zip" "$P2b/__release/"
 "$WT" unpack-release "$P2b" > "$T/unpack2b.log" 2>&1 \
     || bad "unpack-release 跑旧布局的包" "$(cat "$T/unpack2b.log")"
 grep -q 'mv release __output' "$T/unpack2b.log" \
@@ -297,8 +309,8 @@ XML
 git -C "$P2c" add -A; git -C "$P2c" -c user.name=t -c user.email=t@t commit -qm init
 "$WT" pack-release "$P2c" --tag=v1 > "$T/pack2c.log" 2>&1 \
     || bad "pack-release 跑不动" "$(cat "$T/pack2c.log")"
-_SRC=$(ls "$P2c"/__release/源码.zip "$P2c"/__release/*source*.zip 2>/dev/null | head -1)
-if [ -n "$_SRC" ]; then
+_SRC="$P2c/__release/source.zip"
+if [ -f "$_SRC" ]; then
     _bad=$(python3 - "$_SRC" <<'PY'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as z:
@@ -362,8 +374,8 @@ git -C "$P5" init -q && git -C "$P5" add -A \
     && git -C "$P5" -c user.name=t -c user.email=t@t commit -qm init
 "$WT" pack-release "$P5" --tag=v1 --repo=fakeowner/zsh > "$T/pack5.log" 2>&1 \
     || bad "纯声明式项目 pack-release 执行" "$(cat "$T/pack5.log")"
-[ -f "$P5/__release/源码.zip" ] && ok "源码包照常产出" || bad "源码包没产出"
-[ -f "$P5/__release/源码-hash.txt" ] && ok "源码包的 sha256 也写了" || bad "源码-hash.txt 没产出"
+[ -f "$P5/__release/source.zip" ] && ok "源码包照常产出" || bad "源码包没产出"
+[ -f "$P5/__release/source-hash.txt" ] && ok "源码包的 sha256 也写了" || bad "source-hash.txt 没产出"
 [ -f "$P5/__release/release.zip" ] \
     && bad "还是打了 release.zip（没有构建能力时不该打，ADR-0039）" \
     || ok "没有 release.zip（没有构建能力的项目只发源码包）"
@@ -384,13 +396,32 @@ grep -q '只有源码包' "$P5/docs/download.md" \
 grep -q 'release\.zip' "$P5/docs/download.md" \
     && bad "下载页还在提 release.zip（那一版没有这个文件）" \
     || ok "下载页没再提 release.zip"
+# 下载页上的直链名字必须是新的 ASCII 名（判据：BL-56 / H27）
+grep -q "releases/download/v1/source\.zip" "$P5/docs/download.md" \
+    && ok "下载页的直链指向 source.zip" || bad "下载页的直链没指向 source.zip"
+grep -q '源码\.zip' "$P5/docs/download.md" \
+    && bad "下载页里还写着中文名 源码.zip" || ok "下载页里没有中文资产名"
+
+# 4b) 上一版留下的**中文资产名**：重跑 pack-release 要报一声再清掉 ——
+#     留着的话 publish-release 会把它当资产一起传上去（GitHub 改写成 default.zip，H27）
+printf 'old\n' > "$P5/__release/源码.zip"
+printf 'old\n' > "$P5/__release/源码-hash.txt"
+printf 'old\n' > "$P5/__release/源码.zip-vol01"
+"$WT" pack-release "$P5" --tag=v1 --repo=fakeowner/zsh > "$T/pack5b.log" 2>&1 \
+    || bad "重跑 pack-release（清旧中文名）" "$(cat "$T/pack5b.log")"
+_oldnames=$(LC_ALL=C ls -A "$P5/__release" | grep '[^ -~]' || true)
+[ -z "$_oldnames" ] && ok "重跑之后 __release/ 里没有中文名资产了" \
+    || bad "旧的中文名还留着（publish-release 会传上去）" "$_oldnames"
+grep -q '旧的中文资产名' "$T/pack5b.log" && ok "pack-release 报了一声才删（不是静默删）" \
+    || bad "清旧名时没提示" "$(cat "$T/pack5b.log")"
+[ -f "$P5/__release/source.zip" ] && ok "新的 source.zip 照常产出" || bad "新的 source.zip 没产出"
 
 # 只有源码包的机器：下载 → 解包 → **源码铺回项目目录**（否则 install 没东西可装）
 P6="$T/ws6/shell/zsh"
 export WTOOL_ROOT="$T/ws6"
 mkdir -p "$P6/__release"
 cp "$P5/__release/dist.json" "$P6/__release/"
-cp "$P5/__release/源码.zip" "$P6/__release/"
+cp "$P5/__release/source.zip" "$P6/__release/"
 "$WT" unpack-release "$P6" > "$T/unpack6.log" 2>&1 \
     || bad "只有源码包也能 unpack" "$(cat "$T/unpack6.log")"
 [ -f "$P6/wtool.xml" ] && ok "源码铺回项目目录了（wtool.xml 到位）" \
