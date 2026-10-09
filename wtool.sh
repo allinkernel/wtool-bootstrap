@@ -32,11 +32,14 @@
 #                       读**项目里提交的** scripts/release.json → 下到 <项目>/__release/
 #                       只下载 + 校验，**不解包**（解包是 unpack-release）
 #   wtool pack-release   <项目>... [--tag=T] [--repo=owner/repo] [--volume-size=32M]
-#                       打包到 <项目>/__release/：源码.zip、release.zip（大的切分卷）、
-#                       dist.json、两个 -hash.txt、.source 来源标记，
-#                       另写 docs/download.md
+#                       打包到 <项目>/__release/：源码.zip（大的切分卷）、dist.json、
+#                       源码-hash.txt、.source 来源标记，另写 docs/download.md；
+#                       **有构建产物的项目**再加一个 release.zip + release-hash.txt
+#                       （没有 __output/ 也没有 build/layers.tsv 的项目只发源码包，
+#                         见 docs/adr/0039）
 #   wtool unpack-release <项目>... [--from=目录]
 #                       照 dist.json 校验每卷 sha256 → 拼接 → 解到 __output/
+#                       （**只有源码包**的版本改为把源码铺回项目目录 —— 那就产物）
 #   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
 #                       把 <项目>/__release/ 里的东西传到 GitHub Release（**只上传**），
 #                       成功之后写 scripts/release.json（下载清单，记得提交）
@@ -2315,9 +2318,11 @@ cmd_sudo_bootstrap() {
 # --------------------------------------------------------------------------
 # pack-release：打包 → <项目>/__release/
 #
-# 产出全部落在 __release/：源码.zip、release.zip、（超 32M 就切分卷）、dist.json、
-# 两个 -hash.txt，外加一个 `.source` 来源标记（`packed` / `downloaded` ——
+# 产出全部落在 __release/：源码.zip、（超 32M 就切分卷）、dist.json、源码-hash.txt，
+# 外加一个 `.source` 来源标记（`packed` / `downloaded` ——
 # publish-release 靠它拒绝"把刚下下来的包又传回去"）。
+# **有构建产物的项目**再加 release.zip + release-hash.txt；没有构建能力的项目
+# 只发源码包（`release.zip` 那时只是声明面、是源码包的子集 —— 见 ADR-0039）。
 # 另外往**项目目录里**写 docs/download.md（给人看的下载页，进 Git）。
 #
 # `scripts/release.json`（下载声明）**不在这里写** —— 它要等上传成功、
@@ -2343,8 +2348,9 @@ cmd_pack_release() {
     done
     [ -n "$_targets" ] || wt_die "用法: wtool pack-release <项目>... [--tag=TAG] [--repo=owner/repo] [--volume-size=32M]
 
-  产出落在 <项目>/__release/：源码.zip、release.zip（大的切分卷）、dist.json、
-  两个 -hash.txt、.source 来源标记；另外写 <项目>/docs/download.md"
+  产出落在 <项目>/__release/：源码.zip（大的切分卷）、dist.json、源码-hash.txt、
+  .source 来源标记；有构建产物的项目再加 release.zip + release-hash.txt；
+  另外写 <项目>/docs/download.md"
     [ -n "$_vol_override" ] || _vol_override=${WTOOL_VOLUME_SIZE:-32M}
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-pack.XXXXXX")

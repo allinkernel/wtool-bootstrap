@@ -1174,24 +1174,35 @@ wt_pack_release() {
                   "$_pk_scratch/declare.tsv" 2>/dev/null || true)
     _pk_nsrc=$(awk 'END{print NR}' "$_pk_scratch/source.files" 2>/dev/null || echo 0)
     _pk_nrel=$(awk 'END{print NR}' "$_pk_scratch/release.files" 2>/dev/null || echo 0)
+    # 打几个包：planner 算的（ADR-0004 / ADR-0039）。取值 both / need-build / source-only。
+    # 读不到就当 both —— 老的 planner 不写这个文件，宁可按老行为打两个包，
+    # 也不要因为读不到一个词就静默少发一个包。
+    _pk_mode=$(cat -- "$_pk_scratch/release.mode" 2>/dev/null || true)
+    case $_pk_mode in both | need-build | source-only) ;; *) _pk_mode=both ;; esac
 
     if wt_dry; then
         wt_step "[dry-run] 源码.zip  ← $_pk_nsrc 个文件（已按 .gitignore 过滤，永远排除 __output/ __release/）"
-        wt_step "[dry-run] release.zip ← $_pk_nrel 个文件 + 声明面 ${_pk_declare:-（无）}"
-        wt_step "[dry-run] 写 $_pk_pub/：dist.json、源码-hash.txt、release-hash.txt、超 $_pk_vol 就切分卷"
+        if [ "$_pk_mode" = source-only ]; then
+            wt_step "[dry-run] 不打 release.zip —— 这个项目没有构建能力，release 包只会是声明面（源码包的子集）"
+            wt_step "[dry-run] 写 $_pk_pub/：dist.json、源码-hash.txt、超 $_pk_vol 就切分卷"
+        else
+            wt_step "[dry-run] release.zip ← $_pk_nrel 个文件 + 声明面 ${_pk_declare:-（无）}"
+            wt_step "[dry-run] 写 $_pk_pub/：dist.json、源码-hash.txt、release-hash.txt、超 $_pk_vol 就切分卷"
+        fi
         wt_step "[dry-run] 写 $_pk_dir/docs/download.md 和 $_pk_pub/.source（来源标记）"
         wt_step "[dry-run] 发布地址 https://github.com/$_pk_repo/releases/download/$_pk_tag/"
         return 0
     fi
 
-    if [ "$_pk_nrel" -le 0 ]; then
-        # 纯声明式项目（只有 wtool.xml + 配置，没有 build/download）本来就没有产物。
-        # 有 build.sh 却拿不出 __output/ 才是真错误 —— 那多半是忘了 build，
-        # 发出去的会是半成品。
-        if [ -f "$_pk_dir/scripts/build.sh" ] || [ -f "$_pk_dir/build.sh" ]; then
-            wt_die "__output/ 里什么都没有 —— 先跑 wtool build ${_pk_pid:-<项目>}（或者 wtool download-release + wtool unpack-release）"
-        fi
-        wt_info "没有 __output/（这个项目没有产物）：release.zip 只带声明面"
+    if [ "$_pk_mode" = need-build ]; then
+        # 有构建能力却拿不出 __output/ —— 那多半是忘了 build，发出去的会是半成品。
+        wt_die "__output/ 里什么都没有 —— 先跑 wtool build ${_pk_pid:-<项目>}（或者 wtool download-release + wtool unpack-release）"
+    fi
+    if [ "$_pk_mode" = source-only ]; then
+        # 纯声明式 / 纯源码项目本来就没有产物（也没有本事产出产物）。
+        # 这时 release 包里**只剩声明面** —— 实测是源码包的子集（tmux：3 个文件 2210 字节
+        # vs 15 个文件 20060 字节），两个包发的是同一批东西。所以只发源码包（ADR-0039）。
+        wt_info "这个项目没有构建产物（没有 __output/，也没有 build/layers.tsv）—— 只发源码包"
     fi
 
     wt_run mkdir -p -- "$_pk_pub"
@@ -1241,12 +1252,17 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
         wt_warn "源码包是空的（.gitignore 是否把什么都排除了？），跳过"
     fi
 
-    : > "$_pk_scratch/release.all"
-    cat -- "$_pk_scratch/release.files" >> "$_pk_scratch/release.all"
-    cut -f2 "$_pk_scratch/declare.tsv" >> "$_pk_scratch/release.all" 2>/dev/null || true
-    LC_ALL=C sort -u -o "$_pk_scratch/release.all" "$_pk_scratch/release.all"
-    wt_zip_create "$_pk_pub/release.zip" "$_pk_dir" "$_pk_scratch/release.all"
-    wt_hash_file "$_pk_pub/release.zip" > "$_pk_pub/release-hash.txt"
+    # release 包：只有**有构建产物**的项目才打（ADR-0039）。
+    # source-only 的项目连 release-hash.txt 都不写 —— 一个指向不存在文件的 hash
+    # 会被 publish-release 当资产传上去（它按 `find __release/ -maxdepth 1 -type f` 算）。
+    if [ "$_pk_mode" != source-only ]; then
+        : > "$_pk_scratch/release.all"
+        cat -- "$_pk_scratch/release.files" >> "$_pk_scratch/release.all"
+        cut -f2 "$_pk_scratch/declare.tsv" >> "$_pk_scratch/release.all" 2>/dev/null || true
+        LC_ALL=C sort -u -o "$_pk_scratch/release.all" "$_pk_scratch/release.all"
+        wt_zip_create "$_pk_pub/release.zip" "$_pk_dir" "$_pk_scratch/release.all"
+        wt_hash_file "$_pk_pub/release.zip" > "$_pk_pub/release-hash.txt"
+    fi
 
     # 3) 分卷（大包传不上去：实测直连 ~237KB/s，几分钟断一次）
     : > "$_pk_scratch/rows.tsv"
@@ -1305,9 +1321,78 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     _pk_n=$(awk -F'\t' '$4=="volume"{v++; next} {n++} END{printf "%d 个文件 / %d 个分卷", n, v}' \
             "$_pk_scratch/rows.tsv")
     wt_info "发布包已生成: $_pk_pub（$_pk_n）"
+    # ⚠️ 写成 if 而不是 `[ ] && cmd`：条件为假时那条命令返回 1，
+    #    在 `set -eu` 下会把整个 wtool 干掉（同一坑见 cmd_check 里的注释）。
+    if [ "$_pk_mode" = source-only ]; then
+        wt_info "  这一版只有源码包（项目没有构建产物，见 ADR-0039）"
+    fi
     wt_info "  下一步: wtool publish-release ${_pk_pid:-<项目>}   # 上传 + 写 scripts/release.json"
     wt_info "  该提交的（文本，进 Git）：docs/download.md 和上传后的 scripts/release.json"
     wt_info "  __release/ 是待上传目录（.gitignore 里，不进 Git）"
+}
+
+# 源码包 → 项目目录。
+#
+# **只在"这一版没有产物包"时才走这条路**（ADR-0039）：项目没有构建能力，
+# 源码就是产物 —— 不铺开的话 `install` 没有东西可装。
+#
+# 包内第一层是 `wtool/<项目相对路径>/`（外加 `wtool/.wtool-dist/<...>.json` 标记）：
+# 那是"解压到工作区**上一层**、得到的路径和 repo sync 一致"的布局。这里的目标是
+# **项目目录本身**，所以要把 `wtool/<相对路径>` 整段前缀剥掉。
+#
+# ‼️ 前缀**有几段取决于项目有多深**（`terminal/tmux` 是两段、`bootstrap` 是一段），
+#    所以不能"剥掉 wtool/ 就行" —— 实测踩过：按"wtool/ 下唯一的顶层目录"剥，
+#    `wtool/terminal/tmux/…` 会铺成 `<项目>/tmux/…`，多出一层，install 找不到 wtool.xml。
+#
+# 所以按打包时**同一条算法**先算一遍相对路径（wtool_fs.sh 里 wt_pack_release 也是这么算的）；
+# 算不出来（项目改过名 —— ADR-0037：身份就是路径）或对不上时，退回读包里
+# `.wtool-dist/<...>.json` 的 `layout` 字段 —— 那记的正是打包时的路径。
+wt_unpack_source_into() {   # <源码包> <项目目录> <scratch>
+    _us_pkg=$1; _us_dir=$2; _us_scratch=$3
+    _us_tmp="$_us_scratch/unpack-src"
+    wt_run rm -rf -- "$_us_tmp"
+    wt_run mkdir -p -- "$_us_tmp"
+    wt_unpack_one "$_us_pkg" "$_us_tmp"
+
+    _us_rel=$(python3 -c 'import os, sys
+print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])))' \
+              "$_us_dir" "$WTOOL_ROOT" 2>/dev/null || true)
+    _us_pay=""
+    case $_us_rel in
+        "" | .. | ../* | /*) ;;                    # 不在工作区里：只能靠包里的标记
+        *) if [ -d "$_us_tmp/wtool/$_us_rel" ]; then _us_pay="$_us_tmp/wtool/$_us_rel"; fi ;;
+    esac
+    if [ -z "$_us_pay" ]; then
+        _us_layout=$(python3 -c '
+import glob, json, os, sys
+for f in sorted(glob.glob(os.path.join(sys.argv[1], "wtool", ".wtool-dist", "*.json"))):
+    try:
+        with open(f, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except Exception:
+        continue
+    lay = (d.get("layout") or "").strip("/")
+    if lay:
+        print(lay)
+        break
+' "$_us_tmp" 2>/dev/null || true)
+        if [ -n "$_us_layout" ] && [ -d "$_us_tmp/$_us_layout" ]; then
+            _us_pay="$_us_tmp/$_us_layout"
+            wt_info "  按包里的标记铺：$_us_layout（和本机的 ${_us_rel:-<相对路径>} 对不上）"
+        fi
+    fi
+    [ -n "$_us_pay" ] || wt_die "源码包里找不到项目目录（期望 wtool/${_us_rel:-<相对路径>}）: $_us_pkg"
+    wt_run mkdir -p -- "$_us_dir"
+    # `/.` 才能连隐藏文件一起铺；`-a` 保留权限位和（相对）软链 —— 和源码包怎么打的对应
+    wt_run cp -a -- "$_us_pay/." "$_us_dir/"
+    # 发布副本标记：解压副本没有 .git，`install` 靠它认出"这是发布副本"、head 才有出处
+    # （wtool.sh 的 wt_release_marker 读的就是 $WTOOL_ROOT/.wtool-dist/<路径换成横线>.json）。
+    # 不铺它的话，"没有 .git 的工作区"上 `wtool install` 会以"不是 git 仓库"拒绝。
+    if [ -d "$_us_tmp/wtool/.wtool-dist" ]; then
+        wt_run mkdir -p -- "$WTOOL_ROOT/.wtool-dist"
+        cp -f -- "$_us_tmp/wtool/.wtool-dist"/*.json "$WTOOL_ROOT/.wtool-dist/" \
+            2>/dev/null || true
+    fi
 }
 
 # 按 dist.json 校验分卷 → 拼接 → 解开到 <项目>/__output/ 和项目根
@@ -1326,6 +1411,11 @@ wt_unpack_release() {
         || wt_die "读不了 dist.json: $_ur_dist"
     _ur_rows="$_ur_scratch/dist.rows.tsv"
     _ur_legacy=$(awk -F'\t' '$1=="meta" && $2=="legacy"{print 1}' "$_ur_rows")
+    # 这一版有没有**产物包**？没有 = 只有源码包（ADR-0039：没有构建能力的项目
+    # 不再打 release.zip）。源码包的语义因此分两种，必须问这一句才知道走哪条：
+    #   有产物包 → 源码包**只校验、不铺开**（install 要的是 __output/）
+    #   没产物包 → 源码就是产物，**必须铺回项目目录**，否则 install 没东西可装
+    _ur_has_rel=$(awk -F'\t' '$1=="file" && $5=="release"{print 1; exit}' "$_ur_rows")
     _ur_tmp="$_ur_scratch/unpack"
 
     # 老格式（astronvim 自己的 publish.sh 写的那种：只有 volumes + compression，
@@ -1354,7 +1444,7 @@ wt_unpack_release() {
                 [ -f "$_ur_pub/$_ur_v" ] || { _ur_lack=$_ur_v; break; }
             done
             if [ -n "$_ur_lack" ]; then
-                if [ "$_ur_role" = "source" ]; then
+                if [ "$_ur_role" = "source" ] && [ -n "$_ur_has_rel" ]; then
                     wt_warn "源码包的分卷不全（缺 $_ur_lack），跳过 —— install 不需要它"
                     continue
                 fi
@@ -1363,7 +1453,7 @@ wt_unpack_release() {
         else
             _ur_out="$_ur_pub/$_ur_name"
             if [ ! -f "$_ur_out" ]; then
-                if [ "$_ur_role" = "source" ]; then
+                if [ "$_ur_role" = "source" ] && [ -n "$_ur_has_rel" ]; then
                     wt_warn "源码包没下，跳过（install 只认 release.zip）: $_ur_name"
                     continue
                 fi
@@ -1377,8 +1467,10 @@ wt_unpack_release() {
         #   而文档说的是"只出计划"。拼卷之后的 sha256 校验在 dry-run 里做不了
         #   （要先拼出来）—— 所以这里明说"没校验"，不假装验过。
         if wt_dry; then
-            if [ "$_ur_role" = "source" ]; then
+            if [ "$_ur_role" = "source" ] && [ -n "$_ur_has_rel" ]; then
                 wt_step "[dry-run] 源码包（只校验、不铺开）: $_ur_name"
+            elif [ "$_ur_role" = "source" ]; then
+                wt_step "[dry-run] 解开源码包 → $_ur_dir（这一版没有产物包，源码就是产物）"
             elif [ -n "$_ur_vols" ]; then
                 wt_step "[dry-run] 拼接分卷并解开 $_ur_name → $_ur_dir/__output/"
             else
@@ -1409,9 +1501,19 @@ wt_unpack_release() {
   期望 sha256: $_ur_sha
   实际 sha256: $_ur_have"
         fi
-        if [ "$_ur_role" = "source" ]; then
-            # 源码包只校验不铺开：install 只消费 release.zip，装东西的人不需要源码
+        if [ "$_ur_role" = "source" ] && [ -n "$_ur_has_rel" ]; then
+            # 有产物包的 release：源码包只校验不铺开（install 只消费 release.zip，
+            # 装东西的人不需要源码）—— 这条**没变**，有构建能力的项目行为一字不改。
             wt_info "源码包校验通过（不铺开）: $_ur_name"
+            _ur_got=$((_ur_got + 1))
+            continue
+        fi
+        if [ "$_ur_role" = "source" ]; then
+            # 这一版**只有源码包**（ADR-0039）：项目没有构建产物，源码就是产物 ——
+            # 不铺开的话 `wtool install` 装的东西一个都不在（实测：只解 release.zip 时
+            # 铺出来的是声明面，`~/.tmux.conf` 那条软链指向的 tmux.conf 根本不存在）。
+            wt_info "解开源码包 → $_ur_dir（这一版没有产物包，源码就是产物）"
+            wt_unpack_source_into "$_ur_out" "$_ur_dir" "$_ur_scratch"
             _ur_got=$((_ur_got + 1))
             continue
         fi
@@ -1429,6 +1531,9 @@ wt_unpack_release() {
         return 0
     fi
     wt_info "unpack-release 完成（只校验 + 铺到 __output/，不做安装）"
+    if [ -z "$_ur_has_rel" ]; then
+        wt_info "  （这一版只有源码包：源码已铺回项目目录，见 ADR-0039）"
+    fi
     wt_info "  下一步: wtool install $_ur_dir"
 }
 

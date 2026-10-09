@@ -864,18 +864,32 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 ### pack-release：产出全部落在 `<项目>/__release/`
 
+**打几个包，看项目有没有构建能力**（ADR-0039）：
+
+| 项目 | 打什么 |
+|---|---|
+| **有**构建能力（`scripts/build.sh`，或 `kind="docker"` + `build/layers.tsv`），且 `__output/` 里有文件 | `源码.zip` **和** `release.zip`（两个都打，行为不变） |
+| **有**构建能力，但 `__output/` 是空的 | **报错**（那是"忘了 build"，装出来会是半成品） |
+| **没有**构建能力（纯源码 / 纯声明式） | **只打 `源码.zip`** |
+
+判据是"**磁盘上有没有产物**"（`__output/` 里有没有文件）**加上**"它有没有本事产出产物"，
+两半都看（`wtool_plan.py` 的 `has_build_capability()`，一处判据、多处复用）。
+第三行为什么不再打 `release.zip`：那种项目 `__output/` 是空的，release 包里**只剩声明面**
+（`wtool.xml` / `env.zsh` / `env.bash`）—— 实测 `terminal/tmux`：源码包 15 个文件 20060 字节、
+release 包 3 个文件 2210 字节，而且那 3 个是源码包的**子集**，两个包发的是同一批东西。
+反过来，一个**没有** `build.sh` 却手工放了 `__output/` 的项目照样两个包 —— 不静默丢东西。
+
 | 文件 | 内容 |
 |---|---|
 | `源码.zip` | 项目目录。**真读 `.gitignore`**（git 可用就让 `git ls-files -co --exclude-standard` 算，否则自带解析器），并永远排除 `__output/`、`__release/`。包内第一层是 `wtool/<项目路径>/`，所以解压到工作区上一层得到的路径和 `repo sync` 一致；另带 `wtool/.wtool-dist/<路径（斜杠换成连字符）>.json` 发布副本标记（解压副本免 `--force`，`head=` 有出处） |
-| `release.zip` | `__output/` 里的东西 + **声明面**（`wtool.xml` / `env.zsh` / `env.bash`）。包内结构就是项目根的镜像，解压即到位 |
-| `源码-hash.txt` / `release-hash.txt` | 各自的 sha256 |
-| `dist.json` | 每卷的名字 / sha256 / 大小，**按顺序逐个声明** |
+| `release.zip` | `__output/` 里的东西 + **声明面**（`wtool.xml` / `env.zsh` / `env.bash`）。包内结构就是项目根的镜像，解压即到位。**只在有构建产物时产出** |
+| `源码-hash.txt` | `源码.zip` 的 sha256 |
+| `release-hash.txt` | `release.zip` 的 sha256（只在有 `release.zip` 时写） |
+| `dist.json` | 每卷的名字 / sha256 / 大小，**按顺序逐个声明**；`how` 跟着包的内容说（只有源码包时说"源码会铺回项目目录"） |
 | `.source` | 内部来源标记：`packed` + repo / tag / commit / 时间（**不上传、不进清单**） |
 
 - 超过 `--volume-size`（默认 32M，或 `WTOOL_VOLUME_SIZE`）就切分卷 `<文件>-volNN`；
   **切开的原始大文件不留在 __release/**（它正是传不上去的那个）
-- 纯声明式项目（没有 `build.sh`、没有 `__output/`）只有源码包 + 只带声明面的
-  `release.zip` —— 只下 `release.zip` 的机器照样能 `wtool install`
 - 项目有 `build.sh` 而 `__output/` 是空的 → **报错**（那是"忘了 build"，装出来会是半成品）
 - 归档是 zip，由 `lib/wtool_zip.py` 打（系统的 Info-ZIP 在这台机器上**不设 UTF-8
   名字标志**，中文名到别的工具里就是乱码；python3 的 zipfile 会设）
@@ -917,8 +931,16 @@ wtool download-release all              # 所有提交了 release.json 的项目
 ```
 读 __release/dist.json → 逐卷校验 sha256 → 按顺序拼接 → 校验整个文件的 sha256
   → role=release 的解到项目根（里面有 __output/ 和声明面）
-  → role=source 的只校验、不铺开（install 只消费 release.zip）
+  → role=source 的：这一版**有**产物包 → 只校验、不铺开（install 只消费 release.zip）
+                    这一版**没有**产物包 → 解到项目目录（源码就是产物，见下）
 ```
+
+**源码包为什么分两种走法**（ADR-0039）：判据是 `dist.json` 里**有没有 `role=release`
+的文件** —— 一个都没有 = 这一版只发了源码包（项目没有构建能力）。那时 `install` 要装的
+东西全在源码里（`install.sh`、`bin/`、env 文件），**不铺开就是"install 时什么都没装"**。
+铺的时候要把 `wtool/<项目相对路径>/` 整段前缀剥掉（前缀有几段取决于项目有多深），
+并把 `wtool/.wtool-dist/<...>.json` 标记放到 `$WTOOL_ROOT/.wtool-dist/` ——
+解压副本没有 `.git`，`install` 靠这个标记才认得出"这是发布副本"而不要求 `--force`。
 
 一份都不缺才算成功；卷坏了 / 缺卷 / 拼接后 sha 不对 → **拒绝解开**（不许留下半个 `__output/`）。
 `--from=目录` 可以指到别处（下载目录），默认是 `<项目>/__release/`。

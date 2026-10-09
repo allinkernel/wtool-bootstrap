@@ -1677,6 +1677,32 @@ def _state_cell(state, color_on):
     return _LBL_COLOR[state] + state + C_OFF
 
 
+def has_project_script(path, name):
+    """项目脚本住在 `scripts/` 下；项目根的老位置仍然认（引擎会给警告）。"""
+    return (os.path.isfile(os.path.join(path, "scripts", name))
+            or os.path.isfile(os.path.join(path, name)))
+
+
+def has_build_capability(path):
+    """这个项目**有没有本事产出 `__output__/`** —— 一处判据，多处复用。
+
+    产出有两条路（ADR-0025 / ADR-0029）：
+
+      · `scripts/build.sh`（项目自己驱动，根目录的老位置仍然认）
+      · `build/layers.tsv`（`kind="docker"` 的项目由**引擎**驱动容器，
+        产物一样落在 `__output__/`，但它**没有** build.sh）
+
+    它决定三件事，必须由同一个函数回答（不然就会出现"表格说能装、打包说没产物"）：
+
+      ① 表格里 `build` / `install` 那一格是不是"待产出"（没有 `__output__/` 就不能装）；
+      ② `install` 对"有构建能力却还没产出"的项目要拦一下；
+      ③ `pack-release` 打几个包（见 `pack_plan` / ADR-0039）：
+         没有构建能力 = 纯源码/纯声明式项目 → **只发源码包**。
+    """
+    return (has_project_script(path, "build.sh")
+            or os.path.isfile(os.path.join(path, "build", "layers.tsv")))
+
+
 def pipeline_states(path, pub, st):
     """算出这个项目在表格里的状态。
 
@@ -1913,8 +1939,7 @@ def command_states(path, pub, st, state_dir):
     acts = st.get("actions") or {}
     out = {}
 
-    has_build = _script("build.sh") or os.path.isfile(
-        os.path.join(path, "build", "layers.tsv"))
+    has_build = has_build_capability(path)
 
     # build
     if not has_build:
@@ -2263,6 +2288,9 @@ RELEASE_PIC = [
     "                                                   +-------( wtool download-release )-----------+",
     "                                                   |",
     "                                                   +--( wtool unpack-release )-->  __output/",
+    "                                                        (no release.zip, i.e. no build ability)",
+    "                                                        (--> the source tree IS the product,",
+    "                                                             so it is unpacked into the project dir)",
 ]
 
 README_TEXT = [
@@ -2273,6 +2301,8 @@ README_TEXT = [
     "  它下完还要再跑一次 wtool unpack-release 才变成能 install 的产物。",
     "  前置没做时 install 会直接报错告诉你去跑哪条，不会替你跑。",
     "  （发布和下载不是「项目能力」，是引擎统一做的 —— 见 harness/docs/adr/0023。）",
+    "  项目**没有构建能力**时（没有 scripts/build.sh、也没有 build/layers.tsv）",
+    "  只发源码包，unpack-release 把源码铺回项目目录 —— 源码就是产物（ADR-0039）。",
 ]
 
 
@@ -2349,7 +2379,8 @@ def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
         _lbl = _hlines[0]
         _pad = " " * max(0, 16 - _width(_lbl))
         out.append("      %s%s%s" % (_lbl, _pad, WT_CMD_OF[_key]))
-    out.append("      解gz包        wtool unpack-release     （装东西那条路上的一步：__release/ → __output/）")
+    out.append("      解gz包        wtool unpack-release     （装东西那条路上的一步：__release/ → __output/；"
+               "只有源码包的版本 → 铺回项目目录）")
     out.append("  想知道某一格**是怎么算出来的**：wtool status <项目>（逐列给状态 + 依据 + 该敲哪条命令）")
     out.append("  格子：%s 这个项目没这项能力   %s 现在就能跑   %s 要先产出 __output/   %s 跑过了   %s 还没发布过   %s 还没装（撤不了）"
                % (LBL_NONE, LBL_CAN, LBL_TODO, LBL_DONE, LBL_UNPUB, LBL_NOTINST))
@@ -3209,13 +3240,38 @@ def release_file_list(project_root):
 
 
 def pack_plan(args):
-    """写三张清单到 scratch：源码包的文件、release 包的文件、声明面。"""
+    """写四张清单到 scratch：源码包的文件、release 包的文件、声明面、**打几个包**。"""
     root = os.path.abspath(args.project)
     scratch = args.scratch
     os.makedirs(scratch, exist_ok=True)
     src_files = source_file_list(root)
     rel_files = release_file_list(root)
     declare = [f for f in DECLARE_FILES if os.path.isfile(os.path.join(root, f))]
+
+    # ── 打几个包（ADR-0039）──────────────────────────────────────────────
+    #
+    # 判据分两半，**都要看，缺一不可**：
+    #
+    #   · 磁盘上到底有没有产物（`__output__/` 里有没有文件）—— 这是事实；
+    #   · 它有没有本事产出产物（`has_build_capability`）—— 这是意图。
+    #
+    #   __output__/ 有文件   → both         两个包（有构建能力的项目，行为一字不改）
+    #   空的 + 有构建能力     → need-build   报错：忘了 build（发出去是半成品）
+    #   空的 + 没构建能力     → source-only  只发源码包
+    #
+    # 为什么"没有构建能力"就不打 release.zip：那种情况下 `release_file_list()`
+    # 是空的，release 包里**只剩声明面**（wtool.xml / env.zsh / env.bash）——
+    # 实测 tmux：源码包 15 个文件 20060 字节，release 包 3 个文件 2210 字节，
+    # 而且那 3 个是源码包的**子集**。两个包发的是同一批东西，一个还是另一个的子集。
+    #
+    # ‼️ 判据是"磁盘上有没有产物"，不是"项目叫什么"：所以一个**没有** build.sh 却
+    #    手工放了 `__output__/` 的项目照样两个包（不静默丢东西）。
+    if rel_files:
+        mode = "both"
+    elif has_build_capability(root):
+        mode = "need-build"
+    else:
+        mode = "source-only"
 
     with open(os.path.join(scratch, "source.files"), "w",
               encoding="utf-8", errors="surrogateescape") as fh:
@@ -3226,8 +3282,12 @@ def pack_plan(args):
     with open(os.path.join(scratch, "declare.tsv"), "w", encoding="utf-8") as fh:
         for name in declare:
             fh.write("%s\t%s\n" % (name, name))
+    # shell 侧（wt_pack_release）读这一个词决定打几个包 —— 计划在这里算，动手在那边
+    # （ADR-0004：Python 只算不写、shell 只写不算）。
+    with open(os.path.join(scratch, "release.mode"), "w", encoding="utf-8") as fh:
+        fh.write(mode + "\n")
     return {"root": root, "source": src_files, "release": rel_files,
-            "declare": declare}
+            "declare": declare, "mode": mode}
 
 
 def write_dist(args):
@@ -3261,13 +3321,29 @@ def write_dist(args):
         # 顺序有意义：volumes 按顺序逐个拼接就是原来的大文件
         "files": files,
         "volumes": volumes,
-        "how": ("把 dist.json 和所有分卷下到项目的 __release/ 目录，然后："
-                "wtool unpack-release <项目> ；wtool install <项目>"),
+        "how": _dist_how(files),
     }
     text = json.dumps(dist, ensure_ascii=False, indent=2) + "\n"
     with open(args.out, "w", encoding="utf-8") as fh:
         fh.write(text)
     return dist
+
+
+def _dist_how(files):
+    """`dist.json` 里的 `how`：**这一步会解出什么**，跟着包的内容说。
+
+    有没有 `role=release` 的文件决定两件事（ADR-0039）：
+
+      · 有   → 解出 `__output/` 和声明面，`install` 装的是构建产物；
+      · 没有 → 这一版只有源码包，"产物"就是源码本身，`unpack-release` 会把它
+               铺回项目目录（纯源码 / 纯声明式项目没有构建这一步可跳）。
+    """
+    if any(f.get("role") == "release" for f in files):
+        return ("把 dist.json 和所有分卷下到项目的 __release/ 目录，然后："
+                "wtool unpack-release <项目> ；wtool install <项目>")
+    return ("这一版只有源码包（项目没有构建产物，源码即产物）。把 dist.json 和所有分卷下到"
+            "项目的 __release/ 目录，然后：wtool unpack-release <项目>"
+            "（源码会铺回项目目录）；wtool install <项目>")
 
 
 def _downloadable_rows(rows):
@@ -3516,9 +3592,13 @@ def release_json(args):
         # 定下来（BL-28）才补得上。补上之前 download-release 不能按 glibc 选包。
         "targets": [{"target": t} for t in targets],
         "assets": assets,
+        # how 要说清"解出来是什么"：只有源码包的版本没有 __output/ 可解（ADR-0039）
         "how": ("wtool download-release %s   # 下到项目的 __release/（按本文件的 sha256 校验）\n"
-                "wtool unpack-release %s     # 拼分卷 + 解到 __output/\n"
-                "wtool install %s            # 装到本机" % (pid, pid, pid)),
+                "wtool unpack-release %s     # %s\n"
+                "wtool install %s            # 装到本机"
+                % (pid, pid,
+                   "拼分卷 + 解到 __output/" if any(a.get("role") == "release" for a in assets)
+                   else "拼分卷 + 把源码铺回项目目录", pid)),
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
@@ -3561,6 +3641,17 @@ def download_doc(args):
             assets.append((row[0], size, row[3] if len(row) > 3 else ""))
 
     _role_cn = {"source": "源码包", "release": "产物包", "volume": "分卷"}
+    # 这一版有没有**产物包**？没有就只有源码包 —— 页面上的说明要跟着变，
+    # 否则会写着"解到 __output/，install 只认 release.zip"，而那两个东西这一版根本不存在
+    # （ADR-0039）。
+    if "release" in roles.values():
+        unpack_what = "拼分卷 + 解到 __output/"
+        tail = ["`install` 只认 `release.zip`（产物包），不需要 `源码.zip`。"]
+    else:
+        unpack_what = "拼分卷 + 把源码铺回项目目录"
+        tail = ["这一版**只有源码包**：这个项目没有构建产物（没有 `scripts/build.sh`、",
+                "也没有 `build/layers.tsv`），源码就是产物 ——",
+                "`unpack-release` 会把源码铺回项目目录，`install` 照常装。"]
     out = ["# 下载 %s" % args.project_id,
            "",
            "这一版：`%s`%s" % (args.tag, ("（%s）" % args.at if args.at else "")),
@@ -3578,16 +3669,14 @@ def download_doc(args):
             "",
             "```sh",
             "wtool download-release %s   # 按仓库里提交的 scripts/release.json 下载 + 校验" % args.project_id,
-            "wtool unpack-release %s     # 拼分卷 + 解到 __output/" % args.project_id,
+            "wtool unpack-release %s     # %s" % (args.project_id, unpack_what),
             "wtool install %s            # 装到本机（登记、软链、shell 集成）" % args.project_id,
             "```",
             "",
             "**只有浏览器的机器**：把上面每个文件点下来，放进项目的 `__release/` 目录，",
             "再在那台机器上跑后两条命令 —— `unpack-release` 认包里的 `dist.json`，",
             "缺了哪一卷它会说清楚。",
-            "",
-            "`install` 只认 `release.zip`（产物包），不需要 `源码.zip`。",
-            ""]
+            ""] + tail + [""]
     print("\n".join(out), end="")
 
 
@@ -4092,6 +4181,7 @@ def main(argv):
             print("source    : %d 个文件" % len(res["source"]))
             print("release   : %d 个文件" % len(res["release"]))
             print("declare   : %s" % (",".join(res["declare"]) or "-"))
+            print("mode      : %s" % res["mode"])
             print("declare_file\t%s" % os.path.join(args.scratch, "declare.tsv"))
         elif args.cmd == "status":
             # 不做彩色：status 是"给你看依据"的，格子值本来就那六个词，一眼能认

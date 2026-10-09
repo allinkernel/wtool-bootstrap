@@ -341,7 +341,11 @@ grep -q '缺分卷' "$T/unpack4.log" && ok "说清了缺哪个卷" \
     || bad "没说清缺卷" "$(cat "$T/unpack4.log")"
 
 # --------------------------------------------------------------------------
-printf '\n== 场景 4：纯声明式项目（没有产物）只发源码包 ==\n'
+printf '\n== 场景 4：没有构建能力的项目（纯声明式）只发源码包 ==\n'
+#   ADR-0039：`__output/` 是空的、也没有构建能力（没有 scripts/build.sh、
+#   没有 build/layers.tsv）→ release.zip 里**只剩声明面**，而那三个文件
+#   （wtool.xml / env.zsh / env.bash）源码包里本来就有。实测 tmux：
+#   源码包 15 个文件 20060 字节 vs release 包 3 个文件 2210 字节 —— 子集。
 P5="$T/ws5/shell/zsh"
 export WTOOL_ROOT="$T/ws5"
 mkdir -p "$P5"
@@ -359,20 +363,82 @@ git -C "$P5" init -q && git -C "$P5" add -A \
 "$WT" pack-release "$P5" --tag=v1 --repo=fakeowner/zsh > "$T/pack5.log" 2>&1 \
     || bad "纯声明式项目 pack-release 执行" "$(cat "$T/pack5.log")"
 [ -f "$P5/__release/源码.zip" ] && ok "源码包照常产出" || bad "源码包没产出"
-[ -f "$P5/__release/release.zip" ] && ok "release.zip 带声明面（只下它也能 install）" \
-    || bad "release.zip 没产出"
-zhave "$P5/__release/release.zip" "wtool.xml" && ok "release.zip 里有 wtool.xml" \
-    || bad "release.zip 里没有 wtool.xml"
+[ -f "$P5/__release/源码-hash.txt" ] && ok "源码包的 sha256 也写了" || bad "源码-hash.txt 没产出"
+[ -f "$P5/__release/release.zip" ] \
+    && bad "还是打了 release.zip（没有构建能力时不该打，ADR-0039）" \
+    || ok "没有 release.zip（没有构建能力的项目只发源码包）"
+[ -f "$P5/__release/release-hash.txt" ] \
+    && bad "还是写了 release-hash.txt（它指向一个不存在的文件，会被当资产传上去）" \
+    || ok "没有 release-hash.txt（不留指向不存在文件的 hash）"
+grep -q '只发源码包' "$T/pack5.log" && ok "pack-release 说清了为什么只发源码包" \
+    || bad "pack-release 没说清" "$(cat "$T/pack5.log")"
+check "dist.json 只声明一个文件" "1" \
+    "$(py -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["files"]))' \
+        "$P5/__release/dist.json")"
+check "声明的那一个是源码包（role=source）" "source" \
+    "$(py -c 'import json,sys
+print(json.load(open(sys.argv[1]))["files"][0]["role"])' "$P5/__release/dist.json")"
+# 下载页要跟着变：不能还写着"install 只认 release.zip"，那一版根本没有它
+grep -q '只有源码包' "$P5/docs/download.md" \
+    && ok "下载页说清了这一版只有源码包" || bad "下载页没说清" "$(cat "$P5/docs/download.md")"
+grep -q 'release\.zip' "$P5/docs/download.md" \
+    && bad "下载页还在提 release.zip（那一版没有这个文件）" \
+    || ok "下载页没再提 release.zip"
 
-# 只下 release.zip 的机器：解出来就能 wtool install
+# 只有源码包的机器：下载 → 解包 → **源码铺回项目目录**（否则 install 没东西可装）
 P6="$T/ws6/shell/zsh"
 export WTOOL_ROOT="$T/ws6"
 mkdir -p "$P6/__release"
 cp "$P5/__release/dist.json" "$P6/__release/"
-cp "$P5/__release/release.zip" "$P6/__release/"
+cp "$P5/__release/源码.zip" "$P6/__release/"
 "$WT" unpack-release "$P6" > "$T/unpack6.log" 2>&1 \
-    || bad "只下 release.zip 也能 unpack" "$(cat "$T/unpack6.log")"
-[ -f "$P6/wtool.xml" ] && ok "只下 release.zip 也有声明面" || bad "声明面没解出来"
+    || bad "只有源码包也能 unpack" "$(cat "$T/unpack6.log")"
+[ -f "$P6/wtool.xml" ] && ok "源码铺回项目目录了（wtool.xml 到位）" \
+    || bad "wtool.xml 没铺出来" "$(cat "$T/unpack6.log")"
+[ -f "$P6/env.zsh" ] && ok "env.zsh 也铺回来了（声明面指向的文件得在）" \
+    || bad "env.zsh 没铺出来"
+[ -e "$P6/__output" ] && bad "凭空造了 __output/（这个项目本来就没有产物）" \
+    || ok "没有凭空造 __output/"
+[ -f "$T/ws6/.wtool-dist/shell-zsh.json" ] \
+    && ok "发布副本标记铺到工作区根（解压副本没有 .git 时 install 靠它免 --force）" \
+    || bad "没铺 .wtool-dist 标记"
+grep -q '源码就是产物' "$T/unpack6.log" \
+    && ok "unpack 说清了走的是「只有源码包」那条路" \
+    || bad "unpack 没说清" "$(cat "$T/unpack6.log")"
+
+# 对照：**有构建能力**的项目，源码包依旧只校验、不铺开（行为一字不改）
+#   自己造一个小项目，不依赖上面任何一个（场景 2 把 $P 的包切成卷了）
+P6c="$T/ws6c/acme/app"; export WTOOL_ROOT="$T/ws6c"
+mkdir -p "$P6c/scripts" "$P6c/__output/bin" "$P6c/src"
+printf 'true\n'                     > "$P6c/scripts/build.sh"
+printf '#!/bin/sh\necho hi\n'       > "$P6c/__output/bin/tool"
+chmod +x "$P6c/__output/bin/tool"
+printf '只在本机、包外的东西\n'      > "$P6c/src/keep.txt"
+cat > "$P6c/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="50"/>
+EOF
+printf '__output/\n__release/\n' > "$P6c/.gitignore"
+git -C "$P6c" init -q && git -C "$P6c" add -A \
+    && git -C "$P6c" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" pack-release "$P6c" --tag=v1 --repo=fakeowner/app > "$T/pack6c.log" 2>&1 \
+    || bad "对照项目 pack-release" "$(cat "$T/pack6c.log")"
+[ -f "$P6c/__release/release.zip" ] && ok "对照：有构建能力的项目照常两个包" \
+    || bad "对照：release.zip 没产出"
+[ -f "$P6c/__release/release-hash.txt" ] && ok "对照：release-hash.txt 也在" \
+    || bad "对照：release-hash.txt 没产出"
+# 换一台"新机器"（没有 src/），只放包 → 源码包不该被铺开
+P6d="$T/ws6d/acme/app"; export WTOOL_ROOT="$T/ws6d"
+mkdir -p "$P6d/__release"
+cp "$P6c/__release/"* "$P6d/__release/"
+"$WT" unpack-release "$P6d" > "$T/unpack6d.log" 2>&1 \
+    || bad "对照 unpack" "$(cat "$T/unpack6d.log")"
+[ -f "$P6d/__output/bin/tool" ] && ok "对照：产物解出来了（__output/）" \
+    || bad "对照：产物没解出来"
+[ -e "$P6d/src" ] && bad "对照：源码包被错误铺开了（src/ 凭空出现）" \
+    || ok "对照：源码包**没有**被铺开（有构建能力的项目行为未变）"
+grep -q '源码包校验通过（不铺开）' "$T/unpack6d.log" \
+    && ok "对照：日志说的还是「只校验、不铺开」" || bad "对照：日志变了"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 5：dry-run 不产文件 ==\n'
